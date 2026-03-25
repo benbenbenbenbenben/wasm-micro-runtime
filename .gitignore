@@ -15,6 +15,7 @@
 *.so
 .clangd
 .DS_Store
+code_analysis_report.log
 *.o
 .aider*
 

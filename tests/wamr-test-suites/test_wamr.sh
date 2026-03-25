@@ -22,6 +22,8 @@ function help()
     echo "                               riscv32|riscv32_ilp32f|riscv32_ilp32d|riscv64|"
     echo "                               riscv64_lp64f|riscv64_lp64d|aarch64|aarch64_vfp)"
     echo "-t set compile type of iwasm(classic-interp|fast-interp|jit|aot|fast-jit|multi-tier-jit)"
+    echo "-u choose unit test folder(s) to run - only available with -s flag set to 'unit'"
+    echo "   accepts multiple folders: -u canonical-abi component-instantiation"
     echo "-M enable multi module feature"
     echo "-p enable multi thread feature"
     echo "-S enable SIMD feature"
@@ -59,6 +61,8 @@ WABT_BINARY_RELEASE="NO"
 TYPE=("classic-interp" "fast-interp" "jit" "aot" "fast-jit" "multi-tier-jit")
 #default target
 TARGET="X86_64"
+UNITTEST_FOUND="NO"
+UNITTEST_FOLDERS=()
 ENABLE_WASI_THREADS=0
 ENABLE_MULTI_MODULE=0
 ENABLE_MULTI_THREAD=0
@@ -95,7 +99,7 @@ REQUIREMENT_NAME=""
 # Initialize an empty array for subrequirement IDs
 SUBREQUIREMENT_IDS=()
 
-while getopts ":s:cabgvt:m:MCpSXexwWEPGQF:j:T:r:A:NU" opt
+while getopts ":s:cu:abgvt:m:MCpSXexwWEPGQF:j:T:r:A:NU" opt
 do
     OPT_PARSED="TRUE"
     case $opt in
@@ -112,6 +116,7 @@ do
             OPTIND=$((OPTIND+1))
             eval "nxarg=\${$((OPTIND))}"
         done
+        UNITTEST_FOUND="YES"
         echo "test following cases: ${TEST_CASE_ARR[@]}"
         ;;
         c)
@@ -122,6 +127,21 @@ do
             echo "cleaned all reports and temp files"
         fi
         exit 0;;
+        u)
+        if [ ${UNITTEST_FOUND} == "YES" ]; then
+            UNITTEST_FOLDERS+=($OPTARG)
+            eval "nxarg=\${$((OPTIND))}"
+            while [[ "${nxarg}" != -* && ${nxarg} ]]; do
+                UNITTEST_FOLDERS+=(${nxarg})
+                OPTIND=$((OPTIND+1))
+                eval "nxarg=\${$((OPTIND))}"
+            done
+            echo "running unit tests: ${UNITTEST_FOLDERS[@]}"
+        else
+            echo "suite flag -s is not set to unit tests"
+            exit 1
+        fi
+        ;;
         a)
         TEST_ALL_AOT_RUNTIME="all"
         echo "test all runtimes in sightglass_aot"
@@ -131,11 +151,11 @@ do
         echo "use a WABT binary release instead of compiling from source code"
         ;;
         t)
-        echo "set compile type of wamr " ${OPTARG}
+        echo "set compile type of wamr:" ${OPTARG}
         if [[ ${OPTARG} != "classic-interp" && ${OPTARG} != "fast-interp" \
             && ${OPTARG} != "jit" && ${OPTARG} != "aot"
             && ${OPTARG} != "fast-jit" && ${OPTARG} != "multi-tier-jit" ]]; then
-            echo "*----- please varify a type of compile when using -t! -----*"
+            echo "*----- please verify a type of compile when using -t! -----*"
             help
             exit 1
         fi
@@ -143,7 +163,7 @@ do
         TYPE=(${OPTARG})
         ;;
         m)
-        echo "set compile target of wamr" ${OPTARG}
+        echo "set compile target of wamr:" ${OPTARG}
         TARGET=$(echo "$OPTARG" | tr '[a-z]' '[A-Z]') # set target to uppercase if input x86_32 or x86_64 --> X86_32 and X86_64
         ;;
         w)
@@ -337,16 +357,40 @@ function unit_test()
     echo "Now start unit tests"
 
     cd ${WORK_DIR}
-    rm -fr unittest-build
+    local UNIT_DIR="${WORK_DIR}/../../unit"
+    local FAILED_LOG_DIR="${WORK_DIR}/unittest-failed-logs"
+    rm -rf "$FAILED_LOG_DIR"
 
-    echo "Build unit test"
     touch ${REPORT_DIR}/unit_test_report.txt
-    cmake -S ${WORK_DIR}/../../unit -B unittest-build \
-      -DCOLLECT_CODE_COVERAGE=${COLLECT_CODE_COVERAGE} \
-      -DFULL_TEST=${UNIT_FULL_TEST} \
-      -DWAMRC_COMPILER_DIR=${WAMR_DIR}/wamr-compiler/build
-    cmake --build unittest-build
-    ctest --test-dir unittest-build --output-on-failure | tee -a ${REPORT_DIR}/unit_test_report.txt
+    if [[ ${#UNITTEST_FOLDERS[@]} -eq 0 ]]; then
+        cmake -S ${WORK_DIR}/../../unit -B unittest-build \
+          -DCOLLECT_CODE_COVERAGE=${COLLECT_CODE_COVERAGE} \
+          -DFULL_TEST=${UNIT_FULL_TEST} \
+          -DWAMRC_COMPILER_DIR=${WAMR_DIR}/wamr-compiler/build
+        cmake --build unittest-build
+        ctest --test-dir unittest-build --output-on-failure | tee -a ${REPORT_DIR}/unit_test_report.txt
+    else
+        local failed=0
+
+        for folder in "${UNITTEST_FOLDERS[@]}"; do
+            local build_dir="${WORK_DIR}/unittest-build-${folder}"
+
+            echo "" | tee -a ${REPORT_DIR}/unit_test_report.txt
+            echo "========== Unit test: ${folder} ==========" | tee -a ${REPORT_DIR}/unit_test_report.txt
+
+            cmake -S ${UNIT_DIR} -B "${build_dir}" \
+              -DCOLLECT_CODE_COVERAGE=${COLLECT_CODE_COVERAGE} \
+              -DFULL_TEST=${UNIT_FULL_TEST} \
+              -DWAMRC_COMPILER_DIR=${WAMR_DIR}/wamr-compiler/build \
+              -DUNITTEST_FOLDER="${folder}"
+            cmake --build "${build_dir}"
+            ctest --test-dir "${build_dir}" --output-on-failure | tee -a ${REPORT_DIR}/unit_test_report.txt || failed=1
+        done
+
+        if [[ ${failed} -ne 0 ]]; then
+            exit 1
+        fi
+    fi
 
     echo "Finish unit tests"
 }
@@ -419,7 +463,7 @@ function setup_wabt()
             echo "wabt not exist, clone it from github"
             git clone --recursive https://github.com/WebAssembly/wabt
         fi
-        echo "upate wabt"
+        echo "update wabt"
         cd wabt \
         && git fetch origin \
         && git reset --hard origin/main \
@@ -890,8 +934,10 @@ function collect_coverage()
         fi
 
         pushd ${WORK_DIR} > /dev/null 2>&1
-        echo "Collect code coverage of iwasm"
-        ./collect_coverage.sh ${CODE_COV_FILE} ${IWASM_LINUX_ROOT_DIR}/build
+        if [[ $1 != "unit" && -d ${IWASM_LINUX_ROOT_DIR}/build ]]; then
+            echo "Collect code coverage of iwasm"
+            ./collect_coverage.sh ${CODE_COV_FILE} ${IWASM_LINUX_ROOT_DIR}/build
+        fi
         if [[ $1 == "llvm-aot" ]]; then
             echo "Collect code coverage of wamrc"
             ./collect_coverage.sh ${CODE_COV_FILE} ${WAMR_DIR}/wamr-compiler/build
@@ -899,7 +945,13 @@ function collect_coverage()
         for suite in "${TEST_CASE_ARR[@]}"; do
             if [[ ${suite} = "unit" ]]; then
                 echo "Collect code coverage of unit test"
-                ./collect_coverage.sh ${CODE_COV_FILE} ${WORK_DIR}/unittest-build
+                if [[ ${#UNITTEST_FOLDERS[@]} -gt 0 ]]; then
+                    for folder in "${UNITTEST_FOLDERS[@]}"; do
+                        ./collect_coverage.sh ${CODE_COV_FILE} ${WORK_DIR}/unittest-build-${folder}
+                    done
+                else
+                    ./collect_coverage.sh ${CODE_COV_FILE} ${WORK_DIR}/unittest-build
+                fi
                 break
             fi
         done
@@ -1100,6 +1152,10 @@ function trigger()
     # if we're running the wasi certification tests.
     if [[ $TEST_CASE_ARR ]]; then
         for test in "${TEST_CASE_ARR[@]}"; do
+            if [[ "$test" == "unit" ]]; then
+                EXTRA_COMPILE_FLAGS+=" -DWAMR_BUILD_LIBC_WASI=1 -DWAMR_BUILD_COMPONENT_MODEL=1"
+                break
+            fi
             if [[ "$test" == "wasi_certification" ]]; then
                 EXTRA_COMPILE_FLAGS+=" -DWAMR_BUILD_WASI_TEST=1"
             fi
