@@ -24,6 +24,12 @@
 #endif
 #endif
 
+#if WASM_ENABLE_COMPONENT_MODEL != 0
+typedef struct WASMComponentRuntimeFunc WASMComponentRuntimeFunc;
+typedef struct WASMComponentRuntimeInstance WASMComponentRuntimeInstance;
+typedef struct WASMComponentRuntimeComponent WASMComponentRuntimeComponent;
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -620,6 +626,10 @@ struct InstantiationArgs2 {
 #if WASM_ENABLE_LIBC_WASI != 0
     WASIArguments wasi;
 #endif
+#if WASM_ENABLE_COMPONENT_MODEL != 0
+    const wasm_component_import_binding_t *component_imports;
+    uint32 component_import_count;
+#endif
 };
 
 void
@@ -806,6 +816,34 @@ WASM_RUNTIME_API_EXTERN WASMFunctionInstanceCommon *
 wasm_runtime_lookup_function(WASMModuleInstanceCommon *const module_inst,
                              const char *name);
 
+#if WASM_ENABLE_COMPONENT_MODEL != 0
+WASM_RUNTIME_API_EXTERN WASMComponentRuntimeFunc *
+wasm_runtime_lookup_component_function(WASMModuleInstanceCommon *const module_inst,
+                                       const char *name);
+
+WASM_RUNTIME_API_EXTERN bool
+wasm_runtime_lookup_component_value(WASMModuleInstanceCommon *const module_inst,
+                                    const char *name,
+                                    wasm_component_value_t *value);
+
+WASM_RUNTIME_API_EXTERN WASMComponentRuntimeInstance *
+wasm_runtime_lookup_component_instance(WASMModuleInstanceCommon *const module_inst,
+                                       const char *name);
+
+WASM_RUNTIME_API_EXTERN WASMComponentRuntimeComponent *
+wasm_runtime_lookup_component_component(
+    WASMModuleInstanceCommon *const module_inst, const char *name);
+
+WASM_RUNTIME_API_EXTERN WASMModuleCommon *
+wasm_runtime_lookup_component_core_module(
+    WASMModuleInstanceCommon *const module_inst, const char *name);
+
+WASM_RUNTIME_API_EXTERN bool
+wasm_runtime_get_component_export_value(WASMModuleInstanceCommon *const module_inst,
+                                        int32 export_index,
+                                        wasm_component_value_t *value);
+#endif
+
 /* Internal API */
 WASMFuncType *
 wasm_runtime_get_function_type(const WASMFunctionInstanceCommon *function,
@@ -917,6 +955,22 @@ wasm_runtime_call_wasm_v(WASMExecEnv *exec_env,
                          WASMFunctionInstanceCommon *function,
                          uint32 num_results, wasm_val_t *results,
                          uint32 num_args, ...);
+
+#if WASM_ENABLE_COMPONENT_MODEL != 0
+WASM_RUNTIME_API_EXTERN bool
+wasm_runtime_call_component(WASMModuleInstanceCommon *module_inst,
+                            WASMComponentRuntimeFunc *function,
+                            uint32 num_results, wasm_val_t *results,
+                            uint32 num_args, wasm_val_t *args);
+
+WASM_RUNTIME_API_EXTERN bool
+wasm_runtime_call_component_values(WASMModuleInstanceCommon *module_inst,
+                                   WASMComponentRuntimeFunc *function,
+                                   uint32 num_results,
+                                   wasm_component_value_t *results,
+                                   uint32 num_args,
+                                   const wasm_component_value_t *args);
+#endif
 
 /* See wasm_export.h for description */
 WASM_RUNTIME_API_EXTERN bool

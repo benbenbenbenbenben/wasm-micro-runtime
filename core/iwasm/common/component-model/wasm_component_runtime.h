@@ -7,6 +7,10 @@
 #define WASM_COMPONENT_RUNTIME_H
 
 #include "wasm_component.h"
+#include "wasm_component_resource.h"
+#include "wasm_component_value.h"
+
+struct InstantiationArgs2;
 
 typedef enum WASMComponentCoreRuntimeRefType {
     WASM_COMP_CORE_RUNTIME_REF_FUNC = 0,
@@ -21,6 +25,7 @@ struct WASMComponentCoreRuntimeInstance;
 
 typedef struct WASMComponentCoreRuntimeRef {
     WASMComponentCoreRuntimeRefType type;
+    struct WASMComponentCoreRuntimeInstance *owner_instance;
     union {
         wasm_function_inst_t function;
         wasm_table_inst_t table;
@@ -52,12 +57,26 @@ typedef enum WASMComponentRuntimeFuncKind {
     WASM_COMP_RUNTIME_FUNC_UNSUPPORTED_CANON
 } WASMComponentRuntimeFuncKind;
 
+typedef enum WASMComponentRuntimeStringEncoding {
+    WASM_COMP_RUNTIME_STRING_ENCODING_NONE = 0,
+    WASM_COMP_RUNTIME_STRING_ENCODING_UTF8,
+    WASM_COMP_RUNTIME_STRING_ENCODING_UTF16,
+    WASM_COMP_RUNTIME_STRING_ENCODING_LATIN1_UTF16
+} WASMComponentRuntimeStringEncoding;
+
 typedef struct WASMComponentRuntimeFunc {
     WASMComponentRuntimeFuncKind kind;
     WASMComponentCanonType canon_tag;
     uint32 type_idx;
     WASMComponentCanonOpts *canon_opts;
     WASMComponentCoreRuntimeRef core_func_ref;
+    WASMComponentCoreRuntimeRef canon_memory_ref;
+    WASMComponentCoreRuntimeRef canon_realloc_ref;
+    WASMComponentCoreRuntimeRef canon_post_return_ref;
+    WASMComponentRuntimeStringEncoding string_encoding;
+    bool has_string_params;
+    bool has_string_result;
+    bool is_top_level_export;
 } WASMComponentRuntimeFunc;
 
 struct WASMComponentRuntimeScope;
@@ -70,6 +89,7 @@ typedef struct WASMComponentRuntimeComponent {
 
 typedef enum WASMComponentRuntimeRefType {
     WASM_COMP_RUNTIME_REF_FUNC = 0,
+    WASM_COMP_RUNTIME_REF_VALUE,
     WASM_COMP_RUNTIME_REF_INSTANCE,
     WASM_COMP_RUNTIME_REF_COMPONENT,
     WASM_COMP_RUNTIME_REF_CORE_MODULE
@@ -81,6 +101,7 @@ typedef struct WASMComponentRuntimeRef {
     WASMComponentRuntimeRefType type;
     union {
         WASMComponentRuntimeFunc *function;
+        WASMComponentRuntimeValue *value;
         struct WASMComponentRuntimeInstance *instance;
         WASMComponentRuntimeComponent *component;
         wasm_module_t core_module;
@@ -94,8 +115,12 @@ typedef struct WASMComponentNamedExport {
 
 typedef struct WASMComponentRuntimeInstance {
     bool owns_exports;
+    bool owns_resource_state;
     uint32 export_count;
     WASMComponentNamedExport *exports;
+    WASMComponentRuntimeResourceState *resource_state;
+    uint32 owned_value_count;
+    WASMComponentRuntimeValue *owned_values;
     uint32 owned_instance_count;
     struct WASMComponentRuntimeInstance *owned_instances;
     uint32 owned_component_count;
@@ -132,10 +157,13 @@ struct WASMComponentInstance {
     WASMComponentRuntimeComponent *components;
     uint32 component_func_count;
     WASMComponentRuntimeFunc *component_funcs;
+    uint32 component_value_count;
+    WASMComponentRuntimeValue *component_values;
     uint32 component_instance_count;
     WASMComponentRuntimeInstance *component_instances;
     uint32 component_export_count;
     WASMComponentNamedExport *component_exports;
+    WASMComponentRuntimeResourceState *resource_state;
 };
 
 WASMComponentModule *
@@ -147,7 +175,57 @@ wasm_component_module_unload(WASMComponentModule *module);
 
 WASMComponentInstance *
 wasm_component_module_instantiate(WASMComponentModule *module,
+                                  const struct InstantiationArgs2 *args,
                                   char *error_buf, uint32 error_buf_size);
+
+int32
+wasm_component_get_export_count(const WASMComponentInstance *inst);
+
+bool
+wasm_component_get_export_type(const WASMComponentInstance *inst,
+                               int32 export_index,
+                               wasm_component_export_t *export_type);
+
+bool
+wasm_component_get_export_value(const WASMComponentInstance *inst,
+                                int32 export_index,
+                                wasm_component_value_t *value,
+                                char *error_buf, uint32 error_buf_size);
+
+WASMComponentRuntimeFunc *
+wasm_component_lookup_function(const WASMComponentInstance *inst,
+                               const char *name);
+
+bool
+wasm_component_lookup_value(const WASMComponentInstance *inst, const char *name,
+                            wasm_component_value_t *value, char *error_buf,
+                            uint32 error_buf_size);
+
+WASMComponentRuntimeInstance *
+wasm_component_lookup_instance(const WASMComponentInstance *inst,
+                               const char *name);
+
+WASMComponentRuntimeComponent *
+wasm_component_lookup_component(const WASMComponentInstance *inst,
+                                const char *name);
+
+wasm_module_t
+wasm_component_lookup_core_module(const WASMComponentInstance *inst,
+                                  const char *name);
+
+bool
+wasm_component_call(WASMComponentInstance *inst,
+                    const WASMComponentRuntimeFunc *function,
+                    uint32 num_results, wasm_val_t *results,
+                    uint32 num_args, wasm_val_t *args);
+
+bool
+wasm_component_call_values(WASMComponentInstance *inst,
+                           const WASMComponentRuntimeFunc *function,
+                           uint32 num_results,
+                           wasm_component_value_t *results,
+                           uint32 num_args,
+                           const wasm_component_value_t *args);
 
 void
 wasm_component_module_deinstantiate(WASMComponentInstance *inst);

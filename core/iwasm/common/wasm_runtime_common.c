@@ -1762,7 +1762,7 @@ wasm_runtime_instantiate_internal(WASMModuleCommon *module,
 #if WASM_ENABLE_COMPONENT_MODEL != 0
     if (module->module_type == Wasm_Module_Component) {
         return (WASMModuleInstanceCommon *)wasm_component_module_instantiate(
-            (WASMComponentModule *)module, error_buf, error_buf_size);
+            (WASMComponentModule *)module, args, error_buf, error_buf_size);
     }
 #endif
     set_error_buf(error_buf, error_buf_size,
@@ -1920,6 +1920,17 @@ wasm_runtime_instantiation_args_set_wasi_ns_lookup_pool(
     wasi_args->set_by_user = true;
 }
 #endif /* WASM_ENABLE_LIBC_WASI != 0 */
+
+#if WASM_ENABLE_COMPONENT_MODEL != 0
+void
+wasm_runtime_instantiation_args_set_component_imports(
+    struct InstantiationArgs2 *p,
+    const wasm_component_import_binding_t imports[], uint32_t import_count)
+{
+    p->component_imports = imports;
+    p->component_import_count = import_count;
+}
+#endif
 
 WASMModuleInstanceCommon *
 wasm_runtime_instantiate_ex2(WASMModuleCommon *module,
@@ -2630,6 +2641,95 @@ wasm_runtime_lookup_function(WASMModuleInstanceCommon *const module_inst,
     return NULL;
 }
 
+#if WASM_ENABLE_COMPONENT_MODEL != 0
+WASMComponentRuntimeFunc *
+wasm_runtime_lookup_component_function(WASMModuleInstanceCommon *const module_inst,
+                                       const char *name)
+{
+    if (!module_inst || module_inst->module_type != Wasm_Module_Component) {
+        if (module_inst)
+            wasm_runtime_set_exception(module_inst,
+                                       "module instance is not a component");
+        return NULL;
+    }
+
+    return wasm_component_lookup_function((WASMComponentInstance *)module_inst,
+                                          name);
+}
+
+bool
+wasm_runtime_lookup_component_value(WASMModuleInstanceCommon *const module_inst,
+                                    const char *name,
+                                    wasm_component_value_t *value)
+{
+    char error_buf[128] = { 0 };
+
+    if (!module_inst || module_inst->module_type != Wasm_Module_Component) {
+        if (module_inst)
+            wasm_runtime_set_exception(module_inst,
+                                       "module instance is not a component");
+        if (value)
+            wasm_component_value_destroy(value);
+        return false;
+    }
+
+    if (!wasm_component_lookup_value((WASMComponentInstance *)module_inst, name,
+                                     value, error_buf,
+                                     (uint32)sizeof(error_buf))) {
+        if (error_buf[0] != '\0')
+            wasm_runtime_set_exception(module_inst, error_buf);
+        return false;
+    }
+
+    return true;
+}
+
+WASMComponentRuntimeInstance *
+wasm_runtime_lookup_component_instance(WASMModuleInstanceCommon *const module_inst,
+                                       const char *name)
+{
+    if (!module_inst || module_inst->module_type != Wasm_Module_Component) {
+        if (module_inst)
+            wasm_runtime_set_exception(module_inst,
+                                       "module instance is not a component");
+        return NULL;
+    }
+
+    return wasm_component_lookup_instance((WASMComponentInstance *)module_inst,
+                                          name);
+}
+
+WASMComponentRuntimeComponent *
+wasm_runtime_lookup_component_component(
+    WASMModuleInstanceCommon *const module_inst, const char *name)
+{
+    if (!module_inst || module_inst->module_type != Wasm_Module_Component) {
+        if (module_inst)
+            wasm_runtime_set_exception(module_inst,
+                                       "module instance is not a component");
+        return NULL;
+    }
+
+    return wasm_component_lookup_component((WASMComponentInstance *)module_inst,
+                                           name);
+}
+
+WASMModuleCommon *
+wasm_runtime_lookup_component_core_module(
+    WASMModuleInstanceCommon *const module_inst, const char *name)
+{
+    if (!module_inst || module_inst->module_type != Wasm_Module_Component) {
+        if (module_inst)
+            wasm_runtime_set_exception(module_inst,
+                                       "module instance is not a component");
+        return NULL;
+    }
+
+    return (WASMModuleCommon *)wasm_component_lookup_core_module(
+        (WASMComponentInstance *)module_inst, name);
+}
+#endif
+
 uint32
 wasm_func_get_param_count(WASMFunctionInstanceCommon *const func_inst,
                           WASMModuleInstanceCommon *const module_inst)
@@ -3271,6 +3371,45 @@ wasm_runtime_call_wasm_v(WASMExecEnv *exec_env,
 fail1:
     return ret;
 }
+
+#if WASM_ENABLE_COMPONENT_MODEL != 0
+bool
+wasm_runtime_call_component(WASMModuleInstanceCommon *module_inst,
+                            WASMComponentRuntimeFunc *function,
+                            uint32 num_results, wasm_val_t *results,
+                            uint32 num_args, wasm_val_t *args)
+{
+    if (!module_inst || module_inst->module_type != Wasm_Module_Component) {
+        if (module_inst)
+            wasm_runtime_set_exception(module_inst,
+                                       "module instance is not a component");
+        return false;
+    }
+
+    return wasm_component_call((WASMComponentInstance *)module_inst, function,
+                               num_results, results, num_args, args);
+}
+
+bool
+wasm_runtime_call_component_values(WASMModuleInstanceCommon *module_inst,
+                                   WASMComponentRuntimeFunc *function,
+                                   uint32 num_results,
+                                   wasm_component_value_t *results,
+                                   uint32 num_args,
+                                   const wasm_component_value_t *args)
+{
+    if (!module_inst || module_inst->module_type != Wasm_Module_Component) {
+        if (module_inst)
+            wasm_runtime_set_exception(module_inst,
+                                       "module instance is not a component");
+        return false;
+    }
+
+    return wasm_component_call_values((WASMComponentInstance *)module_inst,
+                                      function, num_results, results, num_args,
+                                      args);
+}
+#endif
 
 bool
 wasm_runtime_create_exec_env_singleton(
@@ -4664,6 +4803,66 @@ wasm_runtime_get_export_count(WASMModuleCommon *const module)
 
     return -1;
 }
+
+#if WASM_ENABLE_COMPONENT_MODEL != 0
+int32
+wasm_runtime_get_component_export_count(WASMModuleInstanceCommon *const module_inst)
+{
+    if (!module_inst || module_inst->module_type != Wasm_Module_Component) {
+        if (module_inst)
+            wasm_runtime_set_exception(module_inst,
+                                       "module instance is not a component");
+        return -1;
+    }
+
+    return wasm_component_get_export_count((WASMComponentInstance *)module_inst);
+}
+
+bool
+wasm_runtime_get_component_export_type(WASMModuleInstanceCommon *const module_inst,
+                                       int32 export_index,
+                                       wasm_component_export_t *export_type)
+{
+    if (!module_inst || module_inst->module_type != Wasm_Module_Component) {
+        if (module_inst)
+            wasm_runtime_set_exception(module_inst,
+                                       "module instance is not a component");
+        if (export_type)
+            memset(export_type, 0, sizeof(*export_type));
+        return false;
+    }
+
+    return wasm_component_get_export_type((WASMComponentInstance *)module_inst,
+                                          export_index, export_type);
+}
+
+bool
+wasm_runtime_get_component_export_value(WASMModuleInstanceCommon *const module_inst,
+                                        int32 export_index,
+                                        wasm_component_value_t *value)
+{
+    char error_buf[128] = { 0 };
+
+    if (!module_inst || module_inst->module_type != Wasm_Module_Component) {
+        if (module_inst)
+            wasm_runtime_set_exception(module_inst,
+                                       "module instance is not a component");
+        if (value)
+            wasm_component_value_destroy(value);
+        return false;
+    }
+
+    if (!wasm_component_get_export_value((WASMComponentInstance *)module_inst,
+                                         export_index, value, error_buf,
+                                         (uint32)sizeof(error_buf))) {
+        if (error_buf[0] != '\0')
+            wasm_runtime_set_exception(module_inst, error_buf);
+        return false;
+    }
+
+    return true;
+}
+#endif
 
 #if WASM_ENABLE_INTERP != 0
 int32

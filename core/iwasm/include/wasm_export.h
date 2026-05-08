@@ -128,6 +128,93 @@ typedef struct WASMModuleInstanceCommon *wasm_module_inst_t;
 #if WASM_ENABLE_COMPONENT_MODEL != 0
 struct WASMComponentInstance;
 typedef struct WASMComponentInstance WASMComponentInstance;
+
+struct WASMComponentRuntimeFunc;
+typedef struct WASMComponentRuntimeFunc *wasm_component_func_t;
+
+typedef enum {
+    WASM_COMPONENT_VALUE_TYPE_PRIMITIVE = 0,
+    WASM_COMPONENT_VALUE_TYPE_DEFINED
+} wasm_component_value_type_kind_t;
+
+typedef enum {
+    WASM_COMPONENT_PRIMITIVE_VALUE_BOOL = 0x7f,
+    WASM_COMPONENT_PRIMITIVE_VALUE_S8 = 0x7e,
+    WASM_COMPONENT_PRIMITIVE_VALUE_U8 = 0x7d,
+    WASM_COMPONENT_PRIMITIVE_VALUE_S16 = 0x7c,
+    WASM_COMPONENT_PRIMITIVE_VALUE_U16 = 0x7b,
+    WASM_COMPONENT_PRIMITIVE_VALUE_S32 = 0x7a,
+    WASM_COMPONENT_PRIMITIVE_VALUE_U32 = 0x79,
+    WASM_COMPONENT_PRIMITIVE_VALUE_S64 = 0x78,
+    WASM_COMPONENT_PRIMITIVE_VALUE_U64 = 0x77,
+    WASM_COMPONENT_PRIMITIVE_VALUE_F32 = 0x76,
+    WASM_COMPONENT_PRIMITIVE_VALUE_F64 = 0x75,
+    WASM_COMPONENT_PRIMITIVE_VALUE_CHAR = 0x74,
+    WASM_COMPONENT_PRIMITIVE_VALUE_STRING = 0x73,
+    WASM_COMPONENT_PRIMITIVE_VALUE_ERROR_CONTEXT = 0x64
+} wasm_component_primitive_value_kind_t;
+
+#define WASM_COMPONENT_VALUE_INLINE_STORAGE_SIZE 16
+
+typedef enum {
+    WASM_COMPONENT_VALUE_STORAGE_NONE = 0,
+    WASM_COMPONENT_VALUE_STORAGE_INLINE,
+    WASM_COMPONENT_VALUE_STORAGE_OWNED
+} wasm_component_value_storage_kind_t;
+
+typedef struct wasm_component_value_type_t {
+    wasm_component_value_type_kind_t kind;
+    union {
+        wasm_component_primitive_value_kind_t primitive_type;
+    } type;
+} wasm_component_value_type_t;
+
+typedef struct wasm_component_value_t {
+    wasm_component_value_type_t type;
+    wasm_component_value_storage_kind_t storage_kind;
+    uint32_t byte_size;
+    union {
+        uint8_t inline_storage[WASM_COMPONENT_VALUE_INLINE_STORAGE_SIZE];
+        void *owned_data;
+    } storage;
+} wasm_component_value_t;
+
+struct WASMComponentRuntimeInstance;
+typedef struct WASMComponentRuntimeInstance *wasm_component_instance_t;
+
+struct WASMComponentRuntimeComponent;
+typedef struct WASMComponentRuntimeComponent *wasm_component_component_t;
+
+typedef enum {
+    WASM_COMPONENT_EXTERN_KIND_FUNC = 0,
+    WASM_COMPONENT_EXTERN_KIND_VALUE,
+    WASM_COMPONENT_EXTERN_KIND_INSTANCE,
+    WASM_COMPONENT_EXTERN_KIND_COMPONENT,
+    WASM_COMPONENT_EXTERN_KIND_CORE_MODULE
+} wasm_component_extern_kind_t;
+
+typedef struct wasm_component_export_t {
+    const char *name;
+    wasm_component_extern_kind_t kind;
+    union {
+        wasm_component_func_t function;
+        wasm_component_instance_t instance;
+        wasm_component_component_t component;
+        wasm_module_t core_module;
+    } value;
+} wasm_component_export_t;
+
+typedef struct wasm_component_import_binding_t {
+    const char *name;
+    wasm_component_extern_kind_t kind;
+    union {
+        wasm_component_func_t function;
+        const wasm_component_value_t *value;
+        wasm_component_instance_t instance;
+        wasm_component_component_t component;
+        wasm_module_t core_module;
+    } value;
+} wasm_component_import_binding_t;
 #endif
 
 /* Function instance */
@@ -844,6 +931,13 @@ wasm_runtime_instantiation_args_set_wasi_ns_lookup_pool(
     struct InstantiationArgs2 *p, const char *ns_lookup_pool[],
     uint32_t ns_lookup_pool_size);
 
+#if WASM_ENABLE_COMPONENT_MODEL != 0
+WASM_RUNTIME_API_EXTERN void
+wasm_runtime_instantiation_args_set_component_imports(
+    struct InstantiationArgs2 *p,
+    const wasm_component_import_binding_t imports[], uint32_t import_count);
+#endif
+
 /**
  * Instantiate a WASM module, with specified instantiation arguments
  *
@@ -930,6 +1024,29 @@ wasm_runtime_get_wasi_exit_code(wasm_module_inst_t module_inst);
 WASM_RUNTIME_API_EXTERN wasm_function_inst_t
 wasm_runtime_lookup_function(const wasm_module_inst_t module_inst,
                              const char *name);
+
+#if WASM_ENABLE_COMPONENT_MODEL != 0
+WASM_RUNTIME_API_EXTERN wasm_component_func_t
+wasm_runtime_lookup_component_function(const wasm_module_inst_t module_inst,
+                                       const char *name);
+
+WASM_RUNTIME_API_EXTERN bool
+wasm_runtime_lookup_component_value(const wasm_module_inst_t module_inst,
+                                    const char *name,
+                                    wasm_component_value_t *value);
+
+WASM_RUNTIME_API_EXTERN wasm_component_instance_t
+wasm_runtime_lookup_component_instance(const wasm_module_inst_t module_inst,
+                                       const char *name);
+
+WASM_RUNTIME_API_EXTERN wasm_component_component_t
+wasm_runtime_lookup_component_component(const wasm_module_inst_t module_inst,
+                                        const char *name);
+
+WASM_RUNTIME_API_EXTERN wasm_module_t
+wasm_runtime_lookup_component_core_module(const wasm_module_inst_t module_inst,
+                                          const char *name);
+#endif
 
 /**
  * Get parameter count of the function instance
@@ -1288,6 +1405,22 @@ WASM_RUNTIME_API_EXTERN bool
 wasm_runtime_call_wasm_v(wasm_exec_env_t exec_env,
                          wasm_function_inst_t function, uint32_t num_results,
                          wasm_val_t results[], uint32_t num_args, ...);
+
+#if WASM_ENABLE_COMPONENT_MODEL != 0
+WASM_RUNTIME_API_EXTERN bool
+wasm_runtime_call_component(wasm_module_inst_t module_inst,
+                            wasm_component_func_t function,
+                            uint32_t num_results, wasm_val_t results[],
+                            uint32_t num_args, wasm_val_t args[]);
+
+WASM_RUNTIME_API_EXTERN bool
+wasm_runtime_call_component_values(wasm_module_inst_t module_inst,
+                                   wasm_component_func_t function,
+                                   uint32_t num_results,
+                                   wasm_component_value_t results[],
+                                   uint32_t num_args,
+                                   const wasm_component_value_t args[]);
+#endif
 
 /**
  * Call a function reference of a given WASM runtime instance with
@@ -1649,6 +1782,52 @@ wasm_runtime_get_import_type(const wasm_module_t module, int32_t import_index,
  */
 WASM_RUNTIME_API_EXTERN int32_t
 wasm_runtime_get_export_count(const wasm_module_t module);
+
+#if WASM_ENABLE_COMPONENT_MODEL != 0
+WASM_RUNTIME_API_EXTERN int32_t
+wasm_runtime_get_component_export_count(const wasm_module_inst_t module_inst);
+
+WASM_RUNTIME_API_EXTERN bool
+wasm_runtime_get_component_export_type(const wasm_module_inst_t module_inst,
+                                       int32_t export_index,
+                                       wasm_component_export_t *export_type);
+
+WASM_RUNTIME_API_EXTERN bool
+wasm_runtime_get_component_export_value(const wasm_module_inst_t module_inst,
+                                        int32_t export_index,
+                                        wasm_component_value_t *value);
+
+WASM_RUNTIME_API_EXTERN const void *
+wasm_component_value_get_data(const wasm_component_value_t *value);
+
+WASM_RUNTIME_API_EXTERN void
+wasm_component_value_destroy(wasm_component_value_t *value);
+
+WASM_RUNTIME_API_EXTERN int32_t
+wasm_component_instance_get_export_count(
+    const wasm_component_instance_t component_inst);
+
+WASM_RUNTIME_API_EXTERN bool
+wasm_component_instance_get_export_type(
+    const wasm_component_instance_t component_inst, int32_t export_index,
+    wasm_component_export_t *export_type);
+
+WASM_RUNTIME_API_EXTERN wasm_component_func_t
+wasm_component_instance_lookup_function(
+    const wasm_component_instance_t component_inst, const char *name);
+
+WASM_RUNTIME_API_EXTERN wasm_component_instance_t
+wasm_component_instance_lookup_instance(
+    const wasm_component_instance_t component_inst, const char *name);
+
+WASM_RUNTIME_API_EXTERN wasm_component_component_t
+wasm_component_instance_lookup_component(
+    const wasm_component_instance_t component_inst, const char *name);
+
+WASM_RUNTIME_API_EXTERN wasm_module_t
+wasm_component_instance_lookup_core_module(
+    const wasm_component_instance_t component_inst, const char *name);
+#endif
 
 #if WASM_ENABLE_INTERP != 0
 /**
