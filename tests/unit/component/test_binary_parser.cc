@@ -76,6 +76,18 @@ create_sort_idx(uint8_t sort, uint32_t idx)
     return sort_idx;
 }
 
+static WASMComponentSortIdx *
+create_core_sort_idx(uint8_t core_sort, uint32_t idx)
+{
+    auto *sort_idx = create_sort_idx(WASM_COMP_SORT_CORE_SORT, idx);
+    if (!sort_idx) {
+        return nullptr;
+    }
+
+    sort_idx->sort->core_sort = core_sort;
+    return sort_idx;
+}
+
 static WASMComponentExportName *
 create_export_name(const char *name)
 {
@@ -934,6 +946,272 @@ append_nested_component_inline_instance_sections(
         create_sort_idx(WASM_COMP_SORT_INSTANCE, 1);
     return export_section->parsed.export_section->exports[0].export_name
            && export_section->parsed.export_section->exports[0].sort_idx;
+}
+
+static bool
+append_top_level_inline_component_instance_sections(
+    WASMComponentModule *component_module)
+{
+    WASMComponent *component = &component_module->component;
+    const uint32_t old_count = component->section_count;
+    const uint32_t new_count = old_count + 2;
+    auto *new_sections = (WASMComponentSection *)wasm_runtime_malloc(
+        sizeof(WASMComponentSection) * new_count);
+    if (!new_sections) {
+        return false;
+    }
+
+    memset(new_sections, 0, sizeof(WASMComponentSection) * new_count);
+    memcpy(new_sections, component->sections,
+           sizeof(WASMComponentSection) * old_count);
+    wasm_runtime_free(component->sections);
+    component->sections = new_sections;
+    component->section_count = new_count;
+
+    WASMComponentSection *instance_section = &component->sections[old_count];
+    WASMComponentSection *export_section = &component->sections[old_count + 1];
+
+    instance_section->id = WASM_COMP_SECTION_INSTANCES;
+    instance_section->parsed.instance_section =
+        (WASMComponentInstSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentInstSection));
+    if (!instance_section->parsed.instance_section) {
+        return false;
+    }
+    memset(instance_section->parsed.instance_section, 0,
+           sizeof(WASMComponentInstSection));
+    instance_section->parsed.instance_section->count = 1;
+    instance_section->parsed.instance_section->instances =
+        (WASMComponentInst *)wasm_runtime_malloc(sizeof(WASMComponentInst));
+    if (!instance_section->parsed.instance_section->instances) {
+        return false;
+    }
+    memset(instance_section->parsed.instance_section->instances, 0,
+           sizeof(WASMComponentInst));
+    instance_section->parsed.instance_section->instances[0]
+        .instance_expression_tag = WASM_COMP_INSTANCE_EXPRESSION_WITHOUT_ARGS;
+    instance_section->parsed.instance_section->instances[0]
+        .expression.without_args.inline_expr_len = 1;
+    instance_section->parsed.instance_section->instances[0]
+        .expression.without_args.inline_expr =
+        (WASMComponentInlineExport *)wasm_runtime_malloc(
+            sizeof(WASMComponentInlineExport));
+    if (!instance_section->parsed.instance_section->instances[0]
+             .expression.without_args.inline_expr) {
+        return false;
+    }
+    memset(instance_section->parsed.instance_section->instances[0]
+               .expression.without_args.inline_expr,
+           0, sizeof(WASMComponentInlineExport));
+    instance_section->parsed.instance_section->instances[0]
+        .expression.without_args.inline_expr[0]
+        .name = clone_core_name("wrapped-component");
+    instance_section->parsed.instance_section->instances[0]
+        .expression.without_args.inline_expr[0]
+        .sort_idx = create_sort_idx(WASM_COMP_SORT_COMPONENT, 0);
+    if (!instance_section->parsed.instance_section->instances[0]
+             .expression.without_args.inline_expr[0]
+             .name
+        || !instance_section->parsed.instance_section->instances[0]
+                 .expression.without_args.inline_expr[0]
+                 .sort_idx) {
+        return false;
+    }
+
+    export_section->id = WASM_COMP_SECTION_EXPORTS;
+    export_section->parsed.export_section =
+        (WASMComponentExportSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentExportSection));
+    if (!export_section->parsed.export_section) {
+        return false;
+    }
+    memset(export_section->parsed.export_section, 0,
+           sizeof(WASMComponentExportSection));
+    export_section->parsed.export_section->count = 1;
+    export_section->parsed.export_section->exports =
+        (WASMComponentExport *)wasm_runtime_malloc(sizeof(WASMComponentExport));
+    if (!export_section->parsed.export_section->exports) {
+        return false;
+    }
+    memset(export_section->parsed.export_section->exports, 0,
+           sizeof(WASMComponentExport));
+    export_section->parsed.export_section->exports[0].export_name =
+        create_export_name("top-level-inline-component-instance");
+    export_section->parsed.export_section->exports[0].sort_idx =
+        create_sort_idx(WASM_COMP_SORT_INSTANCE, 1);
+    return export_section->parsed.export_section->exports[0].export_name
+           && export_section->parsed.export_section->exports[0].sort_idx;
+}
+
+static bool
+append_top_level_core_module_export_sections(WASMComponentModule *component_module)
+{
+    WASMComponent *component = &component_module->component;
+    const uint32_t old_count = component->section_count;
+    const uint32_t new_count = old_count + 1;
+    auto *new_sections = (WASMComponentSection *)wasm_runtime_malloc(
+        sizeof(WASMComponentSection) * new_count);
+    if (!new_sections) {
+        return false;
+    }
+
+    memset(new_sections, 0, sizeof(WASMComponentSection) * new_count);
+    memcpy(new_sections, component->sections,
+           sizeof(WASMComponentSection) * old_count);
+    wasm_runtime_free(component->sections);
+    component->sections = new_sections;
+    component->section_count = new_count;
+
+    WASMComponentSection *export_section = &component->sections[old_count];
+    export_section->id = WASM_COMP_SECTION_EXPORTS;
+    export_section->parsed.export_section =
+        (WASMComponentExportSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentExportSection));
+    if (!export_section->parsed.export_section) {
+        return false;
+    }
+    memset(export_section->parsed.export_section, 0,
+           sizeof(WASMComponentExportSection));
+    export_section->parsed.export_section->count = 1;
+    export_section->parsed.export_section->exports =
+        (WASMComponentExport *)wasm_runtime_malloc(sizeof(WASMComponentExport));
+    if (!export_section->parsed.export_section->exports) {
+        return false;
+    }
+    memset(export_section->parsed.export_section->exports, 0,
+           sizeof(WASMComponentExport));
+    export_section->parsed.export_section->exports[0].export_name =
+        create_export_name("top-level-core-module");
+    export_section->parsed.export_section->exports[0].sort_idx =
+        create_core_sort_idx(WASM_COMP_CORE_SORT_MODULE, 0);
+    return export_section->parsed.export_section->exports[0].export_name
+           && export_section->parsed.export_section->exports[0].sort_idx;
+}
+
+static bool
+append_top_level_inline_core_module_instance_sections(
+    WASMComponentModule *component_module)
+{
+    WASMComponent *component = &component_module->component;
+    const uint32_t old_count = component->section_count;
+    const uint32_t new_count = old_count + 2;
+    auto *new_sections = (WASMComponentSection *)wasm_runtime_malloc(
+        sizeof(WASMComponentSection) * new_count);
+    if (!new_sections) {
+        return false;
+    }
+
+    memset(new_sections, 0, sizeof(WASMComponentSection) * new_count);
+    memcpy(new_sections, component->sections,
+           sizeof(WASMComponentSection) * old_count);
+    wasm_runtime_free(component->sections);
+    component->sections = new_sections;
+    component->section_count = new_count;
+
+    WASMComponentSection *instance_section = &component->sections[old_count];
+    WASMComponentSection *export_section = &component->sections[old_count + 1];
+
+    instance_section->id = WASM_COMP_SECTION_INSTANCES;
+    instance_section->parsed.instance_section =
+        (WASMComponentInstSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentInstSection));
+    if (!instance_section->parsed.instance_section) {
+        return false;
+    }
+    memset(instance_section->parsed.instance_section, 0,
+           sizeof(WASMComponentInstSection));
+    instance_section->parsed.instance_section->count = 1;
+    instance_section->parsed.instance_section->instances =
+        (WASMComponentInst *)wasm_runtime_malloc(sizeof(WASMComponentInst));
+    if (!instance_section->parsed.instance_section->instances) {
+        return false;
+    }
+    memset(instance_section->parsed.instance_section->instances, 0,
+           sizeof(WASMComponentInst));
+    instance_section->parsed.instance_section->instances[0]
+        .instance_expression_tag = WASM_COMP_INSTANCE_EXPRESSION_WITHOUT_ARGS;
+    instance_section->parsed.instance_section->instances[0]
+        .expression.without_args.inline_expr_len = 1;
+    instance_section->parsed.instance_section->instances[0]
+        .expression.without_args.inline_expr =
+        (WASMComponentInlineExport *)wasm_runtime_malloc(
+            sizeof(WASMComponentInlineExport));
+    if (!instance_section->parsed.instance_section->instances[0]
+             .expression.without_args.inline_expr) {
+        return false;
+    }
+    memset(instance_section->parsed.instance_section->instances[0]
+               .expression.without_args.inline_expr,
+           0, sizeof(WASMComponentInlineExport));
+    instance_section->parsed.instance_section->instances[0]
+        .expression.without_args.inline_expr[0]
+        .name = clone_core_name("wrapped-core-module");
+    instance_section->parsed.instance_section->instances[0]
+        .expression.without_args.inline_expr[0]
+        .sort_idx = create_core_sort_idx(WASM_COMP_CORE_SORT_MODULE, 0);
+    if (!instance_section->parsed.instance_section->instances[0]
+             .expression.without_args.inline_expr[0]
+             .name
+        || !instance_section->parsed.instance_section->instances[0]
+                 .expression.without_args.inline_expr[0]
+                 .sort_idx) {
+        return false;
+    }
+
+    export_section->id = WASM_COMP_SECTION_EXPORTS;
+    export_section->parsed.export_section =
+        (WASMComponentExportSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentExportSection));
+    if (!export_section->parsed.export_section) {
+        return false;
+    }
+    memset(export_section->parsed.export_section, 0,
+           sizeof(WASMComponentExportSection));
+    export_section->parsed.export_section->count = 1;
+    export_section->parsed.export_section->exports =
+        (WASMComponentExport *)wasm_runtime_malloc(sizeof(WASMComponentExport));
+    if (!export_section->parsed.export_section->exports) {
+        return false;
+    }
+    memset(export_section->parsed.export_section->exports, 0,
+           sizeof(WASMComponentExport));
+    export_section->parsed.export_section->exports[0].export_name =
+        create_export_name("top-level-inline-core-module-instance");
+    export_section->parsed.export_section->exports[0].sort_idx =
+        create_sort_idx(WASM_COMP_SORT_INSTANCE, 1);
+    return export_section->parsed.export_section->exports[0].export_name
+           && export_section->parsed.export_section->exports[0].sort_idx;
+}
+
+static bool
+append_nested_component_inline_component_instance_sections(
+    WASMComponentModule *component_module)
+{
+    WASMComponent *component = &component_module->component;
+    WASMComponentSection *component_section;
+    WASMComponent *nested_component;
+    WASMComponentImport *component_import;
+    WASMComponentInlineExport *inline_export;
+    WASMComponentInstArg *inst_arg;
+
+    if (!append_nested_component_inline_instance_sections(component_module))
+        return false;
+
+    component_section = &component->sections[component->section_count - 3];
+    nested_component = component_section->parsed.component;
+    component_import =
+        &nested_component->sections[0].parsed.import_section->imports[0];
+    inline_export = &nested_component->sections[1]
+                         .parsed.instance_section->instances[0]
+                         .expression.without_args.inline_expr[0];
+    inst_arg = &component->sections[component->section_count - 2]
+                    .parsed.instance_section->instances[0]
+                    .expression.with_args.args[0];
+
+    component_import->extern_desc->type = WASM_COMP_EXTERN_COMPONENT;
+    inline_export->sort_idx->sort->sort = WASM_COMP_SORT_COMPONENT;
+    inst_arg->idx.sort_idx->sort->sort = WASM_COMP_SORT_COMPONENT;
+    return true;
 }
 
 static bool
@@ -3615,6 +3893,164 @@ TEST_F(BinaryParserTest, TestRuntimeBindsNestedComponentImports)
     ASSERT_EQ(nested_instance.exports[0].ref.type, WASM_COMP_RUNTIME_REF_COMPONENT);
     ASSERT_EQ(nested_instance.exports[0].ref.of.component->component,
               expected_component);
+
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest, TestRuntimeBuildsTopLevelInlineComponentInstances)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "runtime-top-level-inline-component-instances";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(append_top_level_inline_component_instance_sections(
+        (WASMComponentModule *)module));
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    auto *component_inst = (WASMComponentInstance *)module_inst;
+    const WASMComponentRuntimeInstance &inline_instance =
+        component_inst->component_instances[1];
+    const WASMComponentNamedExport &top_export =
+        component_inst->component_exports[1];
+
+    ASSERT_EQ(inline_instance.export_count, 1u);
+    ASSERT_EQ(std::string(inline_instance.exports[0].name), "wrapped-component");
+    ASSERT_EQ(inline_instance.exports[0].ref.type, WASM_COMP_RUNTIME_REF_COMPONENT);
+    ASSERT_EQ(inline_instance.exports[0].ref.of.component->component,
+              component_inst->components[0].component);
+    ASSERT_EQ(std::string(top_export.name), "top-level-inline-component-instance");
+    ASSERT_EQ(top_export.ref.type, WASM_COMP_RUNTIME_REF_INSTANCE);
+    ASSERT_EQ(top_export.ref.of.instance, &component_inst->component_instances[1]);
+
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest, TestRuntimeExportsTopLevelCoreModules)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "runtime-top-level-core-module-exports";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(
+        append_top_level_core_module_export_sections((WASMComponentModule *)module));
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    auto *component_inst = (WASMComponentInstance *)module_inst;
+    const WASMComponentNamedExport &top_export =
+        component_inst->component_exports[1];
+
+    ASSERT_EQ(std::string(top_export.name), "top-level-core-module");
+    ASSERT_EQ(top_export.ref.type, WASM_COMP_RUNTIME_REF_CORE_MODULE);
+    ASSERT_EQ(top_export.ref.of.core_module, component_inst->core_modules[0]);
+
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest, TestRuntimeBuildsTopLevelInlineCoreModuleInstances)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "runtime-top-level-inline-core-module-instances";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(append_top_level_inline_core_module_instance_sections(
+        (WASMComponentModule *)module));
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    auto *component_inst = (WASMComponentInstance *)module_inst;
+    const WASMComponentRuntimeInstance &inline_instance =
+        component_inst->component_instances[1];
+    const WASMComponentNamedExport &top_export =
+        component_inst->component_exports[1];
+
+    ASSERT_EQ(inline_instance.export_count, 1u);
+    ASSERT_EQ(std::string(inline_instance.exports[0].name), "wrapped-core-module");
+    ASSERT_EQ(inline_instance.exports[0].ref.type, WASM_COMP_RUNTIME_REF_CORE_MODULE);
+    ASSERT_EQ(inline_instance.exports[0].ref.of.core_module,
+              component_inst->core_modules[0]);
+    ASSERT_EQ(std::string(top_export.name), "top-level-inline-core-module-instance");
+    ASSERT_EQ(top_export.ref.type, WASM_COMP_RUNTIME_REF_INSTANCE);
+    ASSERT_EQ(top_export.ref.of.instance, &component_inst->component_instances[1]);
+
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest, TestRuntimeBuildsNestedInlineComponentInstancesOfComponents)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "runtime-nested-inline-component-instances";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(append_nested_component_inline_component_instance_sections(
+        (WASMComponentModule *)module));
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    auto *component_inst = (WASMComponentInstance *)module_inst;
+    const WASMComponentRuntimeInstance &nested_instance =
+        component_inst->component_instances[1];
+    const WASMComponentRuntimeInstance &child_instance =
+        nested_instance.owned_instances[0];
+
+    ASSERT_EQ(nested_instance.export_count, 1u);
+    ASSERT_EQ(nested_instance.owned_instance_count, 1u);
+    ASSERT_EQ(std::string(nested_instance.exports[0].name), "wrapped-instance");
+    ASSERT_EQ(nested_instance.exports[0].ref.type, WASM_COMP_RUNTIME_REF_INSTANCE);
+    ASSERT_EQ(child_instance.export_count, 1u);
+    ASSERT_EQ(std::string(child_instance.exports[0].name), "wrapped");
+    ASSERT_EQ(child_instance.exports[0].ref.type, WASM_COMP_RUNTIME_REF_COMPONENT);
+    ASSERT_EQ(child_instance.exports[0].ref.of.component->component,
+              component_inst->components[0].component);
 
     wasm_runtime_deinstantiate(module_inst);
     wasm_runtime_unload(module);

@@ -712,10 +712,22 @@ resolve_component_sort_idx(const WASMComponentInstance *inst,
         return set_component_runtime_error_fmt(
             error_buf, error_buf_size, "missing component sort index");
 
-    if (sort_idx->sort->sort == WASM_COMP_SORT_CORE_SORT)
-        return set_component_runtime_error_fmt(
-            error_buf, error_buf_size,
-            "core sorts are not valid in component sort resolution");
+    if (sort_idx->sort->sort == WASM_COMP_SORT_CORE_SORT) {
+        if (sort_idx->sort->core_sort != WASM_COMP_CORE_SORT_MODULE)
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                "only core module sort is supported in component sort "
+                "resolution");
+
+        if (sort_idx->idx >= inst->core_module_count)
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                "core module index %u is out of bounds", sort_idx->idx);
+
+        out_ref->type = WASM_COMP_RUNTIME_REF_CORE_MODULE;
+        out_ref->of.core_module = inst->core_modules[sort_idx->idx];
+        return true;
+    }
 
     switch (sort_idx->sort->sort) {
         case WASM_COMP_SORT_FUNC:

@@ -71,7 +71,8 @@ typedef struct WASMComponentRuntimeComponent {
 typedef enum WASMComponentRuntimeRefType {
     WASM_COMP_RUNTIME_REF_FUNC = 0,
     WASM_COMP_RUNTIME_REF_INSTANCE,
-    WASM_COMP_RUNTIME_REF_COMPONENT
+    WASM_COMP_RUNTIME_REF_COMPONENT,
+    WASM_COMP_RUNTIME_REF_CORE_MODULE
 } WASMComponentRuntimeRefType;
 
 struct WASMComponentRuntimeInstance;
@@ -82,6 +83,7 @@ typedef struct WASMComponentRuntimeRef {
         WASMComponentRuntimeFunc *function;
         struct WASMComponentRuntimeInstance *instance;
         WASMComponentRuntimeComponent *component;
+        wasm_module_t core_module;
     } of;
 } WASMComponentRuntimeRef;
 
