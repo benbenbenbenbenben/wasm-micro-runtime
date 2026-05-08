@@ -425,6 +425,29 @@ make_component_s32_value(int32_t value)
     return result;
 }
 
+static wasm_component_value_t
+make_component_list_u8_value(const void *data, uint32_t size)
+{
+    wasm_component_value_t result = {};
+
+    result.type.kind = WASM_COMPONENT_VALUE_TYPE_DEFINED;
+    result.byte_size = size;
+    if (size == 0) {
+        return result;
+    }
+
+    auto *storage = (uint8_t *)wasm_runtime_malloc(size);
+    EXPECT_NE(storage, nullptr);
+    if (!storage) {
+        return result;
+    }
+
+    memcpy(storage, data, size);
+    result.storage_kind = WASM_COMPONENT_VALUE_STORAGE_OWNED;
+    result.storage.owned_data = storage;
+    return result;
+}
+
 static wasm_module_inst_t
 instantiate_component_with_default_wasi(wasm_module_t module,
                                         ComponentHelper *helper)
@@ -496,6 +519,40 @@ decode_component_string_arg(const wasm_component_value_t *value, std::string *ou
     }
 
     out->assign((const char *)(data + offset), len);
+    return true;
+}
+
+static bool
+decode_component_s32_arg(const wasm_component_value_t *value, int32_t *out)
+{
+    const auto *data = (const uint8_t *)wasm_component_value_get_data(value);
+    int32_t result = 0;
+    uint32_t shift = 0;
+    uint32_t offset = 0;
+    uint8_t byte = 0;
+
+    if (!value || !out || !data || value->byte_size == 0) {
+        return false;
+    }
+
+    do {
+        if (offset >= value->byte_size || shift >= 35) {
+            return false;
+        }
+        byte = data[offset++];
+        result |= (int32_t)(byte & 0x7F) << shift;
+        shift += 7;
+    } while (byte & 0x80);
+
+    if (offset != value->byte_size) {
+        return false;
+    }
+
+    if (shift < 32 && (byte & 0x40)) {
+        result |= -((int32_t)1 << shift);
+    }
+
+    *out = result;
     return true;
 }
 
@@ -1129,6 +1186,80 @@ ensure_canon_lift_memory_opt(WASMComponentCanon *canon, uint32_t mem_idx)
 }
 
 static bool
+ensure_canon_lift_realloc_opt(WASMComponentCanon *canon, uint32_t func_idx)
+{
+    if (!canon || canon->tag != WASM_COMP_CANON_LIFT) {
+        return false;
+    }
+
+    if (!canon->canon_data.lift.canon_opts) {
+        canon->canon_data.lift.canon_opts =
+            (WASMComponentCanonOpts *)wasm_runtime_malloc(
+                sizeof(WASMComponentCanonOpts));
+        if (!canon->canon_data.lift.canon_opts) {
+            return false;
+        }
+        memset(canon->canon_data.lift.canon_opts, 0, sizeof(WASMComponentCanonOpts));
+    }
+
+    for (uint32_t i = 0; i < canon->canon_data.lift.canon_opts->canon_opts_count; i++) {
+        if (canon->canon_data.lift.canon_opts->canon_opts[i].tag
+            == WASM_COMP_CANON_OPT_REALLOC) {
+            canon->canon_data.lift.canon_opts->canon_opts[i]
+                .payload.realloc_opt.func_idx = func_idx;
+            return true;
+        }
+    }
+
+    const uint32_t old_count = canon->canon_data.lift.canon_opts->canon_opts_count;
+    auto *new_opts = (WASMComponentCanonOpt *)wasm_runtime_malloc(
+        sizeof(WASMComponentCanonOpt) * (old_count + 1));
+    if (!new_opts) {
+        return false;
+    }
+
+    memset(new_opts, 0, sizeof(WASMComponentCanonOpt) * (old_count + 1));
+    if (old_count > 0 && canon->canon_data.lift.canon_opts->canon_opts) {
+        memcpy(new_opts, canon->canon_data.lift.canon_opts->canon_opts,
+               sizeof(WASMComponentCanonOpt) * old_count);
+        wasm_runtime_free(canon->canon_data.lift.canon_opts->canon_opts);
+    }
+
+    new_opts[old_count].tag = WASM_COMP_CANON_OPT_REALLOC;
+    new_opts[old_count].payload.realloc_opt.func_idx = func_idx;
+    canon->canon_data.lift.canon_opts->canon_opts = new_opts;
+    canon->canon_data.lift.canon_opts->canon_opts_count = old_count + 1;
+    return true;
+}
+
+static bool
+configure_canon_lift_param_type_idx(WASMComponentModule *component_module,
+                                    WASMComponentCanon *canon,
+                                    uint32_t param_idx,
+                                    uint32_t param_type_idx,
+                                    bool ensure_memory_opt,
+                                    bool ensure_realloc_opt)
+{
+    WASMComponentFuncType *func_type = canon
+                                           ? lookup_local_component_func_type(
+                                                 component_module,
+                                                 canon->canon_data.lift.type_idx)
+                                           : nullptr;
+    if (!canon || canon->tag != WASM_COMP_CANON_LIFT || !func_type
+        || !func_type->params || param_idx >= func_type->params->count
+        || !func_type->params->params[param_idx].value_type) {
+        return false;
+    }
+
+    func_type->params->params[param_idx].value_type->type = WASM_COMP_VAL_TYPE_IDX;
+    func_type->params->params[param_idx].value_type->type_specific.type_idx =
+        param_type_idx;
+
+    return (!ensure_memory_opt || ensure_canon_lift_memory_opt(canon, 0))
+           && (!ensure_realloc_opt || ensure_canon_lift_realloc_opt(canon, 2));
+}
+
+static bool
 configure_canon_lift_result_type_idx(WASMComponentModule *component_module,
                                      WASMComponentCanon *canon,
                                      uint32_t result_type_idx,
@@ -1150,6 +1281,26 @@ configure_canon_lift_result_type_idx(WASMComponentModule *component_module,
     func_type->results->results->type_specific.type_idx = result_type_idx;
 
     return !ensure_memory_opt || ensure_canon_lift_memory_opt(canon, 0);
+}
+
+static bool
+configure_first_canon_lift_for_list_u8_param(WASMComponentModule *component_module,
+                                             uint32_t param_type_idx)
+{
+    WASMComponentCanon *canon = find_first_canon_lift(component_module);
+    WASMComponentFuncType *func_type = canon
+                                           ? lookup_local_component_func_type(
+                                                 component_module,
+                                                 canon->canon_data.lift.type_idx)
+                                           : nullptr;
+
+    if (!canon || !func_type || !func_type->params || func_type->params->count == 0) {
+        return false;
+    }
+
+    func_type->params->count = 1;
+    return configure_canon_lift_param_type_idx(component_module, canon, 0,
+                                               param_type_idx, true, true);
 }
 
 static bool
@@ -6515,6 +6666,298 @@ TEST_F(BinaryParserTest, TestPublicComponentCallListU8CopiesBeforePostReturn)
     wasm_component_value_destroy(&second_arg[0]);
     wasm_component_value_destroy(&first_result);
     wasm_component_value_destroy(&first_arg[0]);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest, TestPublicComponentCallSupportsListU8LiftParam)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "public-component-call-list-u8-param";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(
+        append_component_export_alias_sections((WASMComponentModule *)module));
+
+    const int32_t list_u8_type_idx = append_component_list_type(
+        (WASMComponentModule *)module, WASM_COMP_PRIMVAL_U8, false, 0);
+    ASSERT_GE(list_u8_type_idx, 0);
+    ASSERT_TRUE(configure_first_canon_lift_for_list_u8_param(
+        (WASMComponentModule *)module, (uint32_t)list_u8_type_idx));
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func =
+        wasm_runtime_lookup_component_function(module_inst, "aliased-add");
+    ASSERT_NE(func, nullptr);
+
+    const uint8_t payload[] = { 0x10, 0x20, 0x30, 0x40, 0x50 };
+    wasm_component_value_t arg =
+        make_component_list_u8_value(payload, (uint32_t)sizeof(payload));
+    wasm_component_value_t result = {};
+    int32_t decoded_result = 0;
+    int32_t guest_ptr = 0;
+    uint8_t *memory = func->canon_memory_ref.of.memory->memory_data;
+
+    ASSERT_TRUE(
+        wasm_runtime_call_component_values(module_inst, func, 1, &result, 1, &arg))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(result.type.kind, WASM_COMPONENT_VALUE_TYPE_PRIMITIVE);
+    ASSERT_EQ(result.type.type.primitive_type,
+              WASM_COMPONENT_PRIMITIVE_VALUE_S32);
+    ASSERT_TRUE(decode_component_s32_arg(&result, &decoded_result));
+    guest_ptr = decoded_result - (int32_t)sizeof(payload);
+    ASSERT_GE(guest_ptr, 0);
+    ASSERT_EQ(memcmp(memory + guest_ptr, payload, sizeof(payload)), 0);
+
+    wasm_component_value_destroy(&result);
+    wasm_component_value_destroy(&arg);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest, TestPublicComponentCallRejectsMemoryBackedListU8Param)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "public-component-call-list-u8-param-raw-api";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(
+        append_component_export_alias_sections((WASMComponentModule *)module));
+
+    const int32_t list_u8_type_idx = append_component_list_type(
+        (WASMComponentModule *)module, WASM_COMP_PRIMVAL_U8, false, 0);
+    ASSERT_GE(list_u8_type_idx, 0);
+    ASSERT_TRUE(configure_first_canon_lift_for_list_u8_param(
+        (WASMComponentModule *)module, (uint32_t)list_u8_type_idx));
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func =
+        wasm_runtime_lookup_component_function(module_inst, "aliased-add");
+    ASSERT_NE(func, nullptr);
+
+    wasm_val_t arg = {};
+    wasm_val_t result = {};
+    ASSERT_FALSE(
+        wasm_runtime_call_component(module_inst, func, 1, &result, 1, &arg));
+    ASSERT_STREQ(wasm_runtime_get_exception(module_inst),
+                 "component canon lift function uses memory-backed values; call "
+                 "through the component value API");
+
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest, TestPublicComponentCallRejectsMalformedListU8ParamPayload)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "public-component-call-list-u8-param-malformed";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(
+        append_component_export_alias_sections((WASMComponentModule *)module));
+
+    const int32_t list_u8_type_idx = append_component_list_type(
+        (WASMComponentModule *)module, WASM_COMP_PRIMVAL_U8, false, 0);
+    ASSERT_GE(list_u8_type_idx, 0);
+    ASSERT_TRUE(configure_first_canon_lift_for_list_u8_param(
+        (WASMComponentModule *)module, (uint32_t)list_u8_type_idx));
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func =
+        wasm_runtime_lookup_component_function(module_inst, "aliased-add");
+    ASSERT_NE(func, nullptr);
+
+    wasm_component_value_t arg = {};
+    arg.type.kind = WASM_COMPONENT_VALUE_TYPE_DEFINED;
+    arg.byte_size = 4;
+    wasm_component_value_t result = {};
+    ASSERT_FALSE(
+        wasm_runtime_call_component_values(module_inst, func, 1, &result, 1, &arg));
+    ASSERT_STREQ(wasm_runtime_get_exception(module_inst),
+                 "component canon lift function parameter 0 is missing backing "
+                 "bytes");
+
+    wasm_component_value_destroy(&result);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest, TestPublicComponentCallRejectsUnsupportedListU8ParamElementType)
+{
+    bool ret = helper->read_wasm_file("list_u8_post_return.component.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "public-component-call-list-u8-param-wrong-element";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    const int32_t list_s32_type_idx = append_component_list_type(
+        (WASMComponentModule *)module, WASM_COMP_PRIMVAL_S32, false, 0);
+    ASSERT_GE(list_s32_type_idx, 0);
+
+    WASMComponentCanon *canon = find_first_canon_lift((WASMComponentModule *)module);
+    ASSERT_NE(canon, nullptr);
+    ASSERT_TRUE(configure_canon_lift_param_type_idx(
+        (WASMComponentModule *)module, canon, 0, (uint32_t)list_s32_type_idx, true,
+        true));
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func =
+        wasm_runtime_lookup_component_function(module_inst, "echo");
+    ASSERT_NE(func, nullptr);
+
+    wasm_component_value_t arg = make_component_list_u8_value("abcd", 4);
+    wasm_component_value_t result = {};
+    ASSERT_FALSE(
+        wasm_runtime_call_component_values(module_inst, func, 1, &result, 1, &arg));
+    ASSERT_STREQ(wasm_runtime_get_exception(module_inst),
+                 "component canon lift function parameter 0 only supports "
+                 "list<u8> parameters");
+
+    wasm_component_value_destroy(&arg);
+    wasm_component_value_destroy(&result);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest, TestPublicComponentCallRejectsFixedLengthListU8Param)
+{
+    bool ret = helper->read_wasm_file("list_u8_post_return.component.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "public-component-call-list-u8-param-fixed-length";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    const int32_t list_len_u8_type_idx = append_component_list_type(
+        (WASMComponentModule *)module, WASM_COMP_PRIMVAL_U8, true, 4);
+    ASSERT_GE(list_len_u8_type_idx, 0);
+
+    WASMComponentCanon *canon = find_first_canon_lift((WASMComponentModule *)module);
+    ASSERT_NE(canon, nullptr);
+    ASSERT_TRUE(configure_canon_lift_param_type_idx(
+        (WASMComponentModule *)module, canon, 0, (uint32_t)list_len_u8_type_idx,
+        true, true));
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func =
+        wasm_runtime_lookup_component_function(module_inst, "echo");
+    ASSERT_NE(func, nullptr);
+
+    wasm_component_value_t arg = make_component_list_u8_value("abcd", 4);
+    wasm_component_value_t result = {};
+    ASSERT_FALSE(
+        wasm_runtime_call_component_values(module_inst, func, 1, &result, 1, &arg));
+    ASSERT_STREQ(wasm_runtime_get_exception(module_inst),
+                 "component canon lift function parameter 0 only supports "
+                 "variable-length list<u8> parameters");
+
+    wasm_component_value_destroy(&arg);
+    wasm_component_value_destroy(&result);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest, TestPublicComponentCallRejectsMemory64ListU8Param)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "public-component-call-list-u8-param-memory64";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(
+        append_component_export_alias_sections((WASMComponentModule *)module));
+
+    const int32_t list_u8_type_idx = append_component_list_type(
+        (WASMComponentModule *)module, WASM_COMP_PRIMVAL_U8, false, 0);
+    ASSERT_GE(list_u8_type_idx, 0);
+    ASSERT_TRUE(configure_first_canon_lift_for_list_u8_param(
+        (WASMComponentModule *)module, (uint32_t)list_u8_type_idx));
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func =
+        wasm_runtime_lookup_component_function(module_inst, "aliased-add");
+    ASSERT_NE(func, nullptr);
+    ASSERT_NE(func->canon_memory_ref.of.memory, nullptr);
+    func->canon_memory_ref.of.memory->is_memory64 = true;
+
+    wasm_component_value_t arg = make_component_list_u8_value("abcd", 4);
+    wasm_component_value_t result = {};
+    ASSERT_FALSE(
+        wasm_runtime_call_component_values(module_inst, func, 1, &result, 1, &arg));
+    ASSERT_STREQ(wasm_runtime_get_exception(module_inst),
+                 "component canon lift function does not support memory64 "
+                 "list<u8> Canonical ABI");
+
+    wasm_component_value_destroy(&arg);
+    wasm_component_value_destroy(&result);
     wasm_runtime_deinstantiate(module_inst);
     wasm_runtime_unload(module);
 }
