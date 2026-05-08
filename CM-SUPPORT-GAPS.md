@@ -120,6 +120,7 @@ What works today:
 - memory / realloc / post-return validation and use for supported UTF-8 string lifts
 - host-provided top-level component-function imports for scalar / UTF-8 string / `list<u8>` signatures
 - host-provided top-level component-function imports for tuple/record parameters with scalar leaves
+- host-provided top-level component-function imports for tuple/record results with scalar leaves
 
 Current supported execution envelope is intentionally narrow:
 
@@ -236,7 +237,7 @@ Current limitations include:
 - `wasm_runtime_call_component(...)` / `wasm_runtime_call_component_values(...)` only accept top-level exported canon-lift handles
 - nested function handles can be discovered, but not invoked through the public top-level call API
 - top-level import binding is limited to existing runtime handles / public values and the current supported host callback subset, not arbitrary host-native lowered adapters
-- host-import composite results are still limited beyond the current scalar/string/`list<u8>` surface
+- host-import composite results are limited to tuple/record shapes whose leaves are all scalar
 - there is still no public resource import/export contract comparable to the current function/value/instance/component/core-module surface
 
 ## 5. Broader component values are still missing

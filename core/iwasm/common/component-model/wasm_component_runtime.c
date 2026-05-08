@@ -1963,16 +1963,19 @@ validate_component_host_import_value_type(
                   "variable-length list<u8> parameters",
             import_name, position, index);
 
-    if (!strcmp(position, "parameter")
-        && (def_type->tag == WASM_COMP_DEF_VAL_RECORD
-            || def_type->tag == WASM_COMP_DEF_VAL_TUPLE)) {
+    if (def_type->tag == WASM_COMP_DEF_VAL_RECORD
+        || def_type->tag == WASM_COMP_DEF_VAL_TUPLE) {
         switch (def_type->tag) {
             case WASM_COMP_DEF_VAL_RECORD:
                 if (!def_type->def_val.record)
                     return set_component_runtime_error_fmt(
                         error_buf, error_buf_size,
-                        "host component import \"%s\" parameter %u only supports "
-                        "tuple/record parameters with scalar leaves",
+                        !strcmp(position, "result")
+                            ? "host component import \"%s\" result %u only "
+                              "supports tuple/record results with scalar leaves"
+                            : "host component import \"%s\" parameter %u only "
+                              "supports tuple/record parameters with scalar "
+                              "leaves",
                         import_name, index);
                 for (uint32 i = 0; i < def_type->def_val.record->count; i++) {
                     bool nested_is_string = false;
@@ -1988,8 +1991,13 @@ validate_component_host_import_value_type(
                     if (nested_is_string || nested_is_list_u8)
                         return set_component_runtime_error_fmt(
                             error_buf, error_buf_size,
-                            "host component import \"%s\" parameter %u only "
-                            "supports tuple/record parameters with scalar leaves",
+                            !strcmp(position, "result")
+                                ? "host component import \"%s\" result %u only "
+                                  "supports tuple/record results with scalar "
+                                  "leaves"
+                                : "host component import \"%s\" parameter %u "
+                                  "only supports tuple/record parameters with "
+                                  "scalar leaves",
                             import_name, index);
                 }
                 *is_composite_out = true;
@@ -1998,8 +2006,12 @@ validate_component_host_import_value_type(
                 if (!def_type->def_val.tuple)
                     return set_component_runtime_error_fmt(
                         error_buf, error_buf_size,
-                        "host component import \"%s\" parameter %u only supports "
-                        "tuple/record parameters with scalar leaves",
+                        !strcmp(position, "result")
+                            ? "host component import \"%s\" result %u only "
+                              "supports tuple/record results with scalar leaves"
+                            : "host component import \"%s\" parameter %u only "
+                              "supports tuple/record parameters with scalar "
+                              "leaves",
                         import_name, index);
                 for (uint32 i = 0; i < def_type->def_val.tuple->count; i++) {
                     bool nested_is_string = false;
@@ -2015,8 +2027,13 @@ validate_component_host_import_value_type(
                     if (nested_is_string || nested_is_list_u8)
                         return set_component_runtime_error_fmt(
                             error_buf, error_buf_size,
-                            "host component import \"%s\" parameter %u only "
-                            "supports tuple/record parameters with scalar leaves",
+                            !strcmp(position, "result")
+                                ? "host component import \"%s\" result %u only "
+                                  "supports tuple/record results with scalar "
+                                  "leaves"
+                                : "host component import \"%s\" parameter %u "
+                                  "only supports tuple/record parameters with "
+                                  "scalar leaves",
                             import_name, index);
                 }
                 *is_composite_out = true;
@@ -2048,6 +2065,7 @@ validate_component_host_import_func_type(WASMComponentInstance *inst,
     function->has_composite_params = false;
     function->has_string_result = false;
     function->has_list_u8_result = false;
+    function->has_composite_result = false;
 
     type_entry =
         wasm_component_lookup_type(&inst->module->component, function->type_idx);
@@ -2101,7 +2119,8 @@ validate_component_host_import_func_type(WASMComponentInstance *inst,
                 &function->has_list_u8_result, &is_composite, error_buf,
                 error_buf_size))
             return false;
-        (void)is_composite;
+        if (is_composite)
+            function->has_composite_result = true;
     }
 
     return true;
@@ -2824,17 +2843,16 @@ call_component_canon_realloc(WASMComponentInstance *inst,
                              uint32 new_size, uint32 *ptr_out);
 
 static bool
-decode_component_public_char_prefix(WASMComponentInstance *inst, const uint8 *data,
-                                    uint32 byte_size, const char *position,
-                                    uint32 index, uint32 *code_point_out,
-                                    uint32 *consumed_out)
+decode_component_public_char_prefix_with_context(
+    WASMComponentInstance *inst, const uint8 *data, uint32 byte_size,
+    const char *function_desc, const char *position, uint32 index,
+    uint32 *code_point_out, uint32 *consumed_out)
 {
     uint32 char_len;
 
     if (!data || byte_size == 0)
         return set_component_call_error_fmt(
-            inst, "component canon lift function %s %u does not contain a valid "
-                  "char value",
+            inst, "%s %s %u does not contain a valid char value", function_desc,
             position, index);
 
     if ((data[0] & 0x80) == 0)
@@ -2847,14 +2865,12 @@ decode_component_public_char_prefix(WASMComponentInstance *inst, const uint8 *da
         char_len = 4;
     else
         return set_component_call_error_fmt(
-            inst, "component canon lift function %s %u does not contain a valid "
-                  "char value",
+            inst, "%s %s %u does not contain a valid char value", function_desc,
             position, index);
 
     if (char_len > byte_size)
         return set_component_call_error_fmt(
-            inst, "component canon lift function %s %u does not contain a valid "
-                  "char value",
+            inst, "%s %s %u does not contain a valid char value", function_desc,
             position, index);
 
     if (!decode_component_public_char(inst, data, char_len, position, index,
@@ -2866,10 +2882,22 @@ decode_component_public_char_prefix(WASMComponentInstance *inst, const uint8 *da
 }
 
 static bool
-decode_component_public_scalar_prefix(
+decode_component_public_char_prefix(WASMComponentInstance *inst, const uint8 *data,
+                                    uint32 byte_size, const char *position,
+                                    uint32 index, uint32 *code_point_out,
+                                    uint32 *consumed_out)
+{
+    return decode_component_public_char_prefix_with_context(
+        inst, data, byte_size, "component canon lift function", position, index,
+        code_point_out, consumed_out);
+}
+
+static bool
+decode_component_public_scalar_prefix_with_context(
     WASMComponentInstance *inst, const uint8 *data, uint32 byte_size,
-    uint8 prim_type, wasm_valkind_t public_kind, const char *position,
-    uint32 index, wasm_val_t *out_value, uint32 *consumed_out)
+    uint8 prim_type, wasm_valkind_t public_kind, const char *function_desc,
+    const char *position, uint32 index, wasm_val_t *out_value,
+    uint32 *consumed_out)
 {
     uint64 leb_value = 0;
     uint32 code_point = 0;
@@ -2883,27 +2911,24 @@ decode_component_public_scalar_prefix(
         case WASM_COMP_PRIMVAL_BOOL:
             if (!data || byte_size < 1 || (data[0] != 0 && data[0] != 1))
                 return set_component_call_error_fmt(
-                    inst, "component canon lift function %s %u does not contain "
-                          "a valid bool value",
-                    position, index);
+                    inst, "%s %s %u does not contain a valid bool value",
+                    function_desc, position, index);
             out_value->of.i32 = data[0];
             *consumed_out = 1;
             return true;
         case WASM_COMP_PRIMVAL_S8:
             if (!data || byte_size < 1)
                 return set_component_call_error_fmt(
-                    inst, "component canon lift function %s %u does not contain "
-                          "a valid s8 value",
-                    position, index);
+                    inst, "%s %s %u does not contain a valid s8 value",
+                    function_desc, position, index);
             out_value->of.i32 = (int8)data[0];
             *consumed_out = 1;
             return true;
         case WASM_COMP_PRIMVAL_U8:
             if (!data || byte_size < 1)
                 return set_component_call_error_fmt(
-                    inst, "component canon lift function %s %u does not contain "
-                          "a valid u8 value",
-                    position, index);
+                    inst, "%s %s %u does not contain a valid u8 value",
+                    function_desc, position, index);
             out_value->of.i32 = data[0];
             *consumed_out = 1;
             return true;
@@ -2914,9 +2939,8 @@ decode_component_public_scalar_prefix(
                                  true, &leb_value, &offset);
             if (status != BH_LEB_READ_SUCCESS)
                 return set_component_call_error_fmt(
-                    inst, "component canon lift function %s %u does not contain "
-                          "a valid %s value",
-                    position, index,
+                    inst, "%s %s %u does not contain a valid %s value",
+                    function_desc, position, index,
                     prim_type == WASM_COMP_PRIMVAL_S16 ? "s16" : "s32");
             out_value->of.i32 = (int32)leb_value;
             *consumed_out = (uint32)offset;
@@ -2928,9 +2952,8 @@ decode_component_public_scalar_prefix(
                                  false, &leb_value, &offset);
             if (status != BH_LEB_READ_SUCCESS)
                 return set_component_call_error_fmt(
-                    inst, "component canon lift function %s %u does not contain "
-                          "a valid %s value",
-                    position, index,
+                    inst, "%s %s %u does not contain a valid %s value",
+                    function_desc, position, index,
                     prim_type == WASM_COMP_PRIMVAL_U16 ? "u16" : "u32");
             out_value->of.i32 = (int32)(uint32)leb_value;
             *consumed_out = (uint32)offset;
@@ -2940,9 +2963,8 @@ decode_component_public_scalar_prefix(
                                  &offset);
             if (status != BH_LEB_READ_SUCCESS)
                 return set_component_call_error_fmt(
-                    inst, "component canon lift function %s %u does not contain "
-                          "a valid s64 value",
-                    position, index);
+                    inst, "%s %s %u does not contain a valid s64 value",
+                    function_desc, position, index);
             out_value->of.i64 = (int64)leb_value;
             *consumed_out = (uint32)offset;
             return true;
@@ -2951,43 +2973,52 @@ decode_component_public_scalar_prefix(
                                  &offset);
             if (status != BH_LEB_READ_SUCCESS)
                 return set_component_call_error_fmt(
-                    inst, "component canon lift function %s %u does not contain "
-                          "a valid u64 value",
-                    position, index);
+                    inst, "%s %s %u does not contain a valid u64 value",
+                    function_desc, position, index);
             out_value->of.i64 = (uint64)leb_value;
             *consumed_out = (uint32)offset;
             return true;
         case WASM_COMP_PRIMVAL_F32:
             if (!data || byte_size < sizeof(float32))
                 return set_component_call_error_fmt(
-                    inst, "component canon lift function %s %u does not contain "
-                          "a valid f32 value",
-                    position, index);
+                    inst, "%s %s %u does not contain a valid f32 value",
+                    function_desc, position, index);
             memcpy(&out_value->of.f32, data, sizeof(float32));
             *consumed_out = sizeof(float32);
             return true;
         case WASM_COMP_PRIMVAL_F64:
             if (!data || byte_size < sizeof(float64))
                 return set_component_call_error_fmt(
-                    inst, "component canon lift function %s %u does not contain "
-                          "a valid f64 value",
-                    position, index);
+                    inst, "%s %s %u does not contain a valid f64 value",
+                    function_desc, position, index);
             memcpy(&out_value->of.f64, data, sizeof(float64));
             *consumed_out = sizeof(float64);
             return true;
         case WASM_COMP_PRIMVAL_CHAR:
-            if (!decode_component_public_char_prefix(inst, data, byte_size,
-                                                     position, index, &code_point,
-                                                     consumed_out))
+            if (!decode_component_public_char_prefix_with_context(
+                    inst, data, byte_size, function_desc, position, index,
+                    &code_point, consumed_out))
                 return false;
             out_value->of.i32 = (int32)code_point;
             return true;
         default:
             return set_component_call_error_fmt(
-                inst, "component canon lift function %s %u uses unsupported "
-                      "component scalar type %s",
-                position, index, component_prim_type_name(prim_type));
+                inst, "%s %s %u uses unsupported component scalar type %s",
+                function_desc, position, index,
+                component_prim_type_name(prim_type));
     }
+}
+
+static bool
+decode_component_public_scalar_prefix(
+    WASMComponentInstance *inst, const uint8 *data, uint32 byte_size,
+    uint8 prim_type, wasm_valkind_t public_kind, const char *position,
+    uint32 index, wasm_val_t *out_value, uint32 *consumed_out)
+{
+    return decode_component_public_scalar_prefix_with_context(
+        inst, data, byte_size, prim_type, public_kind,
+        "component canon lift function", position, index, out_value,
+        consumed_out);
 }
 
 static bool
@@ -3184,6 +3215,119 @@ validate_component_public_composite_param_value(
         return set_component_call_error_fmt(
             inst, "host component function parameter %u contains trailing bytes",
             param_index);
+    return true;
+}
+
+static bool
+set_host_component_composite_result_leaf_error(WASMComponentInstance *inst,
+                                               uint32 index)
+{
+    return set_component_call_error_fmt(
+        inst, "host component function result %u only supports tuple/record "
+              "results with scalar leaves",
+        index);
+}
+
+static bool
+validate_host_component_public_composite_result_bytes(
+    WASMComponentInstance *inst, const WASMComponent *component,
+    const WASMComponentValueType *value_type, const uint8 *data,
+    uint32 byte_size, uint32 *offset_io, uint32 result_index)
+{
+    WASMComponentCanonLiftValueShape shape;
+
+    if (!resolve_component_canon_lift_value_shape(component, value_type, "result",
+                                                  result_index, &shape, inst))
+        return false;
+
+    if (shape.is_primitive) {
+        wasm_val_t ignored;
+        uint8 expected_core_type;
+        wasm_valkind_t public_kind;
+        uint32 consumed = 0;
+
+        if (!component_scalar_prim_to_core(shape.prim_type, &expected_core_type,
+                                           &public_kind))
+            return set_host_component_composite_result_leaf_error(inst,
+                                                                  result_index);
+
+        if (!decode_component_public_scalar_prefix_with_context(
+                inst, data ? data + *offset_io : NULL, byte_size - *offset_io,
+                shape.prim_type, public_kind, "host component function", "result",
+                result_index, &ignored, &consumed))
+            return false;
+
+        (*offset_io) += consumed;
+        return true;
+    }
+
+    if (!shape.def_type)
+        return set_host_component_composite_result_leaf_error(inst, result_index);
+
+    switch (shape.def_type->tag) {
+        case WASM_COMP_DEF_VAL_RECORD:
+            if (!shape.def_type->def_val.record)
+                return set_host_component_composite_result_leaf_error(inst,
+                                                                      result_index);
+            for (uint32 i = 0; i < shape.def_type->def_val.record->count; i++) {
+                if (!validate_host_component_public_composite_result_bytes(
+                        inst, component,
+                        shape.def_type->def_val.record->fields[i].value_type, data,
+                        byte_size, offset_io, result_index))
+                    return false;
+            }
+            return true;
+        case WASM_COMP_DEF_VAL_TUPLE:
+            if (!shape.def_type->def_val.tuple)
+                return set_host_component_composite_result_leaf_error(inst,
+                                                                      result_index);
+            for (uint32 i = 0; i < shape.def_type->def_val.tuple->count; i++) {
+                if (!validate_host_component_public_composite_result_bytes(
+                        inst, component,
+                        &shape.def_type->def_val.tuple->element_types[i], data,
+                        byte_size, offset_io, result_index))
+                    return false;
+            }
+            return true;
+        default:
+            return set_host_component_composite_result_leaf_error(inst,
+                                                                  result_index);
+    }
+}
+
+static bool
+validate_host_component_public_composite_result_value(
+    WASMComponentInstance *inst, const WASMComponent *component,
+    const WASMComponentValueType *value_type, const wasm_component_value_t *value,
+    uint32 result_index)
+{
+    const uint8 *data;
+    uint32 offset = 0;
+
+    if (!value)
+        return set_component_call_error_fmt(
+            inst, "host component function result %u value is null", result_index);
+    if (value->type.kind != WASM_COMPONENT_VALUE_TYPE_DEFINED)
+        return set_component_call_error_fmt(
+            inst, "host component function result %u expects a defined component "
+                  "value",
+            result_index);
+
+    data = wasm_component_value_get_data(value);
+    if (value->byte_size > 0 && !data)
+        return set_component_call_error_fmt(
+            inst, "host component function result %u is missing backing bytes",
+            result_index);
+
+    if (!validate_host_component_public_composite_result_bytes(
+            inst, component, value_type, data, value->byte_size, &offset,
+            result_index))
+        return false;
+
+    if (offset != value->byte_size)
+        return set_component_call_error_fmt(
+            inst, "host component function result %u contains trailing bytes",
+            result_index);
     return true;
 }
 
@@ -4177,35 +4321,46 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
         }
 
         if (expected_result_count == 1) {
-            if (!lookup_component_canon_lift_value_type(
-                    &inst->module->component, component_type->results->results,
-                    "result", 0, true, false, true, &result_info, inst)) {
-                wasm_component_value_destroy(&callback_results[0]);
-                return false;
-            }
-
-            if (result_info.kind == WASM_COMP_CANON_LIFT_VALUE_SCALAR) {
-                if (!decode_component_public_scalar_value(
-                        inst, &callback_results[0], &result_info, "result", 0,
-                        &ignored)) {
+            if (function->has_composite_result) {
+                if (!validate_host_component_public_composite_result_value(
+                        inst, &inst->module->component,
+                        component_type->results->results, &callback_results[0],
+                        0)) {
                     wasm_component_value_destroy(&callback_results[0]);
                     return false;
                 }
             }
             else {
-                const uint8 *payload;
-                uint32 payload_len;
-
-                if ((result_info.kind == WASM_COMP_CANON_LIFT_VALUE_STRING
-                     && !decode_component_public_string_value(
-                         inst, &callback_results[0], &result_info, "result", 0,
-                         &payload, &payload_len))
-                    || (result_info.kind == WASM_COMP_CANON_LIFT_VALUE_LIST_U8
-                        && !decode_component_public_list_u8_value(
-                            inst, &callback_results[0], &result_info, "result",
-                            0, &payload, &payload_len))) {
+                if (!lookup_component_canon_lift_value_type(
+                        &inst->module->component, component_type->results->results,
+                        "result", 0, true, false, true, &result_info, inst)) {
                     wasm_component_value_destroy(&callback_results[0]);
                     return false;
+                }
+
+                if (result_info.kind == WASM_COMP_CANON_LIFT_VALUE_SCALAR) {
+                    if (!decode_component_public_scalar_value(
+                            inst, &callback_results[0], &result_info, "result", 0,
+                            &ignored)) {
+                        wasm_component_value_destroy(&callback_results[0]);
+                        return false;
+                    }
+                }
+                else {
+                    const uint8 *payload;
+                    uint32 payload_len;
+
+                    if ((result_info.kind == WASM_COMP_CANON_LIFT_VALUE_STRING
+                         && !decode_component_public_string_value(
+                             inst, &callback_results[0], &result_info, "result",
+                             0, &payload, &payload_len))
+                        || (result_info.kind == WASM_COMP_CANON_LIFT_VALUE_LIST_U8
+                            && !decode_component_public_list_u8_value(
+                                inst, &callback_results[0], &result_info, "result",
+                                0, &payload, &payload_len))) {
+                        wasm_component_value_destroy(&callback_results[0]);
+                        return false;
+                    }
                 }
             }
 
@@ -4574,7 +4729,7 @@ wasm_component_call_internal(WASMComponentInstance *inst,
 
         if (function->has_string_params || function->has_string_result
             || function->has_list_u8_params || function->has_list_u8_result
-            || function->has_composite_params)
+            || function->has_composite_params || function->has_composite_result)
             return set_component_call_error(
                 inst,
                 function->has_string_params || function->has_string_result

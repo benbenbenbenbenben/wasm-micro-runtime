@@ -88,6 +88,7 @@ typedef struct WASMComponentRuntimeFunc {
     bool has_composite_params;
     bool has_string_result;
     bool has_list_u8_result;
+    bool has_composite_result;
     bool is_top_level_export;
     wasm_component_host_func_callback_t host_callback;
     void *host_user_data;
