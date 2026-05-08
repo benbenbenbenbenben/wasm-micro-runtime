@@ -120,7 +120,7 @@ What works today:
 - top-level exported `canon lift` tuple/record results with scalar, UTF-8 string, and nested `list<u8>` leaves
 - memory / realloc / post-return validation and use for supported UTF-8 string lifts
 - host-provided top-level component-function imports for scalar / UTF-8 string / `list<u8>` signatures
-- host-provided top-level component-function imports for tuple/record parameters with scalar leaves
+- host-provided top-level component-function imports for tuple/record parameters with scalar, UTF-8 string, and nested `list<u8>` leaves
 - host-provided top-level component-function imports for tuple/record results with scalar leaves
 
 Current supported execution envelope is intentionally narrow:
@@ -194,7 +194,7 @@ This is a real runtime substrate, but not yet full resource semantics.
 - public value import/export flows
 - top-level and nested value sections
 - top-level and nested scalar start execution
-- top-level host function imports across scalar / UTF-8 string / `list<u8>` / scalar-leaf tuple-record slices
+- top-level host function imports across scalar / UTF-8 string / `list<u8>` / supported tuple-record parameter slices with scalar, UTF-8 string, and nested `list<u8>` leaves, plus scalar-leaf tuple-record results
 - resource-state and owned-handle cleanup foundations
 
 ## 2. What is still missing for full component-model support
@@ -217,9 +217,9 @@ Major Canonical ABI gaps remain:
 
 - no executable `canon lower`
 - no general adapter/lowering path for imported component functions beyond the supported host-callback subset
-- no list marshalling beyond UTF-8 strings, top-level `list<u8>`, and nested `list<u8>` leaves in exported tuple/record values
+- no list marshalling beyond UTF-8 strings, top-level `list<u8>`, and nested `list<u8>` leaves in exported tuple/record values and host-import tuple/record parameters
 - no variant / flags / enum / option / result marshalling
-- no non-string memory-backed leaves inside tuple/record Canonical ABI values beyond nested `list<u8>` leaves for exported canon-lift calls
+- no non-string memory-backed leaves inside tuple/record Canonical ABI values beyond nested `list<u8>` leaves for exported canon-lift calls and host-import tuple/record parameters
 - no broader composite flattening/lifting rules beyond scalar-leaf tuple/record support
 - no non-UTF-8 string encodings (`utf16`, `latin1+utf16`)
 - no `memory64` memory-backed Canonical ABI support

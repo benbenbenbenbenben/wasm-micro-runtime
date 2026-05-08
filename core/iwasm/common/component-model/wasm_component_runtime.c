@@ -2110,6 +2110,8 @@ validate_component_host_import_value_type(
     uint8 ignored_core_type = 0;
     wasm_valkind_t ignored_public_kind = WASM_I32;
     const WASMComponentValueType *element_type;
+    const bool allow_memory_backed_composite_leaves =
+        !strcmp(position, "parameter");
 
     *is_string_out = false;
     *is_list_u8_out = false;
@@ -2256,7 +2258,8 @@ validate_component_host_import_value_type(
                             ? "host component import \"%s\" result %u only "
                               "supports tuple/record results with scalar leaves"
                             : "host component import \"%s\" parameter %u only "
-                              "supports tuple/record parameters with scalar "
+                              "supports tuple/record parameters with scalar, "
+                              "UTF-8 string, or variable-length list<u8> "
                               "leaves",
                         import_name, index);
                 for (uint32 i = 0; i < def_type->def_val.record->count; i++) {
@@ -2270,7 +2273,8 @@ validate_component_host_import_value_type(
                             &nested_is_list_u8, &nested_is_composite, error_buf,
                             error_buf_size))
                         return false;
-                    if (nested_is_string || nested_is_list_u8)
+                    if (!allow_memory_backed_composite_leaves
+                        && (nested_is_string || nested_is_list_u8))
                         return set_component_runtime_error_fmt(
                             error_buf, error_buf_size,
                             !strcmp(position, "result")
@@ -2281,6 +2285,8 @@ validate_component_host_import_value_type(
                                   "only supports tuple/record parameters with "
                                   "scalar leaves",
                             import_name, index);
+                    *is_string_out = *is_string_out || nested_is_string;
+                    *is_list_u8_out = *is_list_u8_out || nested_is_list_u8;
                 }
                 *is_composite_out = true;
                 return true;
@@ -2292,7 +2298,8 @@ validate_component_host_import_value_type(
                             ? "host component import \"%s\" result %u only "
                               "supports tuple/record results with scalar leaves"
                             : "host component import \"%s\" parameter %u only "
-                              "supports tuple/record parameters with scalar "
+                              "supports tuple/record parameters with scalar, "
+                              "UTF-8 string, or variable-length list<u8> "
                               "leaves",
                         import_name, index);
                 for (uint32 i = 0; i < def_type->def_val.tuple->count; i++) {
@@ -2306,7 +2313,8 @@ validate_component_host_import_value_type(
                             &nested_is_list_u8, &nested_is_composite, error_buf,
                             error_buf_size))
                         return false;
-                    if (nested_is_string || nested_is_list_u8)
+                    if (!allow_memory_backed_composite_leaves
+                        && (nested_is_string || nested_is_list_u8))
                         return set_component_runtime_error_fmt(
                             error_buf, error_buf_size,
                             !strcmp(position, "result")
@@ -2317,6 +2325,8 @@ validate_component_host_import_value_type(
                                   "only supports tuple/record parameters with "
                                   "scalar leaves",
                             import_name, index);
+                    *is_string_out = *is_string_out || nested_is_string;
+                    *is_list_u8_out = *is_list_u8_out || nested_is_list_u8;
                 }
                 *is_composite_out = true;
                 return true;
