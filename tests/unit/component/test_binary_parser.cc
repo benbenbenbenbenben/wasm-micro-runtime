@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include "wasm_component_runtime.h"
 
 static std::vector<std::string> component_files = {
     "add.wasm",
@@ -148,7 +149,7 @@ TEST_F(BinaryParserTest, TestRuntimeLoadComponent)
     bool ret = helper->read_wasm_file("logging_service.component.wasm");
     ASSERT_TRUE(ret);
 
-    LoadArgs load_args = { 0 };
+    LoadArgs load_args = {};
     char module_name[] = "runtime-load-component";
     load_args.name = module_name;
 
@@ -164,10 +165,10 @@ TEST_F(BinaryParserTest, TestRuntimeLoadComponent)
 
 TEST_F(BinaryParserTest, TestRuntimeInstantiateAndDeinstantiateComponent)
 {
-    bool ret = helper->read_wasm_file("logging_service.component.wasm");
+    bool ret = helper->read_wasm_file("add.wasm");
     ASSERT_TRUE(ret);
 
-    LoadArgs load_args = { 0 };
+    LoadArgs load_args = {};
     char module_name[] = "runtime-instantiate-component";
     load_args.name = module_name;
 
@@ -190,10 +191,10 @@ TEST_F(BinaryParserTest, TestRuntimeInstantiateAndDeinstantiateComponent)
 
 TEST_F(BinaryParserTest, TestRuntimeLookupComponentFunctionNotSupportedYet)
 {
-    bool ret = helper->read_wasm_file("logging_service.component.wasm");
+    bool ret = helper->read_wasm_file("add.wasm");
     ASSERT_TRUE(ret);
 
-    LoadArgs load_args = { 0 };
+    LoadArgs load_args = {};
     char module_name[] = "runtime-lookup-component";
     load_args.name = module_name;
 
@@ -212,6 +213,51 @@ TEST_F(BinaryParserTest, TestRuntimeLookupComponentFunctionNotSupportedYet)
     ASSERT_EQ(func, nullptr);
     ASSERT_STREQ(wasm_runtime_get_exception(module_inst),
                  "component function lookup is not supported yet");
+
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest, TestRuntimeBuildsCoreInstanceGraphAndAliases)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "runtime-component-graph";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    auto *component_inst = (WASMComponentInstance *)module_inst;
+    ASSERT_GT(component_inst->core_module_count, 0u);
+    ASSERT_GT(component_inst->core_instance_count, 0u);
+    ASSERT_GT(component_inst->core_func_count, 0u);
+    ASSERT_GT(component_inst->resolved_alias_count, 0u);
+
+    bool found_add_alias = false;
+    for (uint32_t i = 0; i < component_inst->resolved_alias_count; i++) {
+        const WASMComponentResolvedAlias &alias =
+            component_inst->resolved_aliases[i];
+
+        if (std::string(alias.name) == "test:project/my-interface@0.1.0#add") {
+            found_add_alias = true;
+            ASSERT_EQ(alias.ref.type, WASM_COMP_CORE_RUNTIME_REF_FUNC);
+            ASSERT_NE(alias.ref.of.function, nullptr);
+            break;
+        }
+    }
+
+    ASSERT_TRUE(found_add_alias);
 
     wasm_runtime_deinstantiate(module_inst);
     wasm_runtime_unload(module);

@@ -8,6 +8,45 @@
 
 #include "wasm_component.h"
 
+typedef enum WASMComponentCoreRuntimeRefType {
+    WASM_COMP_CORE_RUNTIME_REF_FUNC = 0,
+    WASM_COMP_CORE_RUNTIME_REF_TABLE,
+    WASM_COMP_CORE_RUNTIME_REF_MEMORY,
+    WASM_COMP_CORE_RUNTIME_REF_GLOBAL,
+    WASM_COMP_CORE_RUNTIME_REF_MODULE,
+    WASM_COMP_CORE_RUNTIME_REF_INSTANCE
+} WASMComponentCoreRuntimeRefType;
+
+struct WASMComponentCoreRuntimeInstance;
+
+typedef struct WASMComponentCoreRuntimeRef {
+    WASMComponentCoreRuntimeRefType type;
+    union {
+        wasm_function_inst_t function;
+        wasm_table_inst_t table;
+        wasm_memory_inst_t memory;
+        wasm_global_inst_t global;
+        wasm_module_t module;
+        struct WASMComponentCoreRuntimeInstance *instance;
+    } of;
+} WASMComponentCoreRuntimeRef;
+
+typedef struct WASMComponentCoreNamedExport {
+    const char *name;
+    WASMComponentCoreRuntimeRef ref;
+} WASMComponentCoreNamedExport;
+
+typedef struct WASMComponentCoreRuntimeInstance {
+    wasm_module_inst_t module_inst;
+    uint32 export_count;
+    WASMComponentCoreNamedExport *exports;
+} WASMComponentCoreRuntimeInstance;
+
+typedef struct WASMComponentResolvedAlias {
+    const char *name;
+    WASMComponentCoreRuntimeRef ref;
+} WASMComponentResolvedAlias;
+
 typedef struct WASMComponentModule {
     uint32 module_type;
     WASMComponent component;
@@ -20,6 +59,20 @@ struct WASMComponentInstance {
     uint32 module_type;
     WASMComponentModule *module;
     char cur_exception[128];
+    uint32 core_module_count;
+    wasm_module_t *core_modules;
+    uint32 core_instance_count;
+    WASMComponentCoreRuntimeInstance *core_instances;
+    uint32 core_func_count;
+    WASMComponentCoreRuntimeRef *core_funcs;
+    uint32 core_table_count;
+    WASMComponentCoreRuntimeRef *core_tables;
+    uint32 core_memory_count;
+    WASMComponentCoreRuntimeRef *core_memories;
+    uint32 core_global_count;
+    WASMComponentCoreRuntimeRef *core_globals;
+    uint32 resolved_alias_count;
+    WASMComponentResolvedAlias *resolved_aliases;
 };
 
 WASMComponentModule *
