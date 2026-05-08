@@ -173,6 +173,7 @@ typedef struct WASMSharedHeap *wasm_shared_heap_t;
 typedef enum {
     Wasm_Module_Bytecode = 0,
     Wasm_Module_AoT,
+    Wasm_Module_Component,
     Package_Type_Unknown = 0xFFFF
 } package_type_t;
 

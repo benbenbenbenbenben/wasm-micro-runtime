@@ -142,3 +142,77 @@ TEST_F(BinaryParserTest, TestSectionAliasIndividual)
 
     ASSERT_TRUE(found);
 }
+
+TEST_F(BinaryParserTest, TestRuntimeLoadComponent)
+{
+    bool ret = helper->read_wasm_file("logging_service.component.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = { 0 };
+    char module_name[] = "runtime-load-component";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    ASSERT_EQ(wasm_runtime_get_module_package_type(module),
+              Wasm_Module_Component);
+
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest, TestRuntimeInstantiateAndDeinstantiateComponent)
+{
+    bool ret = helper->read_wasm_file("logging_service.component.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = { 0 };
+    char module_name[] = "runtime-instantiate-component";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+    ASSERT_EQ(wasm_runtime_get_module(module_inst), module);
+
+    wasm_runtime_deinstantiate(module_inst);
+
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest, TestRuntimeLookupComponentFunctionNotSupportedYet)
+{
+    bool ret = helper->read_wasm_file("logging_service.component.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = { 0 };
+    char module_name[] = "runtime-lookup-component";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_function_inst_t func = wasm_runtime_lookup_function(module_inst, "main");
+    ASSERT_EQ(func, nullptr);
+    ASSERT_STREQ(wasm_runtime_get_exception(module_inst),
+                 "component function lookup is not supported yet");
+
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}

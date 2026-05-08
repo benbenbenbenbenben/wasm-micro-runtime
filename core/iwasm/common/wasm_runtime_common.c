@@ -37,6 +37,9 @@
 #if WASM_ENABLE_JIT != 0 || WASM_ENABLE_WAMR_COMPILER != 0
 #include "../compilation/aot_llvm.h"
 #endif
+#if WASM_ENABLE_COMPONENT_MODEL != 0
+#include "component-model/wasm_component_runtime.h"
+#endif
 #include "../common/wasm_c_api_internal.h"
 #include "../../version.h"
 
@@ -960,12 +963,21 @@ PackageType
 get_package_type(const uint8 *buf, uint32 size)
 {
     if (buf && size >= 4) {
+        const uint8 *header_buf = buf;
 #if (WASM_ENABLE_WORD_ALIGN_READ != 0)
         uint32 buf32 = *(uint32 *)buf;
         buf = (const uint8 *)&buf32;
 #endif
-        if (buf[0] == '\0' && buf[1] == 'a' && buf[2] == 's' && buf[3] == 'm')
+        if (buf[0] == '\0' && buf[1] == 'a' && buf[2] == 's' && buf[3] == 'm') {
+#if WASM_ENABLE_COMPONENT_MODEL != 0
+            WASMHeader header = { 0 };
+
+            if (size >= 8 && wasm_decode_header(header_buf, size, &header)
+                && is_wasm_component(header))
+                return Wasm_Module_Component;
+#endif
             return Wasm_Module_Bytecode;
+        }
         if (buf[0] == '\0' && buf[1] == 'a' && buf[2] == 'o' && buf[3] == 't')
             return Wasm_Module_AoT;
     }
@@ -1027,6 +1039,14 @@ wasm_runtime_get_module_package_version(WASMModuleCommon *const module)
     }
 #endif
 
+#if WASM_ENABLE_COMPONENT_MODEL != 0
+    if (module->module_type == Wasm_Module_Component) {
+        WASMComponentModule *component_module = (WASMComponentModule *)module;
+        return ((uint32)component_module->component.header.layer << 16)
+               | (uint32)component_module->component.header.version;
+    }
+#endif
+
     return 0;
 }
 
@@ -1038,6 +1058,9 @@ wasm_runtime_get_current_package_version(package_type_t package_type)
             return WASM_CURRENT_VERSION;
         case Wasm_Module_AoT:
             return AOT_CURRENT_VERSION;
+        case Wasm_Module_Component:
+            return ((uint32)WASM_COMPONENT_LAYER << 16)
+                   | (uint32)WASM_COMPONENT_VERSION;
         case Package_Type_Unknown:
         default:
             return 0;
@@ -1544,6 +1567,11 @@ wasm_runtime_load_ex(uint8 *buf, uint32 size, const LoadArgs *args,
         magic_header_detected = true;
 #endif
     }
+#if WASM_ENABLE_COMPONENT_MODEL != 0
+    else if (package_type == Wasm_Module_Component) {
+        magic_header_detected = true;
+    }
+#endif
     if (!magic_header_detected) {
         set_error_buf(error_buf, error_buf_size,
                       "WASM module load failed: magic header not detected");
@@ -1572,6 +1600,12 @@ wasm_runtime_load_ex(uint8 *buf, uint32 size, const LoadArgs *args,
                 args->wasm_binary_freeable;
 #endif
     }
+#if WASM_ENABLE_COMPONENT_MODEL != 0
+    else if (package_type == Wasm_Module_Component) {
+        module_common = (WASMModuleCommon *)wasm_component_module_load(
+            buf, size, args, error_buf, error_buf_size);
+    }
+#endif
 
     if (!module_common) {
         LOG_DEBUG("WASM module load failed");
@@ -1673,6 +1707,13 @@ wasm_runtime_unload(WASMModuleCommon *module)
         return;
     }
 #endif
+
+#if WASM_ENABLE_COMPONENT_MODEL != 0
+    if (module->module_type == Wasm_Module_Component) {
+        wasm_component_module_unload((WASMComponentModule *)module);
+        return;
+    }
+#endif
 }
 
 uint32
@@ -1717,6 +1758,12 @@ wasm_runtime_instantiate_internal(WASMModuleCommon *module,
         return (WASMModuleInstanceCommon *)aot_instantiate(
             (AOTModule *)module, (AOTModuleInstance *)parent, exec_env_main,
             args, error_buf, error_buf_size);
+#endif
+#if WASM_ENABLE_COMPONENT_MODEL != 0
+    if (module->module_type == Wasm_Module_Component) {
+        return (WASMModuleInstanceCommon *)wasm_component_module_instantiate(
+            (WASMComponentModule *)module, error_buf, error_buf_size);
+    }
 #endif
     set_error_buf(error_buf, error_buf_size,
                   "Instantiate module failed, invalid module type");
@@ -1899,6 +1946,12 @@ wasm_runtime_deinstantiate_internal(WASMModuleInstanceCommon *module_inst,
         return;
     }
 #endif
+#if WASM_ENABLE_COMPONENT_MODEL != 0
+    if (module_inst->module_type == Wasm_Module_Component) {
+        wasm_component_module_deinstantiate((WASMComponentInstance *)module_inst);
+        return;
+    }
+#endif
 }
 
 bool
@@ -1945,6 +1998,10 @@ wasm_runtime_deinstantiate(WASMModuleInstanceCommon *module_inst)
 WASMModuleCommon *
 wasm_runtime_get_module(WASMModuleInstanceCommon *module_inst)
 {
+#if WASM_ENABLE_COMPONENT_MODEL != 0
+    if (module_inst->module_type == Wasm_Module_Component)
+        return (WASMModuleCommon *)((WASMComponentInstance *)module_inst)->module;
+#endif
     return (WASMModuleCommon *)((WASMModuleInstance *)module_inst)->module;
 }
 
@@ -1952,6 +2009,14 @@ WASMExecEnv *
 wasm_runtime_create_exec_env(WASMModuleInstanceCommon *module_inst,
                              uint32 stack_size)
 {
+#if WASM_ENABLE_COMPONENT_MODEL != 0
+    if (module_inst->module_type == Wasm_Module_Component) {
+        wasm_runtime_set_exception(
+            module_inst,
+            "component exec env creation is not supported yet");
+        return NULL;
+    }
+#endif
     return wasm_exec_env_create(module_inst, stack_size);
 }
 
@@ -2544,6 +2609,14 @@ WASMFunctionInstanceCommon *
 wasm_runtime_lookup_function(WASMModuleInstanceCommon *const module_inst,
                              const char *name)
 {
+#if WASM_ENABLE_COMPONENT_MODEL != 0
+    if (module_inst->module_type == Wasm_Module_Component) {
+        wasm_runtime_set_exception(
+            module_inst,
+            "component function lookup is not supported yet");
+        return NULL;
+    }
+#endif
 #if WASM_ENABLE_INTERP != 0
     if (module_inst->module_type == Wasm_Module_Bytecode)
         return (WASMFunctionInstanceCommon *)wasm_lookup_function(
@@ -3351,6 +3424,18 @@ void
 wasm_runtime_set_exception(WASMModuleInstanceCommon *module_inst_comm,
                            const char *exception)
 {
+#if WASM_ENABLE_COMPONENT_MODEL != 0
+    if (module_inst_comm->module_type == Wasm_Module_Component) {
+        WASMComponentInstance *component_inst =
+            (WASMComponentInstance *)module_inst_comm;
+        if (exception)
+            snprintf(component_inst->cur_exception,
+                     sizeof(component_inst->cur_exception), "%s", exception);
+        else
+            component_inst->cur_exception[0] = '\0';
+        return;
+    }
+#endif
     WASMModuleInstance *module_inst = (WASMModuleInstance *)module_inst_comm;
 
     bh_assert(module_inst_comm->module_type == Wasm_Module_Bytecode
@@ -3361,6 +3446,14 @@ wasm_runtime_set_exception(WASMModuleInstanceCommon *module_inst_comm,
 const char *
 wasm_runtime_get_exception(WASMModuleInstanceCommon *module_inst_comm)
 {
+#if WASM_ENABLE_COMPONENT_MODEL != 0
+    if (module_inst_comm->module_type == Wasm_Module_Component) {
+        WASMComponentInstance *component_inst =
+            (WASMComponentInstance *)module_inst_comm;
+        return component_inst->cur_exception[0] ? component_inst->cur_exception
+                                                : NULL;
+    }
+#endif
     WASMModuleInstance *module_inst = (WASMModuleInstance *)module_inst_comm;
 
     bh_assert(module_inst_comm->module_type == Wasm_Module_Bytecode
@@ -3372,6 +3465,15 @@ bool
 wasm_runtime_copy_exception(WASMModuleInstanceCommon *module_inst_comm,
                             char *exception_buf)
 {
+#if WASM_ENABLE_COMPONENT_MODEL != 0
+    if (module_inst_comm->module_type == Wasm_Module_Component) {
+        const char *exception = wasm_runtime_get_exception(module_inst_comm);
+        if (!exception)
+            return false;
+        snprintf(exception_buf, 128, "%s", exception);
+        return true;
+    }
+#endif
     WASMModuleInstance *module_inst = (WASMModuleInstance *)module_inst_comm;
 
     bh_assert(module_inst_comm->module_type == Wasm_Module_Bytecode
@@ -3382,6 +3484,12 @@ wasm_runtime_copy_exception(WASMModuleInstanceCommon *module_inst_comm,
 void
 wasm_runtime_clear_exception(WASMModuleInstanceCommon *module_inst_comm)
 {
+#if WASM_ENABLE_COMPONENT_MODEL != 0
+    if (module_inst_comm->module_type == Wasm_Module_Component) {
+        wasm_runtime_set_exception(module_inst_comm, NULL);
+        return;
+    }
+#endif
     bh_assert(module_inst_comm->module_type == Wasm_Module_Bytecode
               || module_inst_comm->module_type == Wasm_Module_AoT);
     wasm_runtime_set_exception(module_inst_comm, NULL);
