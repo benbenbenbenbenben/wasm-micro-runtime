@@ -8233,6 +8233,114 @@ TEST_F(BinaryParserTest,
 }
 
 TEST_F(BinaryParserTest,
+       TestPublicComponentCallSupportsNestedListU8CompositeParam)
+{
+    bool ret = helper->read_wasm_file("composite_string_params.component.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "public-component-call-nested-list-param";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func =
+        wasm_runtime_lookup_component_function(module_inst, "nested-list-param");
+    ASSERT_NE(func, nullptr);
+    ASSERT_NE(func->canon_memory_ref.of.memory, nullptr);
+
+    const uint8_t nested_bytes[] = { 0x10, 0x20, 0x30, 0x40 };
+    std::vector<uint8_t> payload;
+    wasm_component_value_t result = {};
+    int32_t decoded_result = 0;
+
+    append_component_list_u8_payload(&payload, nested_bytes,
+                                     (uint32_t)sizeof(nested_bytes));
+
+    wasm_component_value_t arg =
+        make_component_list_u8_value(payload.data(), (uint32_t)payload.size());
+
+    ASSERT_TRUE(
+        wasm_runtime_call_component_values(module_inst, func, 1, &result, 1, &arg))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_TRUE(decode_component_s32_arg(&result, &decoded_result));
+    ASSERT_EQ(decoded_result, (int32_t)sizeof(nested_bytes));
+    ASSERT_EQ(memcmp(func->canon_memory_ref.of.memory->memory_data + 64, nested_bytes,
+                     sizeof(nested_bytes)),
+              0);
+
+    wasm_component_value_destroy(&result);
+    wasm_component_value_destroy(&arg);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestPublicComponentCallSupportsMixedScalarStringAndNestedListCompositeParam)
+{
+    bool ret = helper->read_wasm_file("composite_string_params.component.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "public-component-call-mixed-string-list-param";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func =
+        wasm_runtime_lookup_component_function(module_inst, "mixed-list-param");
+    ASSERT_NE(func, nullptr);
+    ASSERT_NE(func->canon_memory_ref.of.memory, nullptr);
+
+    const uint8_t nested_bytes[] = { 0xaa, 0xbb, 0xcc };
+    std::vector<uint8_t> payload;
+    wasm_component_value_t result = {};
+    int32_t decoded_result = 0;
+
+    append_component_s32_payload(&payload, 37);
+    append_component_string_payload(&payload, "abcde");
+    append_component_list_u8_payload(&payload, nested_bytes,
+                                     (uint32_t)sizeof(nested_bytes));
+
+    wasm_component_value_t arg =
+        make_component_list_u8_value(payload.data(), (uint32_t)payload.size());
+
+    ASSERT_TRUE(
+        wasm_runtime_call_component_values(module_inst, func, 1, &result, 1, &arg))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_TRUE(decode_component_s32_arg(&result, &decoded_result));
+    ASSERT_EQ(decoded_result, 45);
+    ASSERT_EQ(memcmp(func->canon_memory_ref.of.memory->memory_data + 64, "abcde", 5),
+              0);
+    ASSERT_EQ(memcmp(func->canon_memory_ref.of.memory->memory_data + 69, nested_bytes,
+                     sizeof(nested_bytes)),
+              0);
+
+    wasm_component_value_destroy(&result);
+    wasm_component_value_destroy(&arg);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
        TestPublicComponentCallRejectsInvalidNestedStringParamUtf8)
 {
     bool ret = helper->read_wasm_file("composite_string_params.component.wasm");
@@ -8556,7 +8664,8 @@ TEST_F(BinaryParserTest, TestPublicComponentCallRejectsCompositeParamTruncatedPa
     wasm_runtime_unload(module);
 }
 
-TEST_F(BinaryParserTest, TestPublicComponentCallRejectsNestedListU8CompositeParam)
+TEST_F(BinaryParserTest,
+       TestPublicComponentCallRejectsMalformedNestedListU8CompositeParamPayload)
 {
     bool ret = helper->read_wasm_file("composite_string_params.component.wasm");
     ASSERT_TRUE(ret);
@@ -8570,8 +8679,51 @@ TEST_F(BinaryParserTest, TestPublicComponentCallRejectsNestedListU8CompositePara
         helper->error_buf, (uint32_t)sizeof(helper->error_buf));
     ASSERT_NE(module, nullptr) << helper->error_buf;
 
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func =
+        wasm_runtime_lookup_component_function(module_inst, "nested-list-param");
+    ASSERT_NE(func, nullptr);
+
+    const uint8_t payload[] = { 0x81 };
+    wasm_component_value_t arg =
+        make_component_list_u8_value(payload, (uint32_t)sizeof(payload));
+    wasm_component_value_t result = {};
+
+    ASSERT_FALSE(
+        wasm_runtime_call_component_values(module_inst, func, 1, &result, 1, &arg));
+    ASSERT_NE(strstr(wasm_runtime_get_exception(module_inst), "valid list<u8> value"),
+              nullptr);
+
+    wasm_component_value_destroy(&result);
+    wasm_component_value_destroy(&arg);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestPublicComponentCallRejectsUnsupportedNestedNonU8CompositeParamListLeaf)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "public-component-call-composite-param-nested-list-non-u8";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(
+        append_component_export_alias_sections((WASMComponentModule *)module));
+
     const int32_t list_type_idx = append_component_list_type(
-        (WASMComponentModule *)module, WASM_COMP_PRIMVAL_U8, false, 0);
+        (WASMComponentModule *)module, WASM_COMP_PRIMVAL_S32, false, 0);
     ASSERT_GE(list_type_idx, 0);
     const int32_t tuple_type_idx = append_component_tuple_type(
         (WASMComponentModule *)module,
@@ -8579,7 +8731,8 @@ TEST_F(BinaryParserTest, TestPublicComponentCallRejectsNestedListU8CompositePara
     ASSERT_GE(tuple_type_idx, 0);
     const int32_t record_type_idx = append_component_record_type(
         (WASMComponentModule *)module,
-        { { "msg", make_component_type_index_value_type((uint32_t)tuple_type_idx) } });
+        { { "payload",
+            make_component_type_index_value_type((uint32_t)tuple_type_idx) } });
     ASSERT_GE(record_type_idx, 0);
     ASSERT_TRUE(configure_first_canon_lift_for_defined_param(
         (WASMComponentModule *)module, (uint32_t)record_type_idx));
@@ -8590,8 +8743,53 @@ TEST_F(BinaryParserTest, TestPublicComponentCallRejectsNestedListU8CompositePara
                                  (uint32_t)sizeof(helper->error_buf));
     ASSERT_EQ(module_inst, nullptr);
     ASSERT_NE(strstr(helper->error_buf,
-                     "component canon lift function parameter 0 does not support "
-                     "nested list<u8> leaves yet"),
+                     "component canon lift function parameter 0 only supports "
+                     "variable-length list<u8> leaves"),
+              nullptr);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestPublicComponentCallRejectsUnsupportedNestedFixedLengthCompositeParamListLeaf)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] =
+        "public-component-call-composite-param-nested-list-fixed-length";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(
+        append_component_export_alias_sections((WASMComponentModule *)module));
+
+    const int32_t list_type_idx = append_component_list_type(
+        (WASMComponentModule *)module, WASM_COMP_PRIMVAL_U8, true, 4);
+    ASSERT_GE(list_type_idx, 0);
+    const int32_t tuple_type_idx = append_component_tuple_type(
+        (WASMComponentModule *)module,
+        { make_component_type_index_value_type((uint32_t)list_type_idx) });
+    ASSERT_GE(tuple_type_idx, 0);
+    const int32_t record_type_idx = append_component_record_type(
+        (WASMComponentModule *)module,
+        { { "payload",
+            make_component_type_index_value_type((uint32_t)tuple_type_idx) } });
+    ASSERT_GE(record_type_idx, 0);
+    ASSERT_TRUE(configure_first_canon_lift_for_defined_param(
+        (WASMComponentModule *)module, (uint32_t)record_type_idx));
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_EQ(module_inst, nullptr);
+    ASSERT_NE(strstr(helper->error_buf,
+                     "component canon lift function parameter 0 only supports "
+                     "variable-length list<u8> leaves"),
               nullptr);
     wasm_runtime_unload(module);
 }
@@ -8640,6 +8838,54 @@ TEST_F(BinaryParserTest, TestPublicComponentCallRejectsMemory64ListU8Param)
 
     wasm_component_value_destroy(&arg);
     wasm_component_value_destroy(&result);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestPublicComponentCallRejectsMemory64NestedListU8CompositeParam)
+{
+    bool ret = helper->read_wasm_file("composite_string_params.component.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "public-component-call-nested-list-param-memory64";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func =
+        wasm_runtime_lookup_component_function(module_inst, "nested-list-param");
+    ASSERT_NE(func, nullptr);
+    ASSERT_NE(func->canon_memory_ref.of.memory, nullptr);
+    func->canon_memory_ref.of.memory->is_memory64 = true;
+
+    const uint8_t nested_bytes[] = { 0x10, 0x20, 0x30, 0x40 };
+    std::vector<uint8_t> payload;
+    wasm_component_value_t result = {};
+
+    append_component_list_u8_payload(&payload, nested_bytes,
+                                     (uint32_t)sizeof(nested_bytes));
+    wasm_component_value_t arg =
+        make_component_list_u8_value(payload.data(), (uint32_t)payload.size());
+
+    ASSERT_FALSE(
+        wasm_runtime_call_component_values(module_inst, func, 1, &result, 1, &arg));
+    ASSERT_STREQ(wasm_runtime_get_exception(module_inst),
+                 "component canon lift function does not support memory64 "
+                 "list<u8> Canonical ABI");
+
+    wasm_component_value_destroy(&result);
+    wasm_component_value_destroy(&arg);
     wasm_runtime_deinstantiate(module_inst);
     wasm_runtime_unload(module);
 }

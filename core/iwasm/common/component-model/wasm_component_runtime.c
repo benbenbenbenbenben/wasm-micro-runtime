@@ -1613,6 +1613,7 @@ classify_component_runtime_composite_param(const WASMComponent *component,
                                            const WASMComponentValueType *value_type,
                                            uint32 param_index,
                                            bool *has_string_leaf_out,
+                                           bool *has_list_u8_leaf_out,
                                            char *error_buf,
                                            uint32 error_buf_size)
 {
@@ -1622,6 +1623,7 @@ classify_component_runtime_composite_param(const WASMComponent *component,
     uint8 prim_type = 0;
 
     *has_string_leaf_out = false;
+    *has_list_u8_leaf_out = false;
 
     if (!resolve_component_runtime_primitive_type(component, value_type,
                                                   &is_primitive, &prim_type,
@@ -1641,11 +1643,11 @@ classify_component_runtime_composite_param(const WASMComponent *component,
                                                  &ignored_public_kind)
                        ? true
                        : set_component_runtime_error_fmt(
-                             error_buf, error_buf_size,
-                             "component canon lift function parameter %u only "
-                             "supports tuple/record parameters with scalar or "
-                             "UTF-8 string leaves",
-                             param_index);
+                              error_buf, error_buf_size,
+                              "component canon lift function parameter %u only "
+                              "supports tuple/record parameters with scalar, "
+                              "UTF-8 string, or variable-length list<u8> leaves",
+                              param_index);
         }
     }
 
@@ -1670,17 +1672,22 @@ classify_component_runtime_composite_param(const WASMComponent *component,
                 return set_component_runtime_error_fmt(
                     error_buf, error_buf_size,
                     "component canon lift function parameter %u only supports "
-                    "tuple/record parameters with scalar or UTF-8 string leaves",
+                    "tuple/record parameters with scalar, UTF-8 string, or "
+                    "variable-length list<u8> leaves",
                     param_index);
             for (uint32 i = 0; i < def_type->def_val.record->count; i++) {
                 bool nested_has_string = false;
+                bool nested_has_list_u8 = false;
 
                 if (!classify_component_runtime_composite_param(
                         component, def_type->def_val.record->fields[i].value_type,
-                        param_index, &nested_has_string, error_buf,
+                        param_index, &nested_has_string, &nested_has_list_u8,
+                        error_buf,
                         error_buf_size))
                     return false;
                 *has_string_leaf_out = *has_string_leaf_out || nested_has_string;
+                *has_list_u8_leaf_out =
+                    *has_list_u8_leaf_out || nested_has_list_u8;
             }
             return true;
         case WASM_COMP_DEF_VAL_TUPLE:
@@ -1688,31 +1695,56 @@ classify_component_runtime_composite_param(const WASMComponent *component,
                 return set_component_runtime_error_fmt(
                     error_buf, error_buf_size,
                     "component canon lift function parameter %u only supports "
-                    "tuple/record parameters with scalar or UTF-8 string leaves",
+                    "tuple/record parameters with scalar, UTF-8 string, or "
+                    "variable-length list<u8> leaves",
                     param_index);
             for (uint32 i = 0; i < def_type->def_val.tuple->count; i++) {
                 bool nested_has_string = false;
+                bool nested_has_list_u8 = false;
 
                 if (!classify_component_runtime_composite_param(
                         component, &def_type->def_val.tuple->element_types[i],
-                        param_index, &nested_has_string, error_buf,
+                        param_index, &nested_has_string, &nested_has_list_u8,
+                        error_buf,
                         error_buf_size))
                     return false;
                 *has_string_leaf_out = *has_string_leaf_out || nested_has_string;
+                *has_list_u8_leaf_out =
+                    *has_list_u8_leaf_out || nested_has_list_u8;
             }
             return true;
         case WASM_COMP_DEF_VAL_LIST:
+            if (!def_type->def_val.list || !def_type->def_val.list->element_type)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "component canon lift function parameter %u uses malformed "
+                    "list type",
+                    param_index);
+            if (!resolve_component_runtime_primitive_type(
+                    component, def_type->def_val.list->element_type,
+                    &is_primitive, &prim_type, error_buf, error_buf_size))
+                return false;
+            if (!is_primitive || prim_type != WASM_COMP_PRIMVAL_U8)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "component canon lift function parameter %u only supports "
+                    "variable-length list<u8> leaves inside tuple/record "
+                    "parameters",
+                    param_index);
+            *has_list_u8_leaf_out = true;
+            return true;
         case WASM_COMP_DEF_VAL_LIST_LEN:
             return set_component_runtime_error_fmt(
                 error_buf, error_buf_size,
-                "component canon lift function parameter %u does not support "
-                "nested list<u8> leaves yet",
+                "component canon lift function parameter %u only supports "
+                "variable-length list<u8> leaves inside tuple/record parameters",
                 param_index);
         default:
             return set_component_runtime_error_fmt(
                 error_buf, error_buf_size,
                 "component canon lift function parameter %u only supports "
-                "tuple/record parameters with scalar or UTF-8 string leaves",
+                "tuple/record parameters with scalar, UTF-8 string, or "
+                "variable-length list<u8> leaves",
                 param_index);
     }
 }
@@ -2646,14 +2678,18 @@ resolve_component_canon_lift_abi(WASMComponentInstance *inst,
                 return false;
             if (is_composite_param) {
                 bool composite_has_string = false;
+                bool composite_has_list_u8 = false;
 
                 if (!classify_component_runtime_composite_param(
                         &inst->module->component,
                         func_type->params->params[i].value_type, i,
-                        &composite_has_string, error_buf, error_buf_size))
+                        &composite_has_string, &composite_has_list_u8, error_buf,
+                        error_buf_size))
                     return false;
                 if (composite_has_string)
                     function->has_string_params = true;
+                if (composite_has_list_u8)
+                    function->has_list_u8_params = true;
                 continue;
             }
 
@@ -3417,12 +3453,43 @@ decode_component_public_string_prefix(
 }
 
 static bool
+decode_component_public_list_u8_prefix(
+    WASMComponentInstance *inst, const uint8 *data, uint32 byte_size,
+    const char *position, uint32 index, const uint8 **payload_out,
+    uint32 *payload_len_out, uint32 *consumed_out)
+{
+    uint64 payload_len;
+    size_t offset = 0;
+    bh_leb_read_status_t status;
+
+    if (!data || byte_size == 0)
+        return set_component_call_error_fmt(
+            inst, "component canon lift function %s %u does not contain a valid "
+                  "list<u8> value",
+            position, index);
+
+    status = bh_leb_read(data, data + byte_size, 32, false, &payload_len, &offset);
+    if (status != BH_LEB_READ_SUCCESS || offset > byte_size
+        || payload_len > byte_size - offset)
+        return set_component_call_error_fmt(
+            inst, "component canon lift function %s %u does not contain a valid "
+                  "list<u8> value",
+            position, index);
+
+    *payload_out = data + offset;
+    *payload_len_out = (uint32)payload_len;
+    *consumed_out = (uint32)offset + (uint32)payload_len;
+    return true;
+}
+
+static bool
 set_component_composite_param_leaf_error(WASMComponentInstance *inst,
                                          uint32 index)
 {
     return set_component_call_error_fmt(
         inst, "component canon lift function parameter %u only supports "
-              "tuple/record parameters with scalar or UTF-8 string leaves",
+              "tuple/record parameters with scalar, UTF-8 string, or "
+              "variable-length list<u8> leaves",
         index);
 }
 
@@ -3431,8 +3498,8 @@ set_component_composite_param_list_u8_leaf_error(WASMComponentInstance *inst,
                                                  uint32 index)
 {
     return set_component_call_error_fmt(
-        inst, "component canon lift function parameter %u does not support nested "
-              "list<u8> leaves yet",
+        inst, "component canon lift function parameter %u only supports "
+              "variable-length list<u8> leaves inside tuple/record parameters",
         index);
 }
 
@@ -3517,6 +3584,34 @@ validate_component_public_composite_bytes(
             }
             return true;
         case WASM_COMP_DEF_VAL_LIST:
+        {
+            bool is_primitive = false;
+            uint8 element_prim_type = 0;
+            const uint8 *ignored_payload = NULL;
+            uint32 ignored_payload_len = 0;
+            uint32 consumed = 0;
+
+            if (!shape.def_type->def_val.list
+                || !shape.def_type->def_val.list->element_type)
+                return set_component_call_error(
+                    inst, "component canon lift function parameter uses malformed "
+                          "list type");
+            if (!lookup_component_call_primitive_type(
+                    component, shape.def_type->def_val.list->element_type,
+                    "parameter", param_index, &is_primitive, &element_prim_type,
+                    inst))
+                return false;
+            if (!is_primitive || element_prim_type != WASM_COMP_PRIMVAL_U8)
+                return set_component_composite_param_list_u8_leaf_error(inst,
+                                                                        param_index);
+            if (!decode_component_public_list_u8_prefix(
+                    inst, data ? data + *offset_io : NULL, byte_size - *offset_io,
+                    "parameter", param_index, &ignored_payload,
+                    &ignored_payload_len, &consumed))
+                return false;
+            (*offset_io) += consumed;
+            return true;
+        }
         case WASM_COMP_DEF_VAL_LIST_LEN:
             return set_component_composite_param_list_u8_leaf_error(inst,
                                                                     param_index);
@@ -3662,6 +3757,73 @@ flatten_component_public_composite_bytes(
             }
             return true;
         case WASM_COMP_DEF_VAL_LIST:
+        {
+            bool is_primitive = false;
+            uint8 element_prim_type = 0;
+            const uint8 *payload = NULL;
+            uint32 payload_len = 0;
+            uint32 guest_ptr = 0;
+            uint8 *guest_bytes = NULL;
+            uint32 consumed = 0;
+
+            if (!shape.def_type->def_val.list
+                || !shape.def_type->def_val.list->element_type)
+                return set_component_call_error(
+                    inst, "component canon lift function parameter uses malformed "
+                          "list type");
+            if (!lookup_component_call_primitive_type(
+                    component, shape.def_type->def_val.list->element_type,
+                    "parameter", param_index, &is_primitive, &element_prim_type,
+                    inst))
+                return false;
+            if (!is_primitive || element_prim_type != WASM_COMP_PRIMVAL_U8)
+                return set_component_composite_param_list_u8_leaf_error(inst,
+                                                                        param_index);
+
+            if (*core_arg_index_io + 1 >= core_type->param_count)
+                return set_component_param_flattening_error(inst);
+
+            if (core_type->types[*core_arg_index_io] != VALUE_TYPE_I32
+                || core_type->types[*core_arg_index_io + 1] != VALUE_TYPE_I32)
+                return set_component_call_error_fmt(
+                    inst, "component canon lift function parameter %u does not "
+                          "match the core function signature",
+                    param_index);
+
+            if (!decode_component_public_list_u8_prefix(
+                    inst, data ? data + *offset_io : NULL, byte_size - *offset_io,
+                    "parameter", param_index, &payload, &payload_len, &consumed))
+                return false;
+
+            if (!call_component_canon_realloc(inst, function, payload_len,
+                                              &guest_ptr))
+                return false;
+
+            if (guest_ptr != 0 && allocation_tracker
+                && allocation_tracker->count < allocation_tracker->capacity) {
+                allocation_tracker->allocations[allocation_tracker->count].ptr =
+                    guest_ptr;
+                allocation_tracker->allocations[allocation_tracker->count].size =
+                    payload_len;
+                allocation_tracker->count++;
+            }
+
+            if (payload_len > 0) {
+                if (!get_component_canon_memory_bytes(
+                        inst, function, guest_ptr, payload_len,
+                        "composite list<u8> parameter buffer", &guest_bytes))
+                    return false;
+                memcpy(guest_bytes, payload, payload_len);
+            }
+
+            core_args[*core_arg_index_io].kind = WASM_I32;
+            core_args[*core_arg_index_io].of.i32 = (int32)guest_ptr;
+            core_args[*core_arg_index_io + 1].kind = WASM_I32;
+            core_args[*core_arg_index_io + 1].of.i32 = (int32)payload_len;
+            (*offset_io) += consumed;
+            (*core_arg_index_io) += 2;
+            return true;
+        }
         case WASM_COMP_DEF_VAL_LIST_LEN:
             return set_component_composite_param_list_u8_leaf_error(inst,
                                                                     param_index);
