@@ -814,7 +814,7 @@ append_component_canon_function(WASMComponentInstance *inst,
 static bool
 build_nested_component_instance_exports(
     WASMComponentRuntimeInstance *runtime_inst, const WASMComponent *component,
-    WASMComponentRuntimeRef *bound_funcs, uint32 bound_func_count,
+    WASMComponentRuntimeRef *bound_imports, uint32 bound_import_count,
     char *error_buf, uint32 error_buf_size)
 {
     uint32 i, export_index = 0;
@@ -837,23 +837,47 @@ build_nested_component_instance_exports(
                     const WASMComponentExport *component_export =
                         &export_section->exports[j];
                     WASMComponentRuntimeRef ref;
+                    WASMComponentRuntimeRefType expected_type;
+                    const char *sort_name;
 
                     if (!component_export->sort_idx
-                        || !component_export->sort_idx->sort
-                        || component_export->sort_idx->sort->sort
-                               != WASM_COMP_SORT_FUNC)
+                        || !component_export->sort_idx->sort)
                         return set_component_runtime_error_fmt(
                             error_buf, error_buf_size,
-                            "nested component export sorts other than func are "
-                            "not supported yet");
+                            "nested component export is missing a sort");
 
-                    if (component_export->sort_idx->idx >= bound_func_count)
+                    switch (component_export->sort_idx->sort->sort) {
+                        case WASM_COMP_SORT_FUNC:
+                            expected_type = WASM_COMP_RUNTIME_REF_FUNC;
+                            sort_name = "func";
+                            break;
+                        case WASM_COMP_SORT_INSTANCE:
+                            expected_type = WASM_COMP_RUNTIME_REF_INSTANCE;
+                            sort_name = "instance";
+                            break;
+                        default:
+                            return set_component_runtime_error_fmt(
+                                error_buf, error_buf_size,
+                                "nested component export sort 0x%02x is not "
+                                "supported yet",
+                                (unsigned)component_export->sort_idx->sort->sort);
+                    }
+
+                    if (component_export->sort_idx->idx >= bound_import_count)
                         return set_component_runtime_error_fmt(
                             error_buf, error_buf_size,
-                            "nested component func index %u is out of bounds",
-                            component_export->sort_idx->idx);
+                            "nested component %s index %u is out of bounds",
+                            sort_name, component_export->sort_idx->idx);
 
-                    ref = bound_funcs[component_export->sort_idx->idx];
+                    ref = bound_imports[component_export->sort_idx->idx];
+                    if (ref.type != expected_type)
+                        return set_component_runtime_error_fmt(
+                            error_buf, error_buf_size,
+                            "nested component export \"%s\" does not resolve "
+                            "to a %s",
+                            get_component_export_name(component_export->export_name),
+                            sort_name);
+
                     runtime_inst->exports[export_index].name =
                         get_component_export_name(component_export->export_name);
                     runtime_inst->exports[export_index].ref = ref;
@@ -882,7 +906,7 @@ instantiate_nested_component_instance(WASMComponentInstance *inst,
         &inst->component_instances[inst->component_instance_count];
     const WASMComponent *nested_component;
     uint32 i, import_count = 0, export_count = 0;
-    WASMComponentRuntimeRef *bound_funcs = NULL;
+    WASMComponentRuntimeRef *bound_imports = NULL;
 
     if (component_inst->expression.with_args.idx >= inst->component_count)
         return set_component_runtime_error_fmt(
@@ -917,15 +941,15 @@ instantiate_nested_component_instance(WASMComponentInstance *inst,
             error_buf, error_buf_size,
             "nested component import binding count mismatch");
 
-    if (!alloc_component_runtime_array((void **)&bound_funcs, import_count,
-                                       sizeof(*bound_funcs), error_buf,
+    if (!alloc_component_runtime_array((void **)&bound_imports, import_count,
+                                       sizeof(*bound_imports), error_buf,
                                        error_buf_size)
         || !alloc_component_runtime_array((void **)&runtime_inst->exports,
                                           export_count,
                                           sizeof(*runtime_inst->exports),
                                           error_buf, error_buf_size)) {
-        if (bound_funcs)
-            wasm_runtime_free(bound_funcs);
+        if (bound_imports)
+            wasm_runtime_free(bound_imports);
         return false;
     }
 
@@ -942,18 +966,36 @@ instantiate_nested_component_instance(WASMComponentInstance *inst,
                     &import_section->imports[j];
                 const char *import_name =
                     get_component_import_name(component_import->import_name);
+                WASMComponentRuntimeRefType expected_type;
+                const char *sort_name;
                 bool matched = false;
                 uint32 k;
 
-                    if (!component_import->extern_desc
-                        || component_import->extern_desc->type
-                               != WASM_COMP_EXTERN_FUNC) {
+                if (!component_import->extern_desc) {
+                    set_component_runtime_error_fmt(
+                        error_buf, error_buf_size,
+                        "nested component import \"%s\" is missing an "
+                        "external descriptor",
+                        import_name);
+                    goto fail;
+                }
+
+                switch (component_import->extern_desc->type) {
+                    case WASM_COMP_EXTERN_FUNC:
+                        expected_type = WASM_COMP_RUNTIME_REF_FUNC;
+                        sort_name = "component function";
+                        break;
+                    case WASM_COMP_EXTERN_INSTANCE:
+                        expected_type = WASM_COMP_RUNTIME_REF_INSTANCE;
+                        sort_name = "component instance";
+                        break;
+                    default:
                         set_component_runtime_error_fmt(
                             error_buf, error_buf_size,
-                            "nested component imports other than func are not "
-                            "supported yet");
+                            "nested component imports other than func/instance "
+                            "are not supported yet");
                         goto fail;
-                    }
+                }
 
                 for (k = 0; k < component_inst->expression.with_args.arg_len; k++) {
                     const WASMComponentInstArg *arg =
@@ -963,16 +1005,15 @@ instantiate_nested_component_instance(WASMComponentInstance *inst,
                         continue;
 
                     if (!resolve_component_sort_idx(inst, arg->idx.sort_idx,
-                                                    &bound_funcs[j], error_buf,
+                                                    &bound_imports[j], error_buf,
                                                     error_buf_size))
                         goto fail;
 
-                    if (bound_funcs[j].type != WASM_COMP_RUNTIME_REF_FUNC) {
+                    if (bound_imports[j].type != expected_type) {
                         set_component_runtime_error_fmt(
                             error_buf, error_buf_size,
-                            "nested component import \"%s\" must bind to a "
-                            "component function",
-                            import_name);
+                            "nested component import \"%s\" must bind to a %s",
+                            import_name, sort_name);
                         goto fail;
                     }
 
@@ -992,17 +1033,17 @@ instantiate_nested_component_instance(WASMComponentInstance *inst,
     }
 
     if (!build_nested_component_instance_exports(runtime_inst, nested_component,
-                                                 bound_funcs, import_count,
+                                                 bound_imports, import_count,
                                                  error_buf, error_buf_size))
         goto fail;
 
-    wasm_runtime_free(bound_funcs);
+    wasm_runtime_free(bound_imports);
     inst->component_instance_count++;
     return true;
 
 fail:
-    if (bound_funcs)
-        wasm_runtime_free(bound_funcs);
+    if (bound_imports)
+        wasm_runtime_free(bound_imports);
     if (runtime_inst->exports) {
         wasm_runtime_free(runtime_inst->exports);
         runtime_inst->exports = NULL;
