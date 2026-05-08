@@ -2111,7 +2111,7 @@ validate_component_host_import_value_type(
     wasm_valkind_t ignored_public_kind = WASM_I32;
     const WASMComponentValueType *element_type;
     const bool allow_memory_backed_composite_leaves =
-        !strcmp(position, "parameter");
+        !strcmp(position, "parameter") || !strcmp(position, "result");
 
     *is_string_out = false;
     *is_list_u8_out = false;
@@ -2256,7 +2256,8 @@ validate_component_host_import_value_type(
                         error_buf, error_buf_size,
                         !strcmp(position, "result")
                             ? "host component import \"%s\" result %u only "
-                              "supports tuple/record results with scalar leaves"
+                              "supports tuple/record results with scalar, "
+                              "UTF-8 string, or variable-length list<u8> leaves"
                             : "host component import \"%s\" parameter %u only "
                               "supports tuple/record parameters with scalar, "
                               "UTF-8 string, or variable-length list<u8> "
@@ -2279,7 +2280,8 @@ validate_component_host_import_value_type(
                             error_buf, error_buf_size,
                             !strcmp(position, "result")
                                 ? "host component import \"%s\" result %u only "
-                                  "supports tuple/record results with scalar "
+                                  "supports tuple/record results with scalar, "
+                                  "UTF-8 string, or variable-length list<u8> "
                                   "leaves"
                                 : "host component import \"%s\" parameter %u "
                                   "only supports tuple/record parameters with "
@@ -2296,7 +2298,8 @@ validate_component_host_import_value_type(
                         error_buf, error_buf_size,
                         !strcmp(position, "result")
                             ? "host component import \"%s\" result %u only "
-                              "supports tuple/record results with scalar leaves"
+                              "supports tuple/record results with scalar, "
+                              "UTF-8 string, or variable-length list<u8> leaves"
                             : "host component import \"%s\" parameter %u only "
                               "supports tuple/record parameters with scalar, "
                               "UTF-8 string, or variable-length list<u8> "
@@ -2319,7 +2322,8 @@ validate_component_host_import_value_type(
                             error_buf, error_buf_size,
                             !strcmp(position, "result")
                                 ? "host component import \"%s\" result %u only "
-                                  "supports tuple/record results with scalar "
+                                  "supports tuple/record results with scalar, "
+                                  "UTF-8 string, or variable-length list<u8> "
                                   "leaves"
                                 : "host component import \"%s\" parameter %u "
                                   "only supports tuple/record parameters with "
@@ -3427,10 +3431,10 @@ decode_component_public_scalar_prefix(
 }
 
 static bool
-decode_component_public_string_prefix(
+decode_component_public_string_prefix_with_context(
     WASMComponentInstance *inst, const uint8 *data, uint32 byte_size,
-    const char *position, uint32 index, const uint8 **payload_out,
-    uint32 *payload_len_out, uint32 *consumed_out)
+    const char *function_desc, const char *position, uint32 index,
+    const uint8 **payload_out, uint32 *payload_len_out, uint32 *consumed_out)
 {
     uint64 payload_len;
     size_t offset = 0;
@@ -3438,23 +3442,59 @@ decode_component_public_string_prefix(
 
     if (!data || byte_size == 0)
         return set_component_call_error_fmt(
-            inst, "component canon lift function %s %u does not contain a valid "
-                  "string value",
-            position, index);
+            inst, "%s %s %u does not contain a valid string value",
+            function_desc, position, index);
 
     status = bh_leb_read(data, data + byte_size, 32, false, &payload_len, &offset);
     if (status != BH_LEB_READ_SUCCESS || offset > byte_size
         || payload_len > byte_size - offset)
         return set_component_call_error_fmt(
-            inst, "component canon lift function %s %u does not contain a valid "
-                  "string value",
-            position, index);
+            inst, "%s %s %u does not contain a valid string value",
+            function_desc, position, index);
 
     if (!wasm_component_validate_utf8(data + offset, (uint32)payload_len))
         return set_component_call_error_fmt(
-            inst, "component canon lift function %s %u does not contain valid "
-                  "UTF-8",
+            inst, "%s %s %u does not contain valid UTF-8", function_desc,
             position, index);
+
+    *payload_out = data + offset;
+    *payload_len_out = (uint32)payload_len;
+    *consumed_out = (uint32)offset + (uint32)payload_len;
+    return true;
+}
+
+static bool
+decode_component_public_string_prefix(
+    WASMComponentInstance *inst, const uint8 *data, uint32 byte_size,
+    const char *position, uint32 index, const uint8 **payload_out,
+    uint32 *payload_len_out, uint32 *consumed_out)
+{
+    return decode_component_public_string_prefix_with_context(
+        inst, data, byte_size, "component canon lift function", position, index,
+        payload_out, payload_len_out, consumed_out);
+}
+
+static bool
+decode_component_public_list_u8_prefix_with_context(
+    WASMComponentInstance *inst, const uint8 *data, uint32 byte_size,
+    const char *function_desc, const char *position, uint32 index,
+    const uint8 **payload_out, uint32 *payload_len_out, uint32 *consumed_out)
+{
+    uint64 payload_len;
+    size_t offset = 0;
+    bh_leb_read_status_t status;
+
+    if (!data || byte_size == 0)
+        return set_component_call_error_fmt(
+            inst, "%s %s %u does not contain a valid list<u8> value",
+            function_desc, position, index);
+
+    status = bh_leb_read(data, data + byte_size, 32, false, &payload_len, &offset);
+    if (status != BH_LEB_READ_SUCCESS || offset > byte_size
+        || payload_len > byte_size - offset)
+        return set_component_call_error_fmt(
+            inst, "%s %s %u does not contain a valid list<u8> value",
+            function_desc, position, index);
 
     *payload_out = data + offset;
     *payload_len_out = (uint32)payload_len;
@@ -3468,28 +3508,9 @@ decode_component_public_list_u8_prefix(
     const char *position, uint32 index, const uint8 **payload_out,
     uint32 *payload_len_out, uint32 *consumed_out)
 {
-    uint64 payload_len;
-    size_t offset = 0;
-    bh_leb_read_status_t status;
-
-    if (!data || byte_size == 0)
-        return set_component_call_error_fmt(
-            inst, "component canon lift function %s %u does not contain a valid "
-                  "list<u8> value",
-            position, index);
-
-    status = bh_leb_read(data, data + byte_size, 32, false, &payload_len, &offset);
-    if (status != BH_LEB_READ_SUCCESS || offset > byte_size
-        || payload_len > byte_size - offset)
-        return set_component_call_error_fmt(
-            inst, "component canon lift function %s %u does not contain a valid "
-                  "list<u8> value",
-            position, index);
-
-    *payload_out = data + offset;
-    *payload_len_out = (uint32)payload_len;
-    *consumed_out = (uint32)offset + (uint32)payload_len;
-    return true;
+    return decode_component_public_list_u8_prefix_with_context(
+        inst, data, byte_size, "component canon lift function", position, index,
+        payload_out, payload_len_out, consumed_out);
 }
 
 static bool
@@ -3884,7 +3905,18 @@ set_host_component_composite_result_leaf_error(WASMComponentInstance *inst,
 {
     return set_component_call_error_fmt(
         inst, "host component function result %u only supports tuple/record "
-              "results with scalar leaves",
+              "results with scalar, UTF-8 string, or variable-length list<u8> "
+              "leaves",
+        index);
+}
+
+static bool
+set_host_component_composite_result_list_u8_leaf_error(
+    WASMComponentInstance *inst, uint32 index)
+{
+    return set_component_call_error_fmt(
+        inst, "host component function result %u only supports variable-length "
+              "list<u8> leaves inside tuple/record results",
         index);
 }
 
@@ -3901,21 +3933,35 @@ validate_host_component_public_composite_result_bytes(
         return false;
 
     if (shape.is_primitive) {
-        wasm_val_t ignored;
-        uint8 expected_core_type;
-        wasm_valkind_t public_kind;
         uint32 consumed = 0;
 
-        if (!component_scalar_prim_to_core(shape.prim_type, &expected_core_type,
-                                           &public_kind))
-            return set_host_component_composite_result_leaf_error(inst,
-                                                                  result_index);
+        if (shape.prim_type == WASM_COMP_PRIMVAL_STRING) {
+            const uint8 *ignored_payload = NULL;
+            uint32 ignored_payload_len = 0;
 
-        if (!decode_component_public_scalar_prefix_with_context(
-                inst, data ? data + *offset_io : NULL, byte_size - *offset_io,
-                shape.prim_type, public_kind, "host component function", "result",
-                result_index, &ignored, &consumed))
-            return false;
+            if (!decode_component_public_string_prefix_with_context(
+                    inst, data ? data + *offset_io : NULL, byte_size - *offset_io,
+                    "host component function", "result", result_index,
+                    &ignored_payload, &ignored_payload_len, &consumed))
+                return false;
+        }
+        else {
+            wasm_val_t ignored;
+            uint8 expected_core_type;
+            wasm_valkind_t public_kind;
+
+            if (!component_scalar_prim_to_core(shape.prim_type, &expected_core_type,
+                                               &public_kind))
+                return set_host_component_composite_result_leaf_error(inst,
+                                                                      result_index);
+
+            if (!decode_component_public_scalar_prefix_with_context(
+                    inst, data ? data + *offset_io : NULL,
+                    byte_size - *offset_io, shape.prim_type, public_kind,
+                    "host component function", "result", result_index, &ignored,
+                    &consumed))
+                return false;
+        }
 
         (*offset_io) += consumed;
         return true;
@@ -3949,6 +3995,38 @@ validate_host_component_public_composite_result_bytes(
                     return false;
             }
             return true;
+        case WASM_COMP_DEF_VAL_LIST:
+        {
+            bool is_primitive = false;
+            uint8 element_prim_type = 0;
+            const uint8 *ignored_payload = NULL;
+            uint32 ignored_payload_len = 0;
+            uint32 consumed = 0;
+
+            if (!shape.def_type->def_val.list
+                || !shape.def_type->def_val.list->element_type)
+                return set_component_call_error(
+                    inst, "host component function result uses malformed list "
+                          "type");
+            if (!lookup_component_call_primitive_type(
+                    component, shape.def_type->def_val.list->element_type,
+                    "result", result_index, &is_primitive, &element_prim_type,
+                    inst))
+                return false;
+            if (!is_primitive || element_prim_type != WASM_COMP_PRIMVAL_U8)
+                return set_host_component_composite_result_list_u8_leaf_error(
+                    inst, result_index);
+            if (!decode_component_public_list_u8_prefix_with_context(
+                    inst, data ? data + *offset_io : NULL, byte_size - *offset_io,
+                    "host component function", "result", result_index,
+                    &ignored_payload, &ignored_payload_len, &consumed))
+                return false;
+            (*offset_io) += consumed;
+            return true;
+        }
+        case WASM_COMP_DEF_VAL_LIST_LEN:
+            return set_host_component_composite_result_list_u8_leaf_error(
+                inst, result_index);
         default:
             return set_host_component_composite_result_leaf_error(inst,
                                                                   result_index);
