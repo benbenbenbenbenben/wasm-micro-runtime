@@ -373,6 +373,12 @@ free_nested_component_local_bindings(WASMNestedComponentLocalBindings *bindings)
 }
 
 static bool
+append_nested_component_local_component(WASMNestedComponentLocalBindings *bindings,
+                                        WASMComponentRuntimeComponent *component,
+                                        char *error_buf,
+                                        uint32 error_buf_size);
+
+static bool
 append_nested_component_local_ref(WASMNestedComponentLocalBindings *bindings,
                                   WASMComponentRuntimeRef ref,
                                   char *error_buf, uint32 error_buf_size)
@@ -392,6 +398,9 @@ append_nested_component_local_ref(WASMNestedComponentLocalBindings *bindings,
                     "nested component local instance space overflow");
             bindings->instances[bindings->instance_count++] = ref;
             return true;
+        case WASM_COMP_RUNTIME_REF_COMPONENT:
+            return append_nested_component_local_component(
+                bindings, ref.of.component, error_buf, error_buf_size);
         default:
             return set_component_runtime_error_fmt(
                 error_buf, error_buf_size,
@@ -1291,11 +1300,15 @@ count_nested_component_local_bindings(const WASMComponent *nested_component,
                             (*import_count)++;
                             (*instance_count)++;
                             break;
+                        case WASM_COMP_EXTERN_COMPONENT:
+                            (*import_count)++;
+                            (*component_count)++;
+                            break;
                         default:
                             return set_component_runtime_error_fmt(
                                 error_buf, error_buf_size,
                                 "nested component imports other than "
-                                "func/instance are not supported yet");
+                                "func/instance/component are not supported yet");
                     }
                 }
                 break;
@@ -1420,10 +1433,18 @@ validate_component_import_binding_type(const WASMComponentImport *component_impo
                              "nested component import \"%s\" bound to the wrong "
                              "runtime sort",
                              import_name);
+        case WASM_COMP_EXTERN_COMPONENT:
+            return ref.type == WASM_COMP_RUNTIME_REF_COMPONENT
+                       ? true
+                       : set_component_runtime_error_fmt(
+                             error_buf, error_buf_size,
+                             "nested component import \"%s\" bound to the wrong "
+                             "runtime sort",
+                             import_name);
         default:
             return set_component_runtime_error_fmt(
                 error_buf, error_buf_size,
-                "nested component imports other than func/instance are not "
+                "nested component imports other than func/instance/component are not "
                 "supported yet");
     }
 }
