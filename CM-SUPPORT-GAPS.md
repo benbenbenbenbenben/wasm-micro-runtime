@@ -1,420 +1,350 @@
 # Component Model Support Gaps in This Fork
 
-This document summarizes the current gaps in the integrated Component Model implementation from upstream PR #4889. The short version is:
+This document summarizes the **current** state of component-model support in this fork after `29fe91ce feat: extend component runtime execution`.
 
-- **The implementation is materially complete as a _component binary parser_.**
-- **It is not materially complete as a _component runtime_.**
-- **It can parse, validate, and retain component structure, but it cannot yet instantiate and execute components as first-class runtime objects.**
+The short version is:
 
-The sections below break that down in detail and point to the relevant code.
+- **This fork is no longer parser-only.**
+- **It now has a real component runtime surface, including public component APIs.**
+- **It still does not implement the full Component Model execution story.**
 
-## 1. What is actually implemented today
+The main remaining gaps are now centered on:
 
-The integrated code adds a substantial parser and validator under `core/iwasm/common/component-model/` and documents that scope explicitly.
+- Canonical ABI beyond scalar values and UTF-8 strings
+- canon-lower / imported component-function lowering paths
+- broader composite component values
+- operational resource semantics
+- remaining public host API limitations
+- nested core-module / core-instance / core-type runtime support
 
-The clearest statement is in `doc/component_model.md`:
+## 1. What is implemented today
 
-- `doc/component_model.md:11` says WAMR implements **binary parsing** for the Component Model.
-- `doc/component_model.md:47-60` describes a parser pipeline that decodes headers, iterates sections, delegates to per-section parsers, and returns a `WASMComponent` structure.
-- `doc/component_model.md:82-85` lists only parser-oriented limitations: unsupported core GC types and unsupported async/callback canon options.
+The implementation is now best described as:
 
-The public parser-facing entry points match that description:
+> **A partial but executable component runtime: top-level component loading/instantiation, public import/export APIs, scalar and UTF-8 string canon-lift calls, runtime values, value imports/exports, start execution slices, and resource bookkeeping foundations are all present.**
 
-- `core/iwasm/common/component-model/wasm_component.h:1690-1807`
-  - `is_wasm_component()`
-  - `wasm_component_parse_sections()`
-  - per-section parse helpers
-  - `wasm_component_free()`
+### 1.1 Top-level component loading, instantiation, and teardown
 
-That is a real and non-trivial implementation. It covers the binary format, section decoding, validation, nested components, and embedded core-module parsing. The gap is that this functionality stops at **decoded component data structures**.
+Top-level component binaries now flow through the normal runtime entry points:
 
-## 2. The biggest missing piece: no top-level component runtime
+- `wasm_runtime_load_ex()` / `wasm_component_module_load(...)`
+- `wasm_runtime_instantiate_internal()` / `wasm_component_module_instantiate(...)`
+- `wasm_runtime_deinstantiate_internal()` / `wasm_component_module_deinstantiate(...)`
+- `wasm_runtime_unload()` / `wasm_component_module_unload(...)`
 
-The main functional gap is that WAMR still does **not** expose or implement a complete runtime object model for components.
+So component binaries are genuine runtime modules/instances, not detached parser artifacts.
 
-### Evidence
+### 1.2 Real runtime graph construction
 
-- `core/iwasm/include/wasm_export.h:128-130` only forward-declares:
+The runtime builds and retains concrete runtime state for:
 
-  ```c
-  struct WASMComponentInstance;
-  typedef struct WASMComponentInstance WASMComponentInstance;
-  ```
+- embedded core modules
+- top-level core instances
+- core aliases
+- canon-derived component functions
+- component values
+- component instances
+- component definitions
+- component exports
+- lexical-scope-backed `alias outer` component references
 
-  There is no public instantiate API, no component-export lookup API, no component invocation API, and no component teardown API analogous to the core-module runtime APIs.
+This runtime graph lives primarily in:
 
-- `core/iwasm/interpreter/wasm_runtime.h:479-481` adds placeholders inside module instances:
+- `core/iwasm/common/component-model/wasm_component_runtime.c`
+- `core/iwasm/common/component-model/wasm_component_runtime.h`
 
-  - `WASMComponentInstance *comp_instance;`
-  - `uint32 core_instance_idx;`
+### 1.3 Public component host APIs now exist
 
-  These fields indicate planned runtime wiring, but by themselves they do not constitute a working component-instance system.
+The document used to say this area was missing. That is no longer true.
 
-- `core/iwasm/common/component-model/wasm_component_export.c:9-20` contains only a single global boolean flag:
+Public component-facing APIs now include:
 
-  - `is_component_runtime()`
-  - `set_component_runtime(bool)`
+- top-level export enumeration:
+  - `wasm_runtime_get_component_export_count(...)`
+  - `wasm_runtime_get_component_export_type(...)`
+  - `wasm_runtime_get_component_export_value(...)`
+- top-level lookup:
+  - `wasm_runtime_lookup_component_function(...)`
+  - `wasm_runtime_lookup_component_value(...)`
+  - `wasm_runtime_lookup_component_instance(...)`
+  - `wasm_runtime_lookup_component_component(...)`
+  - `wasm_runtime_lookup_component_core_module(...)`
+- nested-instance lookup:
+  - `wasm_component_instance_get_export_count(...)`
+  - `wasm_component_instance_get_export_type(...)`
+  - `wasm_component_instance_lookup_function(...)`
+  - `wasm_component_instance_lookup_instance(...)`
+  - `wasm_component_instance_lookup_component(...)`
+  - `wasm_component_instance_lookup_core_module(...)`
+- invocation:
+  - `wasm_runtime_call_component(...)`
+  - `wasm_runtime_call_component_values(...)`
+- public value helpers:
+  - `wasm_component_value_get_data(...)`
+  - `wasm_component_value_destroy(...)`
 
-  That file is scaffolding, not a runtime implementation.
+Important nuance: the old generic core-Wasm entry points are still component-unaware in places. For example, `wasm_runtime_lookup_function(...)` and `wasm_runtime_create_exec_env(...)` still reject component instances. The supported surface is the newer **component-specific** API above.
 
-### Practical consequence
+### 1.4 Top-level component imports now have a host-facing API
 
-Today, the implementation can produce a parsed `WASMComponent` tree, but it does not produce a first-class runtime object that can:
+This also used to be called out as missing; that is no longer accurate.
 
-- instantiate component imports,
-- create component instances,
-- resolve component exports,
-- invoke exported component functions,
-- manage component lifetimes as executable entities.
+Embedders can now provide top-level component imports through:
 
-## 3. No top-level component loader path in the public runtime
+- `InstantiationArgs2`
+- `wasm_runtime_instantiation_args_set_component_imports(...)`
+- `wasm_component_import_binding_t`
 
-Another major gap is that the generic runtime load path still loads **core wasm bytecode** and **AoT**, not top-level component packages.
+Supported import binding kinds at the public boundary are:
 
-### Evidence
+- component functions
+- component values
+- component instances
+- component definitions
+- core modules
 
-- `core/iwasm/common/wasm_runtime_common.c:1517-1584` (`wasm_runtime_load_ex`) checks `get_package_type(buf, size)` and only accepts:
-  - `Wasm_Module_Bytecode`
-  - `Wasm_Module_AoT`
+That is enough to support real top-level import wiring for already-existing runtime handles and public component values.
 
-  There is no branch that recognizes or returns a top-level component object.
+### 1.5 Canonical ABI execution is partially implemented
 
-- If the package type is not one of those two, `wasm_runtime_load_ex()` fails with:
+Canonical ABI is no longer metadata-only.
 
-  - `WASM module load failed: magic header not detected`
+What works today:
 
-### Practical consequence
+- `canon lift` runtime metadata resolution
+- direct calling of top-level exported canon-lift functions
+- scalar parameter/result lifting via `wasm_runtime_call_component(...)`
+- UTF-8 string parameter/result handling via `wasm_runtime_call_component_values(...)`
+- memory / realloc / post-return validation and use for supported UTF-8 string lifts
 
-Even though the component parser exists, the main WAMR load API is still **not a component loader**. A caller cannot hand a component binary to the normal runtime loading API and expect a component runtime object back.
+Current supported execution envelope is intentionally narrow:
 
-That is an architectural gap, not a missing convenience wrapper.
+- only `canon lift` is executable
+- calls must target top-level exported canon-lift functions
+- scalar signatures work through the `wasm_val_t` API
+- UTF-8 string signatures work through the component-value API
 
-## 4. Embedded core modules are parsed, but component instantiation is not implemented
+### 1.6 Runtime values and value sections are implemented
 
-The implementation does parse and load embedded core modules from component sections, but that should not be confused with full component execution.
+The runtime now has explicit value machinery:
 
-### Evidence
+- `WASMComponentRuntimeValue`
+- `WASMComponentRuntimeValueType`
+- inline / borrowed / owned storage
+- public/runtime value copying helpers
 
-- `doc/component_model.md:58` states that Core Module sections delegate to `wasm_runtime_load_ex()`.
-- `core/iwasm/common/component-model/wasm_component_core_module_section.c` uses `wasm_runtime_load_ex()` to parse embedded core wasm modules.
+Implemented slices include:
 
-### Why this is still incomplete
+- top-level value section instantiation
+- nested value section instantiation
+- top-level value exports
+- top-level public value imports
+- aliasing/re-export of value references through the runtime graph
 
-Loading an embedded core module is only one piece of the Component Model. A working component runtime also needs to:
+This is real runtime value plumbing, even though full composite value semantics are still missing.
 
-- instantiate the component graph,
-- bind component imports and core imports,
-- build component instances and core instances in dependency order,
-- interpret aliases and exports as live runtime references,
-- execute canonical ABI adapters,
-- expose component exports in a callable form.
+### 1.7 Start sections now execute in limited form
 
-The integrated code does not complete that second half.
+Start sections are no longer blanket-rejected.
 
-## 5. Canonical ABI is parsed and validated, but not executed
+Implemented slices include:
 
-The implementation parses Canon sections and validates their option structure, but there is no evidence of a runtime layer that actually performs canonical lifting/lowering.
+- top-level scalar start execution
+- nested scalar start execution
+- result materialization back into component values
 
-### Evidence
+This support is still intentionally narrow:
 
-- `doc/component_model.md:76` describes the Canon section as canonical lift/lower/resource operations.
-- `core/iwasm/common/component-model/wasm_component.h:1748-1752` exposes only the parser entry point for the canon section:
-  - `wasm_component_parse_canons_section(...)`
-- `core/iwasm/common/component-model/wasm_component_validate.c:2043-2124` validates canon options.
+- scalar-only start arguments/results
+- at most one result
+- execution routes through supported canon-lift function shapes
 
-### What is missing in practice
+### 1.8 Resource bookkeeping foundations exist
 
-There is no visible implementation here for:
+Resources are no longer only parser/validator structure.
 
-- lowering host values into core wasm memory according to the Canonical ABI,
-- lifting core wasm results back into component values,
-- string encoding/decoding execution,
-- list/record/variant flattening and reconstruction,
-- adapter trampoline execution,
-- post-return execution semantics,
-- bridging component-level signatures to callable host/runtime functions.
+The runtime now includes:
 
-In other words, the implementation knows how to **parse** canonical declarations, but not how to **run** them.
+- `WASMComponentRuntimeResourceState`
+- resource type scanning for local/imported/alias resource types
+- canonical resource-type bookkeeping
+- owned handle tables
+- owned-handle creation/drop helpers
+- finalizer cleanup during deinstantiation
 
-## 6. Resource handling is structural, not operational
+This is a real runtime substrate, but not yet full resource semantics.
 
-The code parses resource-related constructs, but there is no visible runtime support for actual resource lifecycles.
+### 1.9 Test coverage reflects the runtime work
 
-### Why this matters
+`tests/unit/component/test_binary_parser.cc` now covers more than parsing. It exercises:
 
-Resources are central to practical component execution. A complete runtime needs machinery for:
+- public component export discovery/lookup
+- public scalar component calls
+- public UTF-8 string component calls
+- top-level component import binding
+- public value import/export flows
+- top-level and nested value sections
+- top-level and nested scalar start execution
+- resource-state and owned-handle cleanup foundations
 
-- resource handle allocation,
-- ownership tracking,
-- borrow semantics,
-- drop semantics,
-- representation conversion,
-- host integration for resource-backed values.
+## 2. What is still missing for full component-model support
 
-### Current state
+This fork is still **not** a complete Component Model runtime.
 
-The parser can represent these constructs in parsed form, but there is no exposed runtime subsystem that performs those operations during execution.
+## 3. Canonical ABI support is still narrow
 
-That means resource types currently look more like **validated metadata** than executable runtime semantics.
+The executable Canonical ABI surface is currently limited to:
 
-## 7. Import resolution for component mode is only partially scaffolded
+- scalar values
+- UTF-8 strings
+- top-level exported `canon lift`
 
-There is one runtime hook related to component mode, but it is not enough to qualify as completed import handling.
+Major Canonical ABI gaps remain:
 
-### Evidence
+- no executable `canon lower`
+- no adapter/lowering path for imported component functions
+- no host-defined native component-function implementation surface
+- no list marshalling beyond the special-cased UTF-8 string path
+- no record / tuple / variant / flags / enum / option / result marshalling
+- no broader composite flattening/lifting rules
+- no non-UTF-8 string encodings (`utf16`, `latin1+utf16`)
+- no `memory64` string Canonical ABI support
+- no `error-context` value support
+- no async/callback canon options
 
-- `core/iwasm/interpreter/wasm_runtime.c:180-183`:
+So "Canonical ABI execution" is now **partially true**, but only for a small supported subset.
 
-  ```c
-  if (is_component_runtime()) {
-      return true;
-  }
-  ```
+## 4. Public host APIs are present, but still incomplete
 
-This appears in `wasm_resolve_import_func()`, after native symbol resolution fails.
+The public host story is much better than before, but still not complete.
 
-### Why this is a gap
+Current limitations include:
 
-This means that in component mode, unresolved imports may be treated as acceptable by this function, but the code shown here does **not** also provide:
+- generic `wasm_runtime_lookup_function(...)` still rejects component instances
+- generic `wasm_runtime_create_exec_env(...)` still rejects component instances
+- `wasm_runtime_call_component(...)` / `wasm_runtime_call_component_values(...)` only accept top-level exported canon-lift handles
+- nested function handles can be discovered, but not invoked through the public top-level call API
+- top-level import binding is limited to existing runtime handles / public values, not arbitrary host-native lowered adapters
+- there is still no public resource import/export contract comparable to the current function/value/instance/component/core-module surface
 
-- a complete alternative component import resolver,
-- host/component binding tables,
-- canonical ABI-backed import adapters,
-- clear runtime semantics for how such imports are actually satisfied later.
+## 5. Broader component values are still missing
 
-So the code contains a component-specific relaxation in import resolution, but not the full execution path that would make that relaxation safe and complete.
+The runtime now has value objects, value imports, value exports, and value sections, but the value model is still much narrower than the full spec.
 
-## 8. The runtime object model is incomplete for component graphs
+What works today:
 
-Component Model execution is not just "load a component, then run it." It needs a runtime object graph for:
+- primitive scalar values
+- raw borrowed/owned value payload storage
+- the special UTF-8 string call path used by supported canon-lift calls
 
-- components,
-- instances,
-- core instances,
-- aliases,
-- imports,
-- exports,
-- values,
-- adapter functions,
-- start sections,
-- resources.
+What is still missing:
 
-The current implementation parses those sections into data structures, but there is no corresponding end-to-end runtime graph construction layer exposed in the runtime APIs.
+- first-class runtime semantics for lists
+- records
+- tuples
+- variants
+- flags
+- enums
+- options
+- results
+- richer defined-type introspection/manipulation
 
-## 9. Start section semantics are not wired through to execution
+Today, composite value support is still mostly "opaque bytes plus limited special cases", not full typed component-value semantics.
 
-The parser supports the Start section structurally:
+## 6. Start semantics are only partially implemented
 
-- `doc/component_model.md:77` lists section `0x09` as Start.
-- `core/iwasm/common/component-model/wasm_component.h:1754-1758` exposes `wasm_component_parse_start_section(...)`.
+Start sections are no longer absent, but the implementation is still limited.
 
-But there is no evidence in the integrated public/runtime surface of:
+Supported today:
 
-- component start function execution,
-- start-time argument wiring,
-- start-time side-effect ordering,
-- integration with instance construction or export readiness.
+- top-level scalar starts
+- nested scalar starts
+- materializing a single scalar result as a component value
 
-So Start is currently a parsed section, not a completed runtime behavior.
+Still missing:
 
-## 10. Alias, import, export, and value sections are available as parsed metadata, not executable interfaces
+- string/composite start arguments and results
+- multi-result start handling
+- broader Canonical ABI-backed start execution
+- the more complete execution space needed for start-heavy real-world components
 
-The parser handles:
+## 7. Resources are structural/bookkeeping-heavy, not operational
 
-- aliases,
-- imports,
-- exports,
-- values,
-- component instances,
-- core instances.
+Resource support has meaningful runtime foundations now, but the operational model is still incomplete.
 
-That is useful, but there is still a significant gap between "I can inspect this section" and "I can use this component at runtime."
+What exists:
 
-### Evidence from tests
+- resource type bookkeeping
+- alias/import tracking
+- owned handle allocation/drop helpers
+- deinstantiate-time cleanup/finalization
 
-`tests/unit/component/test_binary_parser.cc:114-144` validates alias parsing by checking that a parsed alias name exists in the section data.
+What is still missing:
 
-That confirms:
+- full ownership/borrow/lend semantics
+- live Canonical ABI resource lowering/lifting
+- resource imports/exports as a complete public host feature
+- runtime enforcement of richer resource lifecycle rules
+- integration with callable component APIs
+- full trap/failure-path operational cleanup semantics
 
-- alias sections are decoded,
-- alias entries are stored and inspectable.
+So resources have a foundation, not a finished runtime.
 
-It does **not** demonstrate:
+## 8. Nested core runtime support is still incomplete
 
-- alias resolution during component execution,
-- live exported handle lookup,
-- functional invocation through aliases,
-- runtime linkage across component boundaries.
+This remains one of the clearest hard gaps.
 
-The same pattern likely applies across the other component-level sections: the parser retains structure, but the runtime does not yet consume that structure end-to-end.
+Nested components still reject:
 
-## 11. Tests cover parser behavior, not runtime behavior
+- nested `core module` sections
+- nested `core instance` sections
+- nested `core type` sections
 
-The current tests are valuable, but they also show the present maturity boundary very clearly.
+The runtime can still thread some existing core handles through component graphs, but it does **not** yet construct a full nested core runtime.
 
-### Evidence
+## 9. Remaining spec limitations still apply
 
-`tests/unit/component/test_binary_parser.cc:42-144` covers:
+Several validator/runtime limitations remain explicit:
 
-- component file load/unload,
-- corrupted-header rejection,
-- header decoding,
-- alias section inspection.
+- unsupported core GC forms such as `rectype` / `subtype`
+- async canon options rejected
+- callback canon options rejected
 
-### What is not covered
+These are still real spec-coverage gaps, not just missing convenience APIs.
 
-There are no tests here for:
+## 10. What this fork is good for today
 
-- top-level component instantiation,
-- import binding,
-- export invocation,
-- canonical lifting/lowering correctness,
-- resource semantics,
-- start function execution,
-- WASI Preview 2 behavior,
-- host/component interoperability at runtime,
-- nested component execution.
+This fork is already useful for:
 
-That is a large completeness gap, because parser success alone does not prove executable support.
+- loading and instantiating component binaries
+- exploring non-trivial component runtime graphs
+- enumerating and looking up component exports through public APIs
+- calling supported top-level canon-lift exports
+- exercising scalar and UTF-8 string lift execution
+- using value imports/exports and value sections
+- experimenting with limited top-level and nested start execution
+- testing resource bookkeeping foundations
 
-## 12. Validation and CI coverage are still conservative
+## 11. What it is still not good for yet
 
-The current automated validation story still treats component support as something that should be disabled in many mainstream flows.
+It is still not a complete basis for:
 
-### Evidence
+- full Canonical ABI execution
+- imported component-function lowering/adapters
+- general composite component values
+- complete resource-heavy component APIs
+- full nested core-runtime execution
+- broad WASI Preview 2 style application execution
 
-- Windows CI disables it:
-  - `.github/workflows/compilation_on_windows.yml:98`
-  - `.github/workflows/compilation_on_windows.yml:133`
-- Android/Ubuntu CI disables it:
-  - `.github/workflows/compilation_on_android_ubuntu.yml:126`
-- The general test harness defaults it off:
-  - `tests/wamr-test-suites/test_wamr.sh:1090`
-- The same harness turns it on specifically for unit tests:
-  - `tests/wamr-test-suites/test_wamr.sh:1157`
-
-### Practical consequence
-
-This tells us two things:
-
-1. The feature is not yet trusted enough to stay enabled across normal CI/build/test coverage.
-2. Most regression coverage is still not exercising the component-enabled path by default.
-
-So even where code compiles, the routine validation surface is still narrower than it should be for a mature runtime feature.
-
-## 13. Explicitly unsupported portions of the spec remain
-
-Some gaps are explicit design limitations rather than missing wiring.
-
-### 13.1 Core GC types are rejected
-
-- `doc/component_model.md:84`
-- `core/iwasm/common/component-model/wasm_component_core_type_section.c:604-626`
-
-The implementation explicitly rejects:
-
-- `rectype`
-- `subtype`
-
-This means it does **not** fully cover the broader future-facing core type space referenced by the component format.
-
-### 13.2 Async and callback canon options are rejected
-
-- `doc/component_model.md:85`
-- `core/iwasm/common/component-model/wasm_component_validate.c:2120-2124`
-
-The validator explicitly rejects:
-
-- `async`
-- `callback`
-
-This is a real functional gap for any components that rely on those canonical options.
-
-## 14. The public API surface is still parser-centric
-
-A mature component implementation would usually expose some combination of:
-
-- load/compile component,
-- instantiate component,
-- link imports,
-- enumerate component exports,
-- invoke component exports,
-- destroy component instance,
-- inspect component/type metadata through stable APIs.
-
-The integrated public surface does not yet expose that kind of component API family. The observable API is still centered on:
-
-- header detection,
-- section parsing,
-- freeing parsed data.
-
-That is a major usability and integration gap even if the internal parser is solid.
-
-## 15. The `LoadArgs.is_component` flag is not enough to close the runtime gap
-
-`core/iwasm/include/wasm_export.h:276-294` adds:
-
-- `bool is_component;`
-
-inside `LoadArgs`.
-
-This is helpful scaffolding, but by itself it does not provide:
-
-- component package recognition in `wasm_runtime_load_ex()`,
-- a component instance constructor,
-- canonical ABI execution,
-- a component export invocation path.
-
-Right now the flag mainly looks like a way to influence loader/runtime behavior for embedded core modules in a component context, not a full top-level component execution interface.
-
-## 16. What this implementation is good for today
-
-The current code is already useful for:
-
-- recognizing component binaries,
-- parsing and validating component structure,
-- building tools or diagnostics that inspect component sections,
-- testing and iterating on the binary-format side of the Component Model,
-- loading embedded core wasm modules during parsing.
-
-That is meaningful progress and not just a stub.
-
-## 17. What it is not good for yet
-
-It is not yet a complete basis for:
-
-- running general WebAssembly components as first-class programs,
-- executing WASI Preview 2/componentized applications end-to-end,
-- reliable host-component interop via canonical ABI,
-- async/callback-driven component flows,
-- resource-heavy component APIs,
-- broad CI-backed production support across platforms.
-
-## 18. Summary of the main gaps
-
-The main outstanding gaps are:
-
-1. **No top-level component loader path** in `wasm_runtime_load_ex()`.
-2. **No complete `WASMComponentInstance` implementation** exposed through runtime APIs.
-3. **No component instantiation pipeline** that builds executable component graphs.
-4. **No component export invocation API**.
-5. **No canonical ABI execution engine** for lift/lower/resource semantics.
-6. **No operational resource management subsystem** for component resources.
-7. **No completed runtime handling for component imports/aliases/exports/values** beyond parsed metadata.
-8. **No demonstrated start-section execution semantics**.
-9. **Explicit rejection of async/callback canon options**.
-10. **Explicit rejection of core GC `rectype`/`subtype` forms**.
-11. **Parser-focused tests only**, with no runtime execution coverage.
-12. **CI and general test flows still disable component mode in many places**.
-
-## 19. Overall assessment
+## 12. Overall assessment
 
 If this feature is described as:
 
-- **"Component Model binary parser support"** — that is broadly accurate.
-- **"Component Model runtime support"** — that would overstate its completeness.
+- **"Component Model binary parser support"** - accurate
+- **"Partial Component Model runtime support"** - definitely accurate
+- **"Partial executable Component Model host/runtime API"** - now also accurate
+- **"Full Component Model runtime support"** - still inaccurate
 
-The right maturity label today is something like:
+The right maturity label today is:
 
-> **A strong parser/validator foundation with partial runtime scaffolding, but without full component instantiation and execution support.**
-
+> **A real but still partial component runtime: public host APIs, scalar and UTF-8 string canon-lift calls, runtime values, value imports/exports, start execution slices, and resource bookkeeping foundations are implemented; full support is still blocked on canon-lower/imported-function lowering, broader composite Canonical ABI and value semantics, operational resources, remaining host API gaps, and nested core-runtime support.**
