@@ -69,7 +69,8 @@ typedef enum WASMComponentRuntimeStringEncoding {
 typedef enum WASMComponentRuntimeCanonLiftMemoryResultKind {
     WASM_COMP_RUNTIME_CANON_LIFT_MEMORY_RESULT_NONE = 0,
     WASM_COMP_RUNTIME_CANON_LIFT_MEMORY_RESULT_STRING,
-    WASM_COMP_RUNTIME_CANON_LIFT_MEMORY_RESULT_LIST_U8
+    WASM_COMP_RUNTIME_CANON_LIFT_MEMORY_RESULT_LIST_U8,
+    WASM_COMP_RUNTIME_CANON_LIFT_MEMORY_RESULT_COMPOSITE
 } WASMComponentRuntimeCanonLiftMemoryResultKind;
 
 typedef struct WASMComponentRuntimeFunc {
