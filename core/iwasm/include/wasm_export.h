@@ -215,6 +215,18 @@ typedef struct wasm_component_import_binding_t {
         wasm_module_t core_module;
     } value;
 } wasm_component_import_binding_t;
+
+typedef bool (*wasm_component_host_func_callback_t)(
+    wasm_module_inst_t caller_component_inst, void *user_data,
+    uint32_t num_results, wasm_component_value_t results[], uint32_t num_args,
+    const wasm_component_value_t args[], char *error_buf,
+    uint32_t error_buf_size);
+
+typedef struct wasm_component_func_import_binding_t {
+    const char *name;
+    wasm_component_host_func_callback_t callback;
+    void *user_data;
+} wasm_component_func_import_binding_t;
 #endif
 
 /* Function instance */
@@ -936,6 +948,12 @@ WASM_RUNTIME_API_EXTERN void
 wasm_runtime_instantiation_args_set_component_imports(
     struct InstantiationArgs2 *p,
     const wasm_component_import_binding_t imports[], uint32_t import_count);
+
+WASM_RUNTIME_API_EXTERN void
+wasm_runtime_instantiation_args_set_component_func_imports(
+    struct InstantiationArgs2 *p,
+    const wasm_component_func_import_binding_t imports[],
+    uint32_t import_count);
 #endif
 
 /**

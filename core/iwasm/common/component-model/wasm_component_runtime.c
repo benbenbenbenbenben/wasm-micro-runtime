@@ -1390,7 +1390,8 @@ component_scalar_prim_to_core(uint8 prim_type, uint8 *core_type,
 
 typedef enum WASMComponentCanonLiftValueKind {
     WASM_COMP_CANON_LIFT_VALUE_SCALAR = 0,
-    WASM_COMP_CANON_LIFT_VALUE_STRING
+    WASM_COMP_CANON_LIFT_VALUE_STRING,
+    WASM_COMP_CANON_LIFT_VALUE_LIST_U8
 } WASMComponentCanonLiftValueKind;
 
 typedef struct WASMComponentCanonLiftValueInfo {
@@ -1402,10 +1403,151 @@ typedef struct WASMComponentCanonLiftValueInfo {
 } WASMComponentCanonLiftValueInfo;
 
 static bool
+lookup_component_call_primitive_type(const WASMComponent *component,
+                                     const WASMComponentValueType *value_type,
+                                     const char *position, uint32 index,
+                                     bool *is_primitive, uint8 *prim_type_out,
+                                     WASMComponentInstance *inst)
+{
+    const WASMComponentTypes *type_entry;
+    WASMComponentDefValType *def_type;
+
+    *is_primitive = false;
+
+    if (!value_type)
+        return set_component_call_error_fmt(
+            inst, "component canon lift function %s %u is missing a type",
+            position, index);
+
+    if (value_type->type == WASM_COMP_VAL_TYPE_PRIMVAL) {
+        *is_primitive = true;
+        *prim_type_out = value_type->type_specific.primval_type;
+        return true;
+    }
+
+    type_entry =
+        wasm_component_lookup_type(component, value_type->type_specific.type_idx);
+    if (!type_entry)
+        return set_component_call_error_fmt(
+            inst,
+            "component canon lift function %s %u uses unresolved type index %u",
+            position, index, value_type->type_specific.type_idx);
+
+    if (type_entry->tag != WASM_COMP_DEF_TYPE || !type_entry->type.def_val_type)
+        return set_component_call_error_fmt(
+            inst,
+            "component canon lift function %s %u uses non-value type index %u",
+            position, index, value_type->type_specific.type_idx);
+
+    def_type = type_entry->type.def_val_type;
+    if (def_type->tag == WASM_COMP_DEF_VAL_PRIMVAL) {
+        *is_primitive = true;
+        *prim_type_out = def_type->def_val.primval;
+    }
+    return true;
+}
+
+static bool
+resolve_component_runtime_primitive_type(const WASMComponent *component,
+                                         const WASMComponentValueType *value_type,
+                                         bool *is_primitive,
+                                         uint8 *prim_type_out, char *error_buf,
+                                         uint32 error_buf_size)
+{
+    const WASMComponentTypes *type_entry;
+    WASMComponentDefValType *def_type;
+
+    *is_primitive = false;
+
+    if (!value_type)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "component canon lift function is missing a value type");
+
+    if (value_type->type == WASM_COMP_VAL_TYPE_PRIMVAL) {
+        *is_primitive = true;
+        *prim_type_out = value_type->type_specific.primval_type;
+        return true;
+    }
+
+    type_entry =
+        wasm_component_lookup_type(component, value_type->type_specific.type_idx);
+    if (!type_entry)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "component canon lift function uses unresolved type index %u",
+            value_type->type_specific.type_idx);
+
+    if (type_entry->tag != WASM_COMP_DEF_TYPE || !type_entry->type.def_val_type)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "component canon lift function uses non-value type index %u",
+            value_type->type_specific.type_idx);
+
+    def_type = type_entry->type.def_val_type;
+    if (def_type->tag == WASM_COMP_DEF_VAL_PRIMVAL) {
+        *is_primitive = true;
+        *prim_type_out = def_type->def_val.primval;
+    }
+    return true;
+}
+
+static bool
+resolve_component_lift_list_u8_result_usage(const WASMComponent *component,
+                                            const WASMComponentValueType *value_type,
+                                            bool *is_list_u8, char *error_buf,
+                                            uint32 error_buf_size)
+{
+    const WASMComponentTypes *type_entry;
+    WASMComponentDefValType *def_type;
+    bool is_primitive = false;
+    uint8 prim_type = 0;
+
+    *is_list_u8 = false;
+
+    if (!value_type)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "component canon lift function is missing a value type");
+
+    if (value_type->type == WASM_COMP_VAL_TYPE_PRIMVAL)
+        return true;
+
+    type_entry =
+        wasm_component_lookup_type(component, value_type->type_specific.type_idx);
+    if (!type_entry)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "component canon lift function uses unresolved type index %u",
+            value_type->type_specific.type_idx);
+
+    if (type_entry->tag != WASM_COMP_DEF_TYPE || !type_entry->type.def_val_type)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "component canon lift function uses non-value type index %u",
+            value_type->type_specific.type_idx);
+
+    def_type = type_entry->type.def_val_type;
+    if (def_type->tag != WASM_COMP_DEF_VAL_LIST || !def_type->def_val.list
+        || !def_type->def_val.list->element_type)
+        return true;
+
+    if (!resolve_component_runtime_primitive_type(component,
+                                                  def_type->def_val.list->element_type,
+                                                  &is_primitive, &prim_type,
+                                                  error_buf, error_buf_size))
+        return false;
+
+    *is_list_u8 = is_primitive && prim_type == WASM_COMP_PRIMVAL_U8;
+    return true;
+}
+
+static bool
 lookup_component_canon_lift_value_type(const WASMComponent *component,
                                        const WASMComponentValueType *value_type,
                                        const char *position, uint32 index,
                                        bool allow_string,
+                                       bool allow_list_u8_result,
                                        WASMComponentCanonLiftValueInfo *out_info,
                                        WASMComponentInstance *inst)
 {
@@ -1510,17 +1652,254 @@ lookup_component_canon_lift_value_type(const WASMComponent *component,
         return true;
     }
 
-    if (def_type->tag == WASM_COMP_DEF_VAL_LIST
-        || def_type->tag == WASM_COMP_DEF_VAL_LIST_LEN)
+    if (def_type->tag == WASM_COMP_DEF_VAL_LIST) {
+        bool is_primitive = false;
+        uint8 element_prim_type = 0;
+
+        if (allow_list_u8_result) {
+            if (!def_type->def_val.list || !def_type->def_val.list->element_type)
+                return set_component_call_error_fmt(
+                    inst,
+                    "component canon lift function %s %u uses malformed list type",
+                    position, index);
+
+            if (!lookup_component_call_primitive_type(
+                    component, def_type->def_val.list->element_type, position,
+                    index, &is_primitive, &element_prim_type, inst))
+                return false;
+
+            if (is_primitive && element_prim_type == WASM_COMP_PRIMVAL_U8) {
+                memset(out_info, 0, sizeof(*out_info));
+                out_info->kind = WASM_COMP_CANON_LIFT_VALUE_LIST_U8;
+                out_info->declared_as_defined = true;
+                return true;
+            }
+
+            return set_component_call_error_fmt(
+                inst, "component canon lift function %s %u only supports "
+                      "list<u8> results",
+                position, index);
+        }
+
         return set_component_call_error_fmt(
             inst, "component canon lift function %s %u requires memory-backed "
                   "Canonical ABI for %s",
             position, index, component_def_type_name(def_type->tag));
+    }
+
+    if (def_type->tag == WASM_COMP_DEF_VAL_LIST_LEN) {
+        if (allow_list_u8_result)
+            return set_component_call_error_fmt(
+                inst, "component canon lift function %s %u only supports "
+                      "variable-length list<u8> results",
+                position, index);
+        return set_component_call_error_fmt(
+            inst, "component canon lift function %s %u requires memory-backed "
+                  "Canonical ABI for %s",
+            position, index, component_def_type_name(def_type->tag));
+    }
 
     return set_component_call_error_fmt(
         inst,
         "component canon lift function %s %u uses unsupported non-scalar %s type",
         position, index, component_def_type_name(def_type->tag));
+}
+
+static bool
+resolve_component_func_type(WASMComponentInstance *inst,
+                            const WASMComponentRuntimeFunc *function,
+                            const char *function_name,
+                            WASMComponentFuncType **out_component_type)
+{
+    const WASMComponentTypes *type_entry =
+        wasm_component_lookup_type(&inst->module->component, function->type_idx);
+
+    if (!type_entry)
+        return set_component_call_error_fmt(
+            inst, "%s uses unresolved type index %u", function_name,
+            function->type_idx);
+
+    if (type_entry->tag != WASM_COMP_FUNC_TYPE || !type_entry->type.func_type)
+        return set_component_call_error_fmt(
+            inst, "%s type index %u is not a function", function_name,
+            function->type_idx);
+
+    *out_component_type = type_entry->type.func_type;
+    return true;
+}
+
+static uint32
+get_component_func_result_count(const WASMComponentFuncType *component_type)
+{
+    return component_type && component_type->results
+                   && component_type->results->tag
+                          == WASM_COMP_RESULT_LIST_WITH_TYPE
+                   && component_type->results->results
+               ? 1
+               : 0;
+}
+
+static bool
+set_component_call_error_from_host_result(WASMComponentInstance *inst,
+                                          const char *error_buf)
+{
+    return error_buf && error_buf[0]
+               ? set_component_call_error(inst, error_buf)
+               : set_component_call_error(inst,
+                                          "host component function call failed");
+}
+
+static bool
+validate_component_host_import_value_type(
+    const WASMComponent *component, const WASMComponentValueType *value_type,
+    const char *import_name, const char *position, uint32 index,
+    bool *is_string_out, char *error_buf, uint32 error_buf_size)
+{
+    const WASMComponentTypes *type_entry;
+    WASMComponentDefValType *def_type;
+    uint8 prim_type;
+    uint8 ignored_core_type = 0;
+    wasm_valkind_t ignored_public_kind = WASM_I32;
+
+    *is_string_out = false;
+
+    if (!value_type)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "host component import \"%s\" %s %u is missing a type", import_name,
+            position, index);
+
+    if (value_type->type == WASM_COMP_VAL_TYPE_PRIMVAL) {
+        prim_type = value_type->type_specific.primval_type;
+        if (component_scalar_prim_to_core(prim_type, &ignored_core_type,
+                                          &ignored_public_kind))
+            return true;
+        if (prim_type == WASM_COMP_PRIMVAL_STRING) {
+            *is_string_out = true;
+            return true;
+        }
+        if (prim_type == WASM_COMP_PRIMVAL_ERROR_CONTEXT)
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                "host component import \"%s\" %s %u uses unsupported component "
+                "scalar type error-context",
+                import_name, position, index);
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "host component import \"%s\" %s %u uses unsupported component "
+            "scalar type %s",
+            import_name, position, index, component_prim_type_name(prim_type));
+    }
+
+    type_entry =
+        wasm_component_lookup_type(component, value_type->type_specific.type_idx);
+    if (!type_entry)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "host component import \"%s\" %s %u uses unresolved type index %u",
+            import_name, position, index, value_type->type_specific.type_idx);
+
+    if (type_entry->tag != WASM_COMP_DEF_TYPE || !type_entry->type.def_val_type)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "host component import \"%s\" %s %u uses non-value type index %u",
+            import_name, position, index, value_type->type_specific.type_idx);
+
+    def_type = type_entry->type.def_val_type;
+    if (def_type->tag == WASM_COMP_DEF_VAL_PRIMVAL) {
+        prim_type = def_type->def_val.primval;
+        if (component_scalar_prim_to_core(prim_type, &ignored_core_type,
+                                          &ignored_public_kind))
+            return true;
+        if (prim_type == WASM_COMP_PRIMVAL_STRING) {
+            *is_string_out = true;
+            return true;
+        }
+        if (prim_type == WASM_COMP_PRIMVAL_ERROR_CONTEXT)
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                "host component import \"%s\" %s %u uses unsupported component "
+                "scalar type error-context",
+                import_name, position, index);
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "host component import \"%s\" %s %u uses unsupported component "
+            "scalar type %s",
+            import_name, position, index, component_prim_type_name(prim_type));
+    }
+
+    if (def_type->tag == WASM_COMP_DEF_VAL_LIST
+        || def_type->tag == WASM_COMP_DEF_VAL_LIST_LEN)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "host component import \"%s\" %s %u requires memory-backed "
+            "Canonical ABI for %s",
+            import_name, position, index, component_def_type_name(def_type->tag));
+
+    return set_component_runtime_error_fmt(
+        error_buf, error_buf_size,
+        "host component import \"%s\" %s %u uses unsupported non-scalar %s type",
+        import_name, position, index, component_def_type_name(def_type->tag));
+}
+
+static bool
+validate_component_host_import_func_type(WASMComponentInstance *inst,
+                                         WASMComponentRuntimeFunc *function,
+                                         const char *import_name,
+                                         char *error_buf,
+                                         uint32 error_buf_size)
+{
+    const WASMComponentTypes *type_entry;
+    WASMComponentFuncType *func_type;
+    uint32 i;
+
+    function->has_string_params = false;
+    function->has_string_result = false;
+
+    type_entry =
+        wasm_component_lookup_type(&inst->module->component, function->type_idx);
+    if (!type_entry)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "host component import \"%s\" uses unresolved type index %u",
+            import_name, function->type_idx);
+
+    if (type_entry->tag != WASM_COMP_FUNC_TYPE || !type_entry->type.func_type)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "host component import \"%s\" type index %u is not a function",
+            import_name, function->type_idx);
+
+    func_type = type_entry->type.func_type;
+    if (func_type->params) {
+        for (i = 0; i < func_type->params->count; i++) {
+            bool is_string;
+
+            if (!validate_component_host_import_value_type(
+                    &inst->module->component,
+                    func_type->params->params[i].value_type, import_name,
+                    "parameter", i, &is_string, error_buf, error_buf_size))
+                return false;
+            if (is_string)
+                function->has_string_params = true;
+        }
+    }
+
+    if (func_type->results
+        && func_type->results->tag == WASM_COMP_RESULT_LIST_WITH_TYPE) {
+        if (!func_type->results->results)
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                "host component import \"%s\" result metadata is missing",
+                import_name);
+        if (!validate_component_host_import_value_type(
+                &inst->module->component, func_type->results->results,
+                import_name, "result", 0, &function->has_string_result,
+                error_buf, error_buf_size))
+            return false;
+    }
+
+    return true;
 }
 
 static bool
@@ -1534,7 +1913,7 @@ lookup_component_scalar_type(const WASMComponent *component,
     WASMComponentCanonLiftValueInfo info;
 
     if (!lookup_component_canon_lift_value_type(component, value_type, position,
-                                                index, false, &info, inst))
+                                                index, false, false, &info, inst))
         return false;
 
     *prim_type_out = info.prim_type;
@@ -1711,15 +2090,15 @@ resolve_component_canon_lift_abi(WASMComponentInstance *inst,
     const WASMComponentTypes *type_entry;
     const WASMComponentFuncType *func_type;
     uint32 i;
-    bool needs_string_abi;
+    bool needs_memory_abi;
 
     function->string_encoding = WASM_COMP_RUNTIME_STRING_ENCODING_NONE;
     memset(&function->canon_memory_ref, 0, sizeof(function->canon_memory_ref));
     memset(&function->canon_realloc_ref, 0, sizeof(function->canon_realloc_ref));
     memset(&function->canon_post_return_ref, 0,
            sizeof(function->canon_post_return_ref));
+    function->memory_result_kind = WASM_COMP_RUNTIME_CANON_LIFT_MEMORY_RESULT_NONE;
     function->has_string_params = false;
-    function->has_string_result = false;
 
     type_entry =
         wasm_component_lookup_type(&inst->module->component, function->type_idx);
@@ -1751,11 +2130,26 @@ resolve_component_canon_lift_abi(WASMComponentInstance *inst,
     if (func_type->results
         && func_type->results->tag == WASM_COMP_RESULT_LIST_WITH_TYPE
         && func_type->results->results) {
+        bool has_string_result = false;
+        bool has_list_u8_result = false;
+
         if (!resolve_component_lift_string_usage(&inst->module->component,
                                                  func_type->results->results,
-                                                 &function->has_string_result,
-                                                 error_buf, error_buf_size))
+                                                 &has_string_result, error_buf,
+                                                 error_buf_size))
             return false;
+        if (!has_string_result
+            && !resolve_component_lift_list_u8_result_usage(
+                &inst->module->component, func_type->results->results,
+                &has_list_u8_result, error_buf, error_buf_size))
+            return false;
+
+        if (has_string_result)
+            function->memory_result_kind =
+                WASM_COMP_RUNTIME_CANON_LIFT_MEMORY_RESULT_STRING;
+        else if (has_list_u8_result)
+            function->memory_result_kind =
+                WASM_COMP_RUNTIME_CANON_LIFT_MEMORY_RESULT_LIST_U8;
     }
 
     if (!function->canon_opts)
@@ -1833,12 +2227,16 @@ resolve_component_canon_lift_abi(WASMComponentInstance *inst,
     }
 
 validate_required_opts:
-    needs_string_abi =
-        function->has_string_params || function->has_string_result;
-    if (!needs_string_abi)
+    needs_memory_abi = function->has_string_params
+                       || function->memory_result_kind
+                              != WASM_COMP_RUNTIME_CANON_LIFT_MEMORY_RESULT_NONE;
+    if (!needs_memory_abi)
         return true;
 
-    if (function->string_encoding != WASM_COMP_RUNTIME_STRING_ENCODING_UTF8)
+    if ((function->has_string_params
+         || function->memory_result_kind
+                == WASM_COMP_RUNTIME_CANON_LIFT_MEMORY_RESULT_STRING)
+        && function->string_encoding != WASM_COMP_RUNTIME_STRING_ENCODING_UTF8)
         return set_component_runtime_error_fmt(
             error_buf, error_buf_size,
             "component canon lift function only supports UTF-8 strings");
@@ -1847,14 +2245,24 @@ validate_required_opts:
         || !function->canon_memory_ref.of.memory)
         return set_component_runtime_error_fmt(
             error_buf, error_buf_size,
-            "component canon lift function requires memory for string Canonical "
-            "ABI");
+            function->memory_result_kind
+                        == WASM_COMP_RUNTIME_CANON_LIFT_MEMORY_RESULT_LIST_U8
+                    && !function->has_string_params
+                ? "component canon lift function requires memory for list<u8> "
+                  "Canonical ABI"
+                : "component canon lift function requires memory for string "
+                  "Canonical ABI");
 
     if (function->canon_memory_ref.of.memory->is_memory64)
         return set_component_runtime_error_fmt(
             error_buf, error_buf_size,
-            "component canon lift function does not support memory64 string "
-            "Canonical ABI");
+            function->memory_result_kind
+                        == WASM_COMP_RUNTIME_CANON_LIFT_MEMORY_RESULT_LIST_U8
+                    && !function->has_string_params
+                ? "component canon lift function does not support memory64 "
+                  "list<u8> Canonical ABI"
+                : "component canon lift function does not support memory64 "
+                  "string Canonical ABI");
 
     if (!function->core_func_ref.owner_instance
         || !function->core_func_ref.owner_instance->module_inst
@@ -1918,21 +2326,10 @@ resolve_component_canon_lift_type(WASMComponentInstance *inst,
                                   WASMComponentFuncType **out_component_type,
                                   WASMFuncType **out_core_type)
 {
-    const WASMComponentTypes *type_entry;
     WASMModuleInstanceCommon *core_module_inst;
-
-    type_entry =
-        wasm_component_lookup_type(&inst->module->component, function->type_idx);
-    if (!type_entry)
-        return set_component_call_error_fmt(
-            inst,
-            "component canon lift function uses unresolved type index %u",
-            function->type_idx);
-
-    if (type_entry->tag != WASM_COMP_FUNC_TYPE)
-        return set_component_call_error_fmt(
-            inst, "component canon lift function type index %u is not a function",
-            function->type_idx);
+    if (!resolve_component_func_type(inst, function, "component canon lift function",
+                                     out_component_type))
+        return false;
 
     if (!function->core_func_ref.owner_instance
         || !function->core_func_ref.owner_instance->module_inst)
@@ -1949,7 +2346,6 @@ resolve_component_canon_lift_type(WASMComponentInstance *inst,
             inst, "component canon lift function could not resolve the core "
                   "function type");
 
-    *out_component_type = type_entry->type.func_type;
     return true;
 }
 
@@ -2231,6 +2627,28 @@ init_component_public_result_type(
 }
 
 static bool
+copy_component_memory_payload(WASMComponentInstance *inst, const uint8 *payload,
+                              uint32 payload_len, const char *description,
+                              uint8 **copy_out)
+{
+    uint8 *payload_copy = NULL;
+
+    *copy_out = NULL;
+    if (payload_len == 0)
+        return true;
+
+    payload_copy = wasm_runtime_malloc(payload_len);
+    if (!payload_copy)
+        return set_component_call_error_fmt(
+            inst, "component canon lift function could not allocate %s storage",
+            description);
+
+    memcpy(payload_copy, payload, payload_len);
+    *copy_out = payload_copy;
+    return true;
+}
+
+static bool
 init_component_public_scalar_result(
     WASMComponentInstance *inst, const WASMComponentCanonLiftValueInfo *type_info,
     const wasm_val_t *result, wasm_component_value_t *value)
@@ -2333,6 +2751,98 @@ init_component_public_scalar_result(
 }
 
 static bool
+encode_component_public_scalar_value(
+    const WASMComponentCanonLiftValueInfo *type_info, const wasm_val_t *input,
+    wasm_component_value_t *value)
+{
+    uint8 storage[16];
+    uint32 storage_len = 0;
+
+    memset(value, 0, sizeof(*value));
+    if (type_info->declared_as_defined)
+        value->type.kind = WASM_COMPONENT_VALUE_TYPE_DEFINED;
+    else {
+        value->type.kind = WASM_COMPONENT_VALUE_TYPE_PRIMITIVE;
+        value->type.type.primitive_type =
+            (wasm_component_primitive_value_kind_t)type_info->prim_type;
+    }
+
+    switch (type_info->prim_type) {
+        case WASM_COMP_PRIMVAL_BOOL:
+            storage[0] = (uint8)input->of.i32;
+            storage_len = 1;
+            break;
+        case WASM_COMP_PRIMVAL_S8:
+        case WASM_COMP_PRIMVAL_U8:
+            storage[0] = (uint8)input->of.i32;
+            storage_len = 1;
+            break;
+        case WASM_COMP_PRIMVAL_S16:
+        case WASM_COMP_PRIMVAL_S32:
+            storage_len =
+                encode_component_signed_leb((int64)input->of.i32, storage);
+            break;
+        case WASM_COMP_PRIMVAL_U16:
+        case WASM_COMP_PRIMVAL_U32:
+            storage_len =
+                encode_component_unsigned_leb((uint32)input->of.i32, storage);
+            break;
+        case WASM_COMP_PRIMVAL_S64:
+            storage_len = encode_component_signed_leb(input->of.i64, storage);
+            break;
+        case WASM_COMP_PRIMVAL_U64:
+            storage_len =
+                encode_component_unsigned_leb((uint64)input->of.i64, storage);
+            break;
+        case WASM_COMP_PRIMVAL_F32:
+            memcpy(storage, &input->of.f32, sizeof(input->of.f32));
+            storage_len = sizeof(input->of.f32);
+            break;
+        case WASM_COMP_PRIMVAL_F64:
+            memcpy(storage, &input->of.f64, sizeof(input->of.f64));
+            storage_len = sizeof(input->of.f64);
+            break;
+        case WASM_COMP_PRIMVAL_CHAR:
+            if ((uint32)input->of.i32 <= 0x7F) {
+                storage[0] = (uint8)input->of.i32;
+                storage_len = 1;
+            }
+            else if ((uint32)input->of.i32 <= 0x7FF) {
+                storage[0] = (uint8)(0xC0 | ((uint32)input->of.i32 >> 6));
+                storage[1] =
+                    (uint8)(0x80 | ((uint32)input->of.i32 & 0x3F));
+                storage_len = 2;
+            }
+            else if ((uint32)input->of.i32 <= 0xFFFF) {
+                storage[0] = (uint8)(0xE0 | ((uint32)input->of.i32 >> 12));
+                storage[1] = (uint8)(0x80
+                                     | (((uint32)input->of.i32 >> 6) & 0x3F));
+                storage[2] =
+                    (uint8)(0x80 | ((uint32)input->of.i32 & 0x3F));
+                storage_len = 3;
+            }
+            else {
+                storage[0] = (uint8)(0xF0 | ((uint32)input->of.i32 >> 18));
+                storage[1] = (uint8)(0x80
+                                     | (((uint32)input->of.i32 >> 12) & 0x3F));
+                storage[2] = (uint8)(0x80
+                                     | (((uint32)input->of.i32 >> 6) & 0x3F));
+                storage[3] =
+                    (uint8)(0x80 | ((uint32)input->of.i32 & 0x3F));
+                storage_len = 4;
+            }
+            break;
+        default:
+            return false;
+    }
+
+    value->storage_kind = WASM_COMPONENT_VALUE_STORAGE_INLINE;
+    value->byte_size = storage_len;
+    memcpy(value->storage.inline_storage, storage, storage_len);
+    return true;
+}
+
+static bool
 init_component_public_string_result(
     WASMComponentInstance *inst, const WASMComponentCanonLiftValueInfo *type_info,
     const uint8 *payload, uint32 payload_len, wasm_component_value_t *value)
@@ -2361,6 +2871,26 @@ init_component_public_string_result(
     value->storage_kind = WASM_COMPONENT_VALUE_STORAGE_OWNED;
     value->byte_size = total_len;
     value->storage.owned_data = storage;
+    return true;
+}
+
+static bool
+init_component_public_list_u8_result(
+    WASMComponentInstance *inst, const WASMComponentCanonLiftValueInfo *type_info,
+    uint8 *payload_copy, uint32 payload_len, wasm_component_value_t *value)
+{
+    if (payload_len > 0 && !payload_copy)
+        return set_component_call_error(
+            inst, "component canon lift function result list<u8> is missing "
+                  "backing bytes");
+
+    init_component_public_result_type(value, type_info);
+    value->byte_size = payload_len;
+    if (payload_len == 0)
+        return true;
+
+    value->storage_kind = WASM_COMPONENT_VALUE_STORAGE_OWNED;
+    value->storage.owned_data = payload_copy;
     return true;
 }
 
@@ -2497,8 +3027,8 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
     uint32 expected_core_param_count = 0;
     uint32 i, core_arg_index = 0;
     bool call_succeeded = false;
-    bool have_string_result_ptr = false;
-    uint32 string_result_retptr = 0;
+    bool have_memory_result_ptr = false;
+    uint32 memory_result_retptr = 0;
 
     if (!inst)
         return false;
@@ -2510,6 +3040,117 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
     }
 
     wasm_runtime_clear_exception((WASMModuleInstanceCommon *)inst);
+
+    if (function->kind == WASM_COMP_RUNTIME_FUNC_HOST_IMPORT) {
+        wasm_component_value_t callback_results[1] = { { 0 } };
+        wasm_val_t ignored = { 0 };
+        char host_error_buf[128] = { 0 };
+
+        if (require_top_level_export && !function->is_top_level_export)
+            return set_component_call_error(
+                inst, "component call only supports top-level exported host "
+                      "component functions");
+
+        if (!resolve_component_func_type(inst, function, "host component function",
+                                         &component_type))
+            return false;
+
+        expected_result_count = get_component_func_result_count(component_type);
+        if (!component_type || !component_type->params)
+            return set_component_call_error(
+                inst, "host component function is missing parameter metadata");
+
+        if (num_args != component_type->params->count)
+            return set_component_call_error_fmt(
+                inst,
+                "host component function expects %u arguments but received %u",
+                component_type->params->count, num_args);
+        if (num_results != expected_result_count)
+            return set_component_call_error_fmt(
+                inst,
+                "host component function expects %u results but received %u",
+                expected_result_count, num_results);
+        if (num_args > 0 && !args)
+            return set_component_call_error(
+                inst, "host component function arguments buffer is null");
+        if (num_results > 0 && !results)
+            return set_component_call_error(
+                inst, "host component function results buffer is null");
+
+        for (i = 0; i < component_type->params->count; i++) {
+            WASMComponentCanonLiftValueInfo type_info;
+
+            if (!lookup_component_canon_lift_value_type(
+                    &inst->module->component,
+                    component_type->params->params[i].value_type, "parameter", i,
+                    true, false, &type_info, inst))
+                return false;
+
+            if (type_info.kind == WASM_COMP_CANON_LIFT_VALUE_SCALAR) {
+                if (!decode_component_public_scalar_value(inst, &args[i], &type_info,
+                                                          "parameter", i,
+                                                          &ignored))
+                    return false;
+            }
+            else {
+                const uint8 *payload;
+                uint32 payload_len;
+
+                if (!decode_component_public_string_value(inst, &args[i], &type_info,
+                                                          "parameter", i, &payload,
+                                                          &payload_len))
+                    return false;
+            }
+        }
+
+        if (!function->host_callback)
+            return set_component_call_error(
+                inst, "host component function callback is missing");
+
+        if (!function->host_callback((WASMModuleInstanceCommon *)inst,
+                                     function->host_user_data,
+                                     expected_result_count, callback_results,
+                                     num_args, args, host_error_buf,
+                                     (uint32)sizeof(host_error_buf))) {
+            wasm_component_value_destroy(&callback_results[0]);
+            return set_component_call_error_from_host_result(inst, host_error_buf);
+        }
+
+        if (expected_result_count == 1) {
+            if (!lookup_component_canon_lift_value_type(
+                    &inst->module->component, component_type->results->results,
+                    "result", 0, true, false, &result_info, inst)) {
+                wasm_component_value_destroy(&callback_results[0]);
+                return false;
+            }
+
+            if (result_info.kind == WASM_COMP_CANON_LIFT_VALUE_SCALAR) {
+                if (!decode_component_public_scalar_value(
+                        inst, &callback_results[0], &result_info, "result", 0,
+                        &ignored)) {
+                    wasm_component_value_destroy(&callback_results[0]);
+                    return false;
+                }
+            }
+            else {
+                const uint8 *payload;
+                uint32 payload_len;
+
+                if (!decode_component_public_string_value(
+                        inst, &callback_results[0], &result_info, "result", 0,
+                        &payload, &payload_len)) {
+                    wasm_component_value_destroy(&callback_results[0]);
+                    return false;
+                }
+            }
+
+            wasm_component_value_destroy(&results[0]);
+            results[0] = callback_results[0];
+            memset(&callback_results[0], 0, sizeof(callback_results[0]));
+        }
+
+        return true;
+    }
 
     if (function->kind != WASM_COMP_RUNTIME_FUNC_LIFT)
         return set_component_call_error(
@@ -2565,7 +3206,7 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
 
         if (!lookup_component_canon_lift_value_type(
                 &inst->module->component, component_type->params->params[i].value_type,
-                "parameter", i, true, &type_info, inst))
+                "parameter", i, true, false, &type_info, inst))
             return false;
 
         expected_core_param_count +=
@@ -2580,15 +3221,16 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
     if (expected_result_count == 1) {
         if (!lookup_component_canon_lift_value_type(
                 &inst->module->component, component_type->results->results, "result",
-                0, true, &result_info, inst))
+                0, true, true, &result_info, inst))
             return false;
 
-        if (result_info.kind == WASM_COMP_CANON_LIFT_VALUE_STRING) {
+        if (result_info.kind == WASM_COMP_CANON_LIFT_VALUE_STRING
+            || result_info.kind == WASM_COMP_CANON_LIFT_VALUE_LIST_U8) {
             if (core_type->result_count != 1
                 || core_type->types[core_type->param_count] != VALUE_TYPE_I32)
                 return set_component_call_error(
                     inst, "component canon lift function only supports a single "
-                          "string result returned through memory");
+                          "memory-backed result returned through memory");
         }
         else if (core_type->result_count != 1
                  || core_type->types[core_type->param_count]
@@ -2616,7 +3258,7 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
 
         if (!lookup_component_canon_lift_value_type(
                 &inst->module->component, component_type->params->params[i].value_type,
-                "parameter", i, true, &type_info, inst)) {
+                "parameter", i, true, false, &type_info, inst)) {
             call_succeeded = false;
             goto cleanup;
         }
@@ -2738,20 +3380,30 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
             uint8 *payload_bytes = NULL;
             uint32 payload_ptr = 0, payload_len = 0;
             uint8 *payload_copy = NULL;
-            bool copied = false;
+            const char *result_desc =
+                result_info.kind == WASM_COMP_CANON_LIFT_VALUE_STRING
+                    ? "string"
+                    : "list<u8>";
 
             if (core_result.kind != WASM_I32) {
                 set_component_call_error(
-                    inst, "component canon lift function string result returned "
-                          "an unexpected result kind");
+                    inst,
+                    result_info.kind == WASM_COMP_CANON_LIFT_VALUE_STRING
+                        ? "component canon lift function string result returned "
+                          "an unexpected result kind"
+                        : "component canon lift function list<u8> result "
+                          "returned an unexpected result kind");
                 call_succeeded = false;
                 goto cleanup;
             }
 
-            string_result_retptr = (uint32)core_result.of.i32;
-            have_string_result_ptr = true;
-            if (!get_component_canon_memory_bytes(inst, function, string_result_retptr,
-                                                  8, "string result area",
+            memory_result_retptr = (uint32)core_result.of.i32;
+            have_memory_result_ptr = true;
+            if (!get_component_canon_memory_bytes(
+                    inst, function, memory_result_retptr, 8,
+                    result_info.kind == WASM_COMP_CANON_LIFT_VALUE_STRING
+                        ? "string result area"
+                        : "list<u8> result area",
                                                   &ret_area_bytes)) {
                 call_succeeded = false;
                 goto cleanup;
@@ -2762,14 +3414,17 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
                    sizeof(payload_len));
 
             if (payload_len > 0) {
-                if (!get_component_canon_memory_bytes(inst, function, payload_ptr,
-                                                      payload_len,
-                                                      "string result payload",
+                if (!get_component_canon_memory_bytes(
+                        inst, function, payload_ptr, payload_len,
+                        result_info.kind == WASM_COMP_CANON_LIFT_VALUE_STRING
+                            ? "string result payload"
+                            : "list<u8> result payload",
                                                       &payload_bytes)) {
                     call_succeeded = false;
                     goto cleanup;
                 }
-                if (!wasm_component_validate_utf8(payload_bytes, payload_len)) {
+                if (result_info.kind == WASM_COMP_CANON_LIFT_VALUE_STRING
+                    && !wasm_component_validate_utf8(payload_bytes, payload_len)) {
                     set_component_call_error(
                         inst, "component canon lift function result does not "
                               "contain valid UTF-8");
@@ -2777,37 +3432,42 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
                     goto cleanup;
                 }
 
-                payload_copy = wasm_runtime_malloc(payload_len);
-                if (!payload_copy) {
-                    set_component_call_error(
-                        inst, "component canon lift function could not allocate "
-                              "result storage");
+                if (!copy_component_memory_payload(inst, payload_bytes, payload_len,
+                                                   result_desc, &payload_copy)) {
                     call_succeeded = false;
                     goto cleanup;
                 }
-                memcpy(payload_copy, payload_bytes, payload_len);
-                copied = true;
             }
 
-            if (!init_component_public_string_result(
-                    inst, &result_info, copied ? payload_copy : NULL, payload_len,
-                    &results[0])) {
+            if (result_info.kind == WASM_COMP_CANON_LIFT_VALUE_STRING) {
+                if (!init_component_public_string_result(
+                        inst, &result_info, payload_copy, payload_len,
+                        &results[0])) {
+                    if (payload_copy)
+                        wasm_runtime_free(payload_copy);
+                    call_succeeded = false;
+                    goto cleanup;
+                }
+                if (payload_copy)
+                    wasm_runtime_free(payload_copy);
+            }
+            else if (!init_component_public_list_u8_result(
+                         inst, &result_info, payload_copy, payload_len,
+                         &results[0])) {
                 if (payload_copy)
                     wasm_runtime_free(payload_copy);
                 call_succeeded = false;
                 goto cleanup;
             }
-            if (payload_copy)
-                wasm_runtime_free(payload_copy);
         }
     }
 
     call_succeeded = true;
 
 cleanup:
-    if (have_string_result_ptr) {
+    if (have_memory_result_ptr) {
         bool post_return_ok =
-            call_component_canon_post_return(inst, function, string_result_retptr);
+            call_component_canon_post_return(inst, function, memory_result_retptr);
         if (call_succeeded && !post_return_ok)
             call_succeeded = false;
     }
@@ -2841,6 +3501,113 @@ wasm_component_call_internal(WASMComponentInstance *inst,
 
     wasm_runtime_clear_exception((WASMModuleInstanceCommon *)inst);
 
+    if (function->kind == WASM_COMP_RUNTIME_FUNC_HOST_IMPORT) {
+        wasm_component_value_t stack_public_args[16];
+        wasm_component_value_t *public_args = stack_public_args;
+        wasm_component_value_t public_result = { 0 };
+
+        if (require_top_level_export && !function->is_top_level_export)
+            return set_component_call_error(
+                inst, "component call only supports top-level exported host "
+                      "component functions");
+
+        if (!resolve_component_func_type(inst, function, "host component function",
+                                         &component_type))
+            return false;
+
+        if (function->has_string_params || function->has_string_result)
+            return set_component_call_error(
+                inst, "host component function uses string values; call through "
+                      "the component value API");
+
+        if (!component_type || !component_type->params)
+            return set_component_call_error(
+                inst, "host component function is missing parameter metadata");
+
+        expected_result_count = get_component_func_result_count(component_type);
+        if (num_args != component_type->params->count)
+            return set_component_call_error_fmt(
+                inst,
+                "host component function expects %u arguments but received %u",
+                component_type->params->count, num_args);
+        if (num_results != expected_result_count)
+            return set_component_call_error_fmt(
+                inst,
+                "host component function expects %u results but received %u",
+                expected_result_count, num_results);
+        if (num_args > 0 && !args)
+            return set_component_call_error(
+                inst, "host component function arguments buffer is null");
+        if (num_results > 0 && !results)
+            return set_component_call_error(
+                inst, "host component function results buffer is null");
+
+        if (num_args > sizeof(stack_public_args) / sizeof(stack_public_args[0])) {
+            public_args =
+                wasm_runtime_malloc(sizeof(wasm_component_value_t) * num_args);
+            if (!public_args)
+                return set_component_call_error(
+                    inst, "host component function could not allocate argument "
+                          "storage");
+        }
+        memset(public_args, 0, sizeof(wasm_component_value_t) * num_args);
+
+        for (i = 0; i < num_args; i++) {
+            WASMComponentCanonLiftValueInfo type_info;
+
+            if (!lookup_component_canon_lift_value_type(
+                    &inst->module->component,
+                    component_type->params->params[i].value_type, "parameter", i,
+                    false, false, &type_info, inst)
+                || !validate_component_scalar_value(inst, &args[i],
+                                                    type_info.public_kind,
+                                                    type_info.prim_type,
+                                                    "parameter", i)
+                || !encode_component_public_scalar_value(&type_info, &args[i],
+                                                         &public_args[i])) {
+                for (uint32 j = 0; j < num_args; j++)
+                    wasm_component_value_destroy(&public_args[j]);
+                if (public_args != stack_public_args)
+                    wasm_runtime_free(public_args);
+                return false;
+            }
+        }
+
+        if (!wasm_component_call_values_internal(inst, function, expected_result_count,
+                                                 expected_result_count
+                                                     ? &public_result
+                                                     : NULL,
+                                                 num_args, public_args, false)) {
+            for (uint32 j = 0; j < num_args; j++)
+                wasm_component_value_destroy(&public_args[j]);
+            if (public_args != stack_public_args)
+                wasm_runtime_free(public_args);
+            return false;
+        }
+
+        for (uint32 j = 0; j < num_args; j++)
+            wasm_component_value_destroy(&public_args[j]);
+        if (public_args != stack_public_args)
+            wasm_runtime_free(public_args);
+
+        if (expected_result_count == 1) {
+            WASMComponentCanonLiftValueInfo result_info_local;
+
+            if (!lookup_component_canon_lift_value_type(
+                    &inst->module->component, component_type->results->results,
+                    "result", 0, false, false, &result_info_local, inst)
+                || !decode_component_public_scalar_value(
+                    inst, &public_result, &result_info_local, "result", 0,
+                    &results[0])) {
+                wasm_component_value_destroy(&public_result);
+                return false;
+            }
+        }
+
+        wasm_component_value_destroy(&public_result);
+        return true;
+    }
+
     if (function->kind != WASM_COMP_RUNTIME_FUNC_LIFT)
         return set_component_call_error(
             inst, "component call only supports canon lift functions");
@@ -2855,10 +3622,17 @@ wasm_component_call_internal(WASMComponentInstance *inst,
         return set_component_call_error(
             inst, "component canon lift function is not bound to a core function");
 
-    if (function->has_string_params || function->has_string_result)
+    if (function->has_string_params
+        || function->memory_result_kind
+               != WASM_COMP_RUNTIME_CANON_LIFT_MEMORY_RESULT_NONE)
         return set_component_call_error(
-            inst, "component canon lift function uses string values; call "
-                  "through the component value API");
+            inst, function->has_string_params
+                          || function->memory_result_kind
+                                 == WASM_COMP_RUNTIME_CANON_LIFT_MEMORY_RESULT_STRING
+                      ? "component canon lift function uses string values; call "
+                        "through the component value API"
+                      : "component canon lift function uses memory-backed "
+                        "values; call through the component value API");
 
     if (!resolve_component_canon_lift_type(inst, function, &component_type,
                                            &core_type))
@@ -3510,6 +4284,8 @@ instantiate_component_start_section(WASMComponentInstance *inst,
     WASMFuncType *ignored_core_type = NULL;
     wasm_val_t *args = NULL;
     wasm_val_t result = { 0 };
+    wasm_component_value_t *public_args = NULL;
+    wasm_component_value_t public_result = { 0 };
     uint32 i;
 
     if (!start_section)
@@ -3524,6 +4300,87 @@ instantiate_component_start_section(WASMComponentInstance *inst,
             start_section->func_idx);
 
     function = &inst->component_funcs[start_section->func_idx];
+    if (function->kind == WASM_COMP_RUNTIME_FUNC_HOST_IMPORT) {
+        if (!resolve_component_func_type(inst, function, "host component function",
+                                         &component_type))
+            return false;
+
+        if (start_section->value_args_count > 0) {
+            public_args = wasm_runtime_malloc(sizeof(wasm_component_value_t)
+                                              * start_section->value_args_count);
+            if (!public_args)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "allocate memory failed for component start arguments");
+            memset(public_args, 0,
+                   sizeof(wasm_component_value_t) * start_section->value_args_count);
+        }
+
+        for (i = 0; i < start_section->value_args_count; i++) {
+            uint32 value_idx = start_section->value_args[i];
+
+            if (value_idx >= inst->component_value_count) {
+                wasm_runtime_free(public_args);
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "component start section value index %u is out of bounds",
+                    value_idx);
+            }
+
+            if (!wasm_component_public_value_copy(
+                    &public_args[i], &inst->component_values[value_idx], error_buf,
+                    error_buf_size)) {
+                for (uint32 j = 0; j < i; j++)
+                    wasm_component_value_destroy(&public_args[j]);
+                wasm_runtime_free(public_args);
+                return false;
+            }
+        }
+
+        if (!wasm_component_call_values_internal(inst, function,
+                                                 start_section->result,
+                                                 start_section->result
+                                                     ? &public_result
+                                                     : NULL,
+                                                 start_section->value_args_count,
+                                                 public_args, false)) {
+            for (i = 0; i < start_section->value_args_count; i++)
+                wasm_component_value_destroy(&public_args[i]);
+            wasm_component_value_destroy(&public_result);
+            wasm_runtime_free(public_args);
+            return set_component_start_error_from_exception(
+                inst, error_buf, error_buf_size, "component start section failed");
+        }
+
+        for (i = 0; i < start_section->value_args_count; i++)
+            wasm_component_value_destroy(&public_args[i]);
+        wasm_runtime_free(public_args);
+
+        if (start_section->result > 0) {
+            if (!component_type || !component_type->results
+                || component_type->results->tag != WASM_COMP_RESULT_LIST_WITH_TYPE
+                || !component_type->results->results) {
+                wasm_component_value_destroy(&public_result);
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "component start section result metadata is missing");
+            }
+
+            if (!wasm_component_runtime_value_init_public(
+                    &inst->component_values[inst->component_value_count],
+                    &inst->module->component, component_type->results->results,
+                    &public_result, error_buf, error_buf_size)) {
+                wasm_component_value_destroy(&public_result);
+                return false;
+            }
+
+            inst->component_value_count++;
+            wasm_component_value_destroy(&public_result);
+        }
+
+        return true;
+    }
+
     if (start_section->value_args_count > 0) {
         args = wasm_runtime_malloc(sizeof(wasm_val_t)
                                    * start_section->value_args_count);
@@ -3608,6 +4465,8 @@ instantiate_nested_component_start_section(
     WASMFuncType *ignored_core_type = NULL;
     wasm_val_t *args = NULL;
     wasm_val_t result = { 0 };
+    wasm_component_value_t *public_args = NULL;
+    wasm_component_value_t public_result = { 0 };
     uint32 i;
 
     if (!start_section)
@@ -3630,6 +4489,98 @@ instantiate_nested_component_start_section(
             start_section->func_idx);
 
     function = bindings->funcs[start_section->func_idx].of.function;
+    if (function->kind == WASM_COMP_RUNTIME_FUNC_HOST_IMPORT) {
+        if (!resolve_component_func_type(inst, function, "host component function",
+                                         &component_type))
+            return false;
+
+        if (start_section->value_args_count > 0) {
+            public_args = wasm_runtime_malloc(sizeof(wasm_component_value_t)
+                                              * start_section->value_args_count);
+            if (!public_args)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "allocate memory failed for nested component start arguments");
+            memset(public_args, 0,
+                   sizeof(wasm_component_value_t) * start_section->value_args_count);
+        }
+
+        for (i = 0; i < start_section->value_args_count; i++) {
+            uint32 value_idx = start_section->value_args[i];
+
+            if (value_idx >= bindings->value_count) {
+                wasm_runtime_free(public_args);
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "nested component start section value index %u is out of "
+                    "bounds",
+                    value_idx);
+            }
+
+            if (!wasm_component_public_value_copy(&public_args[i],
+                                                  bindings->values[value_idx],
+                                                  error_buf, error_buf_size)) {
+                for (uint32 j = 0; j < i; j++)
+                    wasm_component_value_destroy(&public_args[j]);
+                wasm_runtime_free(public_args);
+                return false;
+            }
+        }
+
+        if (!wasm_component_call_values_internal(inst, function,
+                                                 start_section->result,
+                                                 start_section->result
+                                                     ? &public_result
+                                                     : NULL,
+                                                 start_section->value_args_count,
+                                                 public_args, false)) {
+            for (i = 0; i < start_section->value_args_count; i++)
+                wasm_component_value_destroy(&public_args[i]);
+            wasm_component_value_destroy(&public_result);
+            wasm_runtime_free(public_args);
+            return set_component_start_error_from_exception(
+                inst, error_buf, error_buf_size,
+                "nested component start section failed");
+        }
+
+        for (i = 0; i < start_section->value_args_count; i++)
+            wasm_component_value_destroy(&public_args[i]);
+        wasm_runtime_free(public_args);
+
+        if (start_section->result > 0) {
+            WASMComponentRuntimeValue *runtime_value =
+                &runtime_inst->owned_values[runtime_inst->owned_value_count];
+
+            if (!component_type || !component_type->results
+                || component_type->results->tag != WASM_COMP_RESULT_LIST_WITH_TYPE
+                || !component_type->results->results) {
+                wasm_component_value_destroy(&public_result);
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "nested component start section result metadata is missing");
+            }
+
+            if (!wasm_component_runtime_value_init_public(
+                    runtime_value, component, component_type->results->results,
+                    &public_result, error_buf, error_buf_size)) {
+                wasm_component_value_destroy(&public_result);
+                return false;
+            }
+
+            if (!append_nested_component_local_value(bindings, runtime_value,
+                                                     error_buf, error_buf_size)) {
+                wasm_component_runtime_value_clear(runtime_value);
+                wasm_component_value_destroy(&public_result);
+                return false;
+            }
+
+            runtime_inst->owned_value_count++;
+            wasm_component_value_destroy(&public_result);
+        }
+
+        return true;
+    }
+
     if (start_section->value_args_count > 0) {
         args = wasm_runtime_malloc(sizeof(wasm_val_t)
                                    * start_section->value_args_count);
@@ -4731,6 +5682,43 @@ append_top_level_component_import_value(
 }
 
 static bool
+append_top_level_component_host_import(
+    WASMComponentInstance *inst, const WASMComponentImport *component_import,
+    const wasm_component_func_import_binding_t *binding, char *error_buf,
+    uint32 error_buf_size)
+{
+    WASMComponentRuntimeFunc *function;
+    const char *import_name =
+        get_component_import_name(component_import->import_name);
+
+    if (!binding->callback)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "component function import binding \"%s\" is missing a callback",
+            binding->name ? binding->name : "<unnamed>");
+
+    if (!component_import->extern_desc
+        || component_import->extern_desc->type != WASM_COMP_EXTERN_FUNC)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "component import \"%s\" is not a function import", import_name);
+
+    function = &inst->component_funcs[inst->component_func_count];
+    memset(function, 0, sizeof(*function));
+    function->kind = WASM_COMP_RUNTIME_FUNC_HOST_IMPORT;
+    function->type_idx = component_import->extern_desc->extern_desc.func.type_idx;
+    function->host_callback = binding->callback;
+    function->host_user_data = binding->user_data;
+
+    if (!validate_component_host_import_func_type(inst, function, import_name,
+                                                  error_buf, error_buf_size))
+        return false;
+
+    inst->component_func_count++;
+    return true;
+}
+
+static bool
 resolve_top_level_component_imports(
     WASMComponentInstance *inst, const WASMComponentImportSection *import_section,
     const struct InstantiationArgs2 *args, char *error_buf,
@@ -4746,43 +5734,59 @@ resolve_top_level_component_imports(
         bool matched = false;
         uint32 k;
 
-        if (!args || !args->component_imports || args->component_import_count == 0)
-            return set_component_runtime_error_fmt(
-                error_buf, error_buf_size,
-                "top-level component import \"%s\" is missing a binding",
-                import_name);
+        if (args && args->component_imports) {
+            for (k = 0; k < args->component_import_count; k++) {
+                const wasm_component_import_binding_t *binding =
+                    &args->component_imports[k];
 
-        for (k = 0; k < args->component_import_count; k++) {
-            const wasm_component_import_binding_t *binding =
-                &args->component_imports[k];
+                if (!binding->name || strcmp(binding->name, import_name))
+                    continue;
 
-            if (!binding->name || strcmp(binding->name, import_name))
-                continue;
+                if (binding->kind == WASM_COMPONENT_EXTERN_KIND_VALUE) {
+                    if (!component_import->extern_desc
+                        || component_import->extern_desc->type
+                               != WASM_COMP_EXTERN_VALUE)
+                        return set_component_runtime_error_fmt(
+                            error_buf, error_buf_size,
+                            "component import \"%s\" bound to the wrong runtime "
+                            "sort",
+                            import_name);
+                    if (!append_top_level_component_import_value(
+                            inst, component_import, binding, error_buf,
+                            error_buf_size))
+                        return false;
+                }
+                else if (!component_import_binding_to_ref(binding, &ref, error_buf,
+                                                          error_buf_size)
+                         || !validate_component_import_binding_type(
+                             component_import, ref, error_buf, error_buf_size)
+                         || !append_top_level_component_import(
+                             inst, ref, error_buf, error_buf_size))
+                    return false;
 
-            if (binding->kind == WASM_COMPONENT_EXTERN_KIND_VALUE) {
-                if (!component_import->extern_desc
-                    || component_import->extern_desc->type
-                           != WASM_COMP_EXTERN_VALUE)
-                    return set_component_runtime_error_fmt(
-                        error_buf, error_buf_size,
-                        "component import \"%s\" bound to the wrong runtime "
-                        "sort",
-                        import_name);
-                if (!append_top_level_component_import_value(
+                matched = true;
+                break;
+            }
+        }
+
+        if (!matched && component_import->extern_desc
+            && component_import->extern_desc->type == WASM_COMP_EXTERN_FUNC
+            && args && args->component_func_imports) {
+            for (k = 0; k < args->component_func_import_count; k++) {
+                const wasm_component_func_import_binding_t *binding =
+                    &args->component_func_imports[k];
+
+                if (!binding->name || strcmp(binding->name, import_name))
+                    continue;
+
+                if (!append_top_level_component_host_import(
                         inst, component_import, binding, error_buf,
                         error_buf_size))
                     return false;
-            }
-            else if (!component_import_binding_to_ref(binding, &ref, error_buf,
-                                                      error_buf_size)
-                     || !validate_component_import_binding_type(
-                         component_import, ref, error_buf, error_buf_size)
-                     || !append_top_level_component_import(inst, ref, error_buf,
-                                                           error_buf_size))
-                return false;
 
-            matched = true;
-            break;
+                matched = true;
+                break;
+            }
         }
 
         if (!matched)

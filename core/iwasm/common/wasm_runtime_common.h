@@ -629,6 +629,8 @@ struct InstantiationArgs2 {
 #if WASM_ENABLE_COMPONENT_MODEL != 0
     const wasm_component_import_binding_t *component_imports;
     uint32 component_import_count;
+    const wasm_component_func_import_binding_t *component_func_imports;
+    uint32 component_func_import_count;
 #endif
 };
 
@@ -842,6 +844,11 @@ WASM_RUNTIME_API_EXTERN bool
 wasm_runtime_get_component_export_value(WASMModuleInstanceCommon *const module_inst,
                                         int32 export_index,
                                         wasm_component_value_t *value);
+
+WASM_RUNTIME_API_EXTERN void
+wasm_runtime_instantiation_args_set_component_func_imports(
+    struct InstantiationArgs2 *p,
+    const wasm_component_func_import_binding_t imports[], uint32 import_count);
 #endif
 
 /* Internal API */

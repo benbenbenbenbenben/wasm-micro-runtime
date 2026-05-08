@@ -1930,6 +1930,15 @@ wasm_runtime_instantiation_args_set_component_imports(
     p->component_imports = imports;
     p->component_import_count = import_count;
 }
+
+void
+wasm_runtime_instantiation_args_set_component_func_imports(
+    struct InstantiationArgs2 *p,
+    const wasm_component_func_import_binding_t imports[], uint32_t import_count)
+{
+    p->component_func_imports = imports;
+    p->component_func_import_count = import_count;
+}
 #endif
 
 WASMModuleInstanceCommon *

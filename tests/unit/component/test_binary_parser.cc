@@ -17,6 +17,7 @@ static std::vector<std::string> component_files = {
     "add.wasm",
     "complex_with_host.wasm",
     "complex.wasm",
+    "list_u8_post_return.component.wasm",
     "logging_service.component.wasm",
     "processor_and_logging_merged_wac_plug.wasm",
     "processor_service.component.wasm",
@@ -395,6 +396,35 @@ make_component_string_value(const std::string &value)
     return result;
 }
 
+static wasm_component_value_t
+make_component_s32_value(int32_t value)
+{
+    wasm_component_value_t result = {};
+    uint8_t storage[5];
+    uint32_t len = 0;
+    int32_t current = value;
+    bool done = false;
+
+    result.type.kind = WASM_COMPONENT_VALUE_TYPE_PRIMITIVE;
+    result.type.type.primitive_type = WASM_COMPONENT_PRIMITIVE_VALUE_S32;
+    result.storage_kind = WASM_COMPONENT_VALUE_STORAGE_INLINE;
+
+    while (!done) {
+        uint8_t byte = (uint8_t)(current & 0x7f);
+        current >>= 7;
+        done = (current == 0 && (byte & 0x40) == 0)
+               || (current == -1 && (byte & 0x40) != 0);
+        if (!done) {
+            byte |= 0x80;
+        }
+        storage[len++] = byte;
+    }
+
+    result.byte_size = len;
+    memcpy(result.storage.inline_storage, storage, len);
+    return result;
+}
+
 static wasm_module_inst_t
 instantiate_component_with_default_wasi(wasm_module_t module,
                                         ComponentHelper *helper)
@@ -419,6 +449,145 @@ instantiate_component_with_default_wasi(wasm_module_t module,
         (uint32_t)sizeof(helper->error_buf));
     wasm_runtime_instantiation_args_destroy(inst_args);
     return module_inst;
+}
+
+static uint32_t
+count_component_types(const WASMComponent *component)
+{
+    uint32_t count = 0;
+
+    if (!component) {
+        return 0;
+    }
+
+    for (uint32_t i = 0; i < component->section_count; i++) {
+        if (component->sections[i].id == WASM_COMP_SECTION_TYPE
+            && component->sections[i].parsed.type_section) {
+            count += component->sections[i].parsed.type_section->count;
+        }
+    }
+
+    return count;
+}
+
+static bool
+decode_component_string_arg(const wasm_component_value_t *value, std::string *out)
+{
+    const auto *data = (const uint8_t *)wasm_component_value_get_data(value);
+    uint32_t len = 0;
+    uint32_t shift = 0;
+    uint32_t offset = 0;
+
+    if (!data || !value || value->byte_size == 0) {
+        return false;
+    }
+
+    while (offset < value->byte_size) {
+        const uint8_t byte = data[offset++];
+        len |= (uint32_t)(byte & 0x7F) << shift;
+        if ((byte & 0x80) == 0) {
+            break;
+        }
+        shift += 7;
+    }
+
+    if (offset + len != value->byte_size) {
+        return false;
+    }
+
+    out->assign((const char *)(data + offset), len);
+    return true;
+}
+
+struct HostScalarCallState {
+    int call_count;
+    int32_t last_a;
+    int32_t last_b;
+};
+
+static bool
+host_scalar_add_callback(wasm_module_inst_t caller_component_inst, void *user_data,
+                         uint32_t num_results, wasm_component_value_t results[],
+                         uint32_t num_args,
+                         const wasm_component_value_t args[], char *error_buf,
+                         uint32_t error_buf_size)
+{
+    auto *state = (HostScalarCallState *)user_data;
+    const auto *arg0 = (const uint8_t *)wasm_component_value_get_data(&args[0]);
+    const auto *arg1 = (const uint8_t *)wasm_component_value_get_data(&args[1]);
+
+    if (!caller_component_inst || !state || num_args != 2 || num_results != 1
+        || !arg0 || !arg1 || args[0].type.kind != WASM_COMPONENT_VALUE_TYPE_PRIMITIVE
+        || args[1].type.kind != WASM_COMPONENT_VALUE_TYPE_PRIMITIVE
+        || args[0].type.type.primitive_type != WASM_COMPONENT_PRIMITIVE_VALUE_S32
+        || args[1].type.type.primitive_type != WASM_COMPONENT_PRIMITIVE_VALUE_S32) {
+        snprintf(error_buf, error_buf_size, "unexpected scalar host callback ABI");
+        return false;
+    }
+
+    state->call_count++;
+    state->last_a = (int8_t)arg0[0];
+    state->last_b = (int8_t)arg1[0];
+    results[0] = make_component_s32_value(state->last_a + state->last_b);
+    return true;
+}
+
+struct HostStringCallState {
+    int call_count;
+    std::string last_arg;
+};
+
+static bool
+host_string_echo_callback(wasm_module_inst_t caller_component_inst, void *user_data,
+                          uint32_t num_results, wasm_component_value_t results[],
+                          uint32_t num_args,
+                          const wasm_component_value_t args[], char *error_buf,
+                          uint32_t error_buf_size)
+{
+    auto *state = (HostStringCallState *)user_data;
+    std::string decoded;
+
+    if (!caller_component_inst || !state || num_args != 1 || num_results != 1
+        || args[0].type.kind != WASM_COMPONENT_VALUE_TYPE_PRIMITIVE
+        || args[0].type.type.primitive_type
+               != WASM_COMPONENT_PRIMITIVE_VALUE_STRING
+        || !decode_component_string_arg(&args[0], &decoded)) {
+        snprintf(error_buf, error_buf_size, "unexpected string host callback ABI");
+        return false;
+    }
+
+    state->call_count++;
+    state->last_arg = decoded;
+    results[0] = make_component_string_value(decoded + "!");
+    return true;
+}
+
+static bool
+host_invalid_string_result_callback(wasm_module_inst_t caller_component_inst,
+                                    void *user_data, uint32_t num_results,
+                                    wasm_component_value_t results[],
+                                    uint32_t num_args,
+                                    const wasm_component_value_t args[],
+                                    char *error_buf, uint32_t error_buf_size)
+{
+    (void)caller_component_inst;
+    (void)user_data;
+    (void)num_args;
+    (void)args;
+    (void)error_buf;
+    (void)error_buf_size;
+
+    if (num_results != 1) {
+        return false;
+    }
+
+    results[0].type.kind = WASM_COMPONENT_VALUE_TYPE_PRIMITIVE;
+    results[0].type.type.primitive_type = WASM_COMPONENT_PRIMITIVE_VALUE_STRING;
+    results[0].storage_kind = WASM_COMPONENT_VALUE_STORAGE_INLINE;
+    results[0].byte_size = 2;
+    results[0].storage.inline_storage[0] = 0x01;
+    results[0].storage.inline_storage[1] = 0xFF;
+    return true;
 }
 
 struct RuntimeValueFinalizerState {
@@ -621,27 +790,32 @@ static int32_t
 find_top_level_export_sort_index(WASMComponentModule *component_module,
                                  const char *export_name, uint8_t sort)
 {
-    auto *section =
-        find_component_section(component_module, WASM_COMP_SECTION_EXPORTS);
-    if (!section || !section->parsed.export_section) {
-        return -1;
-    }
+    WASMComponent *component = &component_module->component;
 
-    for (uint32_t i = 0; i < section->parsed.export_section->count; i++) {
-        auto *component_export = &section->parsed.export_section->exports[i];
-        if (!component_export->export_name || !component_export->sort_idx
-            || !component_export->sort_idx->sort) {
+    for (uint32_t section_idx = 0; section_idx < component->section_count;
+         section_idx++) {
+        auto *section = &component->sections[section_idx];
+        if (section->id != WASM_COMP_SECTION_EXPORTS
+            || !section->parsed.export_section) {
             continue;
         }
 
-        const char *name = component_export->export_name->tag
-                                   == WASM_COMP_IMPORTNAME_SIMPLE
-                               ? component_export->export_name->exported.simple.name
-                                     ->name
-                               : nullptr;
-        if (name && !strcmp(name, export_name)
-            && component_export->sort_idx->sort->sort == sort) {
-            return (int32_t)component_export->sort_idx->idx;
+        for (uint32_t i = 0; i < section->parsed.export_section->count; i++) {
+            auto *component_export = &section->parsed.export_section->exports[i];
+            if (!component_export->export_name || !component_export->sort_idx
+                || !component_export->sort_idx->sort) {
+                continue;
+            }
+
+            const char *name = component_export->export_name->tag
+                                       == WASM_COMP_IMPORTNAME_SIMPLE
+                                   ? component_export->export_name->exported.simple.name
+                                         ->name
+                                   : nullptr;
+            if (name && !strcmp(name, export_name)
+                && component_export->sort_idx->sort->sort == sort) {
+                return (int32_t)component_export->sort_idx->idx;
+            }
         }
     }
 
@@ -655,12 +829,22 @@ append_top_level_function_export_alias(WASMComponentModule *component_module,
                                        const char *top_export_name)
 {
     WASMComponent *component = &component_module->component;
-    const int32_t instance_idx = find_top_level_export_sort_index(
+    const uint32_t alias_func_idx =
+        count_top_level_sort_entries(component, WASM_COMP_SORT_FUNC);
+    int32_t instance_idx = find_top_level_export_sort_index(
         component_module, instance_export_name, WASM_COMP_SORT_INSTANCE);
     const uint32_t old_count = component->section_count;
     auto *new_sections = (WASMComponentSection *)wasm_runtime_malloc(
         sizeof(WASMComponentSection) * (old_count + 2));
-    if (!new_sections || instance_idx < 0) {
+    if (instance_idx < 0) {
+        const uint32_t instance_count =
+            count_top_level_sort_entries(component, WASM_COMP_SORT_INSTANCE);
+        if (instance_count == 0) {
+            return false;
+        }
+        instance_idx = (int32_t)(instance_count - 1);
+    }
+    if (!new_sections) {
         return false;
     }
 
@@ -726,9 +910,7 @@ append_top_level_function_export_alias(WASMComponentModule *component_module,
     export_section->parsed.export_section->exports[0].export_name =
         create_export_name(top_export_name);
     export_section->parsed.export_section->exports[0].sort_idx =
-        create_sort_idx(WASM_COMP_SORT_FUNC,
-                        count_top_level_sort_entries(component,
-                                                     WASM_COMP_SORT_FUNC));
+        create_sort_idx(WASM_COMP_SORT_FUNC, alias_func_idx);
 
     return export_section->parsed.export_section->exports[0].export_name
            && export_section->parsed.export_section->exports[0].sort_idx;
@@ -787,6 +969,187 @@ configure_first_canon_lift_for_utf8_string(WASMComponentModule *component_module
     canon->canon_data.lift.canon_opts->canon_opts[2].payload.realloc_opt.func_idx =
         2;
     return true;
+}
+
+static int32_t
+append_component_list_type(WASMComponentModule *component_module,
+                           WASMComponentPrimValType element_prim_type,
+                           bool fixed_length, uint32_t fixed_len)
+{
+    WASMComponent *component = &component_module->component;
+    WASMComponentSection *type_section_ref = nullptr;
+    uint32_t type_base_idx = 0;
+    uint32_t total_type_count = 0;
+
+    for (uint32_t i = 0; i < component->section_count; i++) {
+        auto *section = &component->sections[i];
+        if (section->id != WASM_COMP_SECTION_TYPE || !section->parsed.type_section) {
+            continue;
+        }
+        type_section_ref = section;
+        type_base_idx = total_type_count;
+        total_type_count += section->parsed.type_section->count;
+    }
+
+    if (!type_section_ref || !type_section_ref->parsed.type_section) {
+        return -1;
+    }
+
+    auto *type_section = type_section_ref->parsed.type_section;
+    const uint32_t new_count = type_section->count + 1;
+    auto *new_types = (WASMComponentTypes *)wasm_runtime_malloc(
+        sizeof(WASMComponentTypes) * new_count);
+    if (!new_types) {
+        return -1;
+    }
+
+    memset(new_types, 0, sizeof(WASMComponentTypes) * new_count);
+    memcpy(new_types, type_section->types,
+           sizeof(WASMComponentTypes) * type_section->count);
+
+    auto *new_entry = &new_types[type_section->count];
+    new_entry->tag = WASM_COMP_DEF_TYPE;
+    new_entry->type.def_val_type = (WASMComponentDefValType *)wasm_runtime_malloc(
+        sizeof(WASMComponentDefValType));
+    if (!new_entry->type.def_val_type) {
+        wasm_runtime_free(new_types);
+        return -1;
+    }
+    memset(new_entry->type.def_val_type, 0, sizeof(WASMComponentDefValType));
+
+    if (fixed_length) {
+        new_entry->type.def_val_type->tag = WASM_COMP_DEF_VAL_LIST_LEN;
+        new_entry->type.def_val_type->def_val.list_len =
+            (WASMComponentListLenType *)wasm_runtime_malloc(
+                sizeof(WASMComponentListLenType));
+        if (!new_entry->type.def_val_type->def_val.list_len) {
+            wasm_runtime_free(new_entry->type.def_val_type);
+            wasm_runtime_free(new_types);
+            return -1;
+        }
+        memset(new_entry->type.def_val_type->def_val.list_len, 0,
+               sizeof(WASMComponentListLenType));
+        new_entry->type.def_val_type->def_val.list_len->len = fixed_len;
+        new_entry->type.def_val_type->def_val.list_len->element_type =
+            (WASMComponentValueType *)wasm_runtime_malloc(
+                sizeof(WASMComponentValueType));
+        if (!new_entry->type.def_val_type->def_val.list_len->element_type) {
+            wasm_runtime_free(new_entry->type.def_val_type->def_val.list_len);
+            wasm_runtime_free(new_entry->type.def_val_type);
+            wasm_runtime_free(new_types);
+            return -1;
+        }
+        memset(new_entry->type.def_val_type->def_val.list_len->element_type, 0,
+               sizeof(WASMComponentValueType));
+        new_entry->type.def_val_type->def_val.list_len->element_type->type =
+            WASM_COMP_VAL_TYPE_PRIMVAL;
+        new_entry->type.def_val_type->def_val.list_len->element_type->type_specific
+            .primval_type = element_prim_type;
+    }
+    else {
+        new_entry->type.def_val_type->tag = WASM_COMP_DEF_VAL_LIST;
+        new_entry->type.def_val_type->def_val.list =
+            (WASMComponentListType *)wasm_runtime_malloc(
+                sizeof(WASMComponentListType));
+        if (!new_entry->type.def_val_type->def_val.list) {
+            wasm_runtime_free(new_entry->type.def_val_type);
+            wasm_runtime_free(new_types);
+            return -1;
+        }
+        memset(new_entry->type.def_val_type->def_val.list, 0,
+               sizeof(WASMComponentListType));
+        new_entry->type.def_val_type->def_val.list->element_type =
+            (WASMComponentValueType *)wasm_runtime_malloc(
+                sizeof(WASMComponentValueType));
+        if (!new_entry->type.def_val_type->def_val.list->element_type) {
+            wasm_runtime_free(new_entry->type.def_val_type->def_val.list);
+            wasm_runtime_free(new_entry->type.def_val_type);
+            wasm_runtime_free(new_types);
+            return -1;
+        }
+        memset(new_entry->type.def_val_type->def_val.list->element_type, 0,
+               sizeof(WASMComponentValueType));
+        new_entry->type.def_val_type->def_val.list->element_type->type =
+            WASM_COMP_VAL_TYPE_PRIMVAL;
+        new_entry->type.def_val_type->def_val.list->element_type->type_specific
+            .primval_type = element_prim_type;
+    }
+
+    wasm_runtime_free(type_section->types);
+    type_section->types = new_types;
+    type_section->count = new_count;
+    return (int32_t)(type_base_idx + new_count - 1);
+}
+
+static bool
+ensure_canon_lift_memory_opt(WASMComponentCanon *canon, uint32_t mem_idx)
+{
+    if (!canon || canon->tag != WASM_COMP_CANON_LIFT) {
+        return false;
+    }
+
+    if (!canon->canon_data.lift.canon_opts) {
+        canon->canon_data.lift.canon_opts =
+            (WASMComponentCanonOpts *)wasm_runtime_malloc(
+                sizeof(WASMComponentCanonOpts));
+        if (!canon->canon_data.lift.canon_opts) {
+            return false;
+        }
+        memset(canon->canon_data.lift.canon_opts, 0, sizeof(WASMComponentCanonOpts));
+    }
+
+    for (uint32_t i = 0; i < canon->canon_data.lift.canon_opts->canon_opts_count; i++) {
+        if (canon->canon_data.lift.canon_opts->canon_opts[i].tag
+            == WASM_COMP_CANON_OPT_MEMORY) {
+            canon->canon_data.lift.canon_opts->canon_opts[i].payload.memory.mem_idx =
+                mem_idx;
+            return true;
+        }
+    }
+
+    const uint32_t old_count = canon->canon_data.lift.canon_opts->canon_opts_count;
+    auto *new_opts = (WASMComponentCanonOpt *)wasm_runtime_malloc(
+        sizeof(WASMComponentCanonOpt) * (old_count + 1));
+    if (!new_opts) {
+        return false;
+    }
+
+    memset(new_opts, 0, sizeof(WASMComponentCanonOpt) * (old_count + 1));
+    if (old_count > 0 && canon->canon_data.lift.canon_opts->canon_opts) {
+        memcpy(new_opts, canon->canon_data.lift.canon_opts->canon_opts,
+               sizeof(WASMComponentCanonOpt) * old_count);
+        wasm_runtime_free(canon->canon_data.lift.canon_opts->canon_opts);
+    }
+
+    new_opts[old_count].tag = WASM_COMP_CANON_OPT_MEMORY;
+    new_opts[old_count].payload.memory.mem_idx = mem_idx;
+    canon->canon_data.lift.canon_opts->canon_opts = new_opts;
+    canon->canon_data.lift.canon_opts->canon_opts_count = old_count + 1;
+    return true;
+}
+
+static bool
+configure_canon_lift_result_type_idx(WASMComponentModule *component_module,
+                                     WASMComponentCanon *canon,
+                                     uint32_t result_type_idx,
+                                     bool ensure_memory_opt)
+{
+    WASMComponentFuncType *func_type = canon
+                                           ? lookup_local_component_func_type(
+                                                 component_module,
+                                                 canon->canon_data.lift.type_idx)
+                                           : nullptr;
+    if (!canon || canon->tag != WASM_COMP_CANON_LIFT || !func_type
+        || !func_type->results
+        || func_type->results->tag != WASM_COMP_RESULT_LIST_WITH_TYPE
+        || !func_type->results->results) {
+        return false;
+    }
+
+    func_type->results->results->type = WASM_COMP_VAL_TYPE_IDX;
+    func_type->results->results->type_specific.type_idx = result_type_idx;
+
+    return !ensure_memory_opt || ensure_canon_lift_memory_opt(canon, 0);
 }
 
 static bool
@@ -3883,6 +4246,198 @@ append_top_level_component_import_sections(WASMComponentModule *component_module
 }
 
 static bool
+append_top_level_host_function_import_sections(
+    WASMComponentModule *component_module, const char *import_name,
+    const char *instance_export_name, const char *nested_export_name)
+{
+    WASMComponent *component = &component_module->component;
+    const uint32_t old_count = component->section_count;
+    const uint32_t func_idx =
+        count_top_level_sort_entries(component, WASM_COMP_SORT_FUNC);
+    const uint32_t instance_idx =
+        count_top_level_sort_entries(component, WASM_COMP_SORT_INSTANCE);
+    auto *new_sections = (WASMComponentSection *)wasm_runtime_malloc(
+        sizeof(WASMComponentSection) * (old_count + 3));
+    if (!new_sections) {
+        return false;
+    }
+
+    memset(new_sections, 0, sizeof(WASMComponentSection) * (old_count + 3));
+    memcpy(new_sections, component->sections,
+           sizeof(WASMComponentSection) * old_count);
+    wasm_runtime_free(component->sections);
+    component->sections = new_sections;
+    component->section_count = old_count + 3;
+
+    auto *import_section = &component->sections[old_count];
+    auto *instance_section = &component->sections[old_count + 1];
+    auto *export_section = &component->sections[old_count + 2];
+
+    import_section->id = WASM_COMP_SECTION_IMPORTS;
+    import_section->parsed.import_section =
+        (WASMComponentImportSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentImportSection));
+    if (!import_section->parsed.import_section) {
+        return false;
+    }
+    memset(import_section->parsed.import_section, 0,
+           sizeof(WASMComponentImportSection));
+    import_section->parsed.import_section->count = 1;
+    import_section->parsed.import_section->imports =
+        (WASMComponentImport *)wasm_runtime_malloc(sizeof(WASMComponentImport));
+    if (!import_section->parsed.import_section->imports) {
+        return false;
+    }
+    memset(import_section->parsed.import_section->imports, 0,
+           sizeof(WASMComponentImport));
+    import_section->parsed.import_section->imports[0].import_name =
+        create_import_name(import_name);
+    import_section->parsed.import_section->imports[0].extern_desc =
+        create_extern_desc(WASM_COMP_EXTERN_FUNC);
+    if (!import_section->parsed.import_section->imports[0].import_name
+        || !import_section->parsed.import_section->imports[0].extern_desc) {
+        return false;
+    }
+
+    instance_section->id = WASM_COMP_SECTION_INSTANCES;
+    instance_section->parsed.instance_section =
+        (WASMComponentInstSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentInstSection));
+    if (!instance_section->parsed.instance_section) {
+        return false;
+    }
+    memset(instance_section->parsed.instance_section, 0,
+           sizeof(WASMComponentInstSection));
+    instance_section->parsed.instance_section->count = 1;
+    instance_section->parsed.instance_section->instances =
+        (WASMComponentInst *)wasm_runtime_malloc(sizeof(WASMComponentInst));
+    if (!instance_section->parsed.instance_section->instances) {
+        return false;
+    }
+    memset(instance_section->parsed.instance_section->instances, 0,
+           sizeof(WASMComponentInst));
+    instance_section->parsed.instance_section->instances[0].instance_expression_tag =
+        WASM_COMP_INSTANCE_EXPRESSION_WITHOUT_ARGS;
+    instance_section->parsed.instance_section->instances[0]
+        .expression.without_args.inline_expr_len = 1;
+    instance_section->parsed.instance_section->instances[0]
+        .expression.without_args.inline_expr =
+        (WASMComponentInlineExport *)wasm_runtime_malloc(
+            sizeof(WASMComponentInlineExport));
+    if (!instance_section->parsed.instance_section->instances[0]
+             .expression.without_args.inline_expr) {
+        return false;
+    }
+    memset(instance_section->parsed.instance_section->instances[0]
+               .expression.without_args.inline_expr,
+           0, sizeof(WASMComponentInlineExport));
+    instance_section->parsed.instance_section->instances[0]
+        .expression.without_args.inline_expr[0]
+        .name = clone_core_name(nested_export_name);
+    instance_section->parsed.instance_section->instances[0]
+        .expression.without_args.inline_expr[0]
+        .sort_idx = create_sort_idx(WASM_COMP_SORT_FUNC, func_idx);
+    if (!instance_section->parsed.instance_section->instances[0]
+             .expression.without_args.inline_expr[0]
+             .name
+        || !instance_section->parsed.instance_section->instances[0]
+                 .expression.without_args.inline_expr[0]
+                 .sort_idx) {
+        return false;
+    }
+
+    export_section->id = WASM_COMP_SECTION_EXPORTS;
+    export_section->parsed.export_section =
+        (WASMComponentExportSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentExportSection));
+    if (!export_section->parsed.export_section) {
+        return false;
+    }
+    memset(export_section->parsed.export_section, 0,
+           sizeof(WASMComponentExportSection));
+    export_section->parsed.export_section->count = 1;
+    export_section->parsed.export_section->exports =
+        (WASMComponentExport *)wasm_runtime_malloc(sizeof(WASMComponentExport));
+    if (!export_section->parsed.export_section->exports) {
+        return false;
+    }
+    memset(export_section->parsed.export_section->exports, 0,
+           sizeof(WASMComponentExport));
+    export_section->parsed.export_section->exports[0].export_name =
+        create_export_name(instance_export_name);
+    export_section->parsed.export_section->exports[0].sort_idx =
+        create_sort_idx(WASM_COMP_SORT_INSTANCE, instance_idx);
+    return export_section->parsed.export_section->exports[0].export_name
+           && export_section->parsed.export_section->exports[0].sort_idx;
+}
+
+static bool
+append_host_import_list_param_type(WASMComponentModule *component_module,
+                                   uint32_t func_type_idx)
+{
+    WASMComponent *component = &component_module->component;
+    WASMComponentFuncType *func_type =
+        lookup_local_component_func_type(component_module, func_type_idx);
+    const uint32_t list_type_idx = count_component_types(component);
+    const uint32_t old_count = component->section_count;
+    auto *new_sections = (WASMComponentSection *)wasm_runtime_malloc(
+        sizeof(WASMComponentSection) * (old_count + 1));
+    if (!func_type || !func_type->params || func_type->params->count == 0
+        || !new_sections) {
+        return false;
+    }
+
+    memset(new_sections, 0, sizeof(WASMComponentSection) * (old_count + 1));
+    memcpy(new_sections, component->sections,
+           sizeof(WASMComponentSection) * old_count);
+    wasm_runtime_free(component->sections);
+    component->sections = new_sections;
+    component->section_count = old_count + 1;
+
+    auto *type_section = &component->sections[old_count];
+    type_section->id = WASM_COMP_SECTION_TYPE;
+    type_section->parsed.type_section =
+        (WASMComponentTypeSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentTypeSection));
+    if (!type_section->parsed.type_section) {
+        return false;
+    }
+    memset(type_section->parsed.type_section, 0, sizeof(WASMComponentTypeSection));
+    type_section->parsed.type_section->count = 1;
+    type_section->parsed.type_section->types =
+        (WASMComponentTypes *)wasm_runtime_malloc(sizeof(WASMComponentTypes));
+    if (!type_section->parsed.type_section->types) {
+        return false;
+    }
+    memset(type_section->parsed.type_section->types, 0, sizeof(WASMComponentTypes));
+
+    auto *def_type = (WASMComponentDefValType *)wasm_runtime_malloc(
+        sizeof(WASMComponentDefValType));
+    auto *list_type = (WASMComponentListType *)wasm_runtime_malloc(
+        sizeof(WASMComponentListType));
+    auto *element_type = (WASMComponentValueType *)wasm_runtime_malloc(
+        sizeof(WASMComponentValueType));
+    if (!def_type || !list_type || !element_type) {
+        return false;
+    }
+
+    memset(def_type, 0, sizeof(WASMComponentDefValType));
+    memset(list_type, 0, sizeof(WASMComponentListType));
+    memset(element_type, 0, sizeof(WASMComponentValueType));
+    element_type->type = WASM_COMP_VAL_TYPE_PRIMVAL;
+    element_type->type_specific.primval_type = WASM_COMP_PRIMVAL_S32;
+    list_type->element_type = element_type;
+    def_type->tag = WASM_COMP_DEF_VAL_LIST;
+    def_type->def_val.list = list_type;
+    type_section->parsed.type_section->types[0].tag = WASM_COMP_DEF_TYPE;
+    type_section->parsed.type_section->types[0].type.def_val_type = def_type;
+
+    func_type->params->params[0].value_type->type = WASM_COMP_VAL_TYPE_IDX;
+    func_type->params->params[0].value_type->type_specific.type_idx = list_type_idx;
+    return true;
+}
+
+static bool
 append_top_level_value_alias_sections(WASMComponentModule *component_module)
 {
     WASMComponent *component = &component_module->component;
@@ -5515,9 +6070,7 @@ TEST_F(BinaryParserTest, TestPublicComponentCallRejectsMemoryBackedCanonLift)
         (WASMComponentModule *)module, true));
 
     wasm_module_inst_t module_inst =
-        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
-                                 helper->error_buf,
-                                 (uint32_t)sizeof(helper->error_buf));
+        instantiate_component_with_default_wasi(module, helper.get());
     ASSERT_NE(module_inst, nullptr) << helper->error_buf;
 
     wasm_component_func_t func =
@@ -5556,9 +6109,7 @@ TEST_F(BinaryParserTest, TestPublicComponentCallSupportsUtf8StringLift)
         (WASMComponentModule *)module, true));
 
     wasm_module_inst_t module_inst =
-        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
-                                 helper->error_buf,
-                                 (uint32_t)sizeof(helper->error_buf));
+        instantiate_component_with_default_wasi(module, helper.get());
     ASSERT_NE(module_inst, nullptr) << helper->error_buf;
 
     wasm_component_func_t func =
@@ -5647,6 +6198,327 @@ TEST_F(BinaryParserTest, TestPublicComponentCallRejectsInvalidUtf8StringArg)
     wasm_runtime_unload(module);
 }
 
+TEST_F(BinaryParserTest, TestPublicComponentCallSupportsListU8LiftResult)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "public-component-call-list-u8";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(
+        append_component_export_alias_sections((WASMComponentModule *)module));
+    const int32_t list_u8_type_idx = append_component_list_type(
+        (WASMComponentModule *)module, WASM_COMP_PRIMVAL_U8, false, 0);
+    ASSERT_GE(list_u8_type_idx, 0);
+    ASSERT_TRUE(configure_canon_lift_result_type_idx(
+        (WASMComponentModule *)module,
+        find_first_canon_lift((WASMComponentModule *)module),
+        (uint32_t)list_u8_type_idx, true));
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func =
+        wasm_runtime_lookup_component_function(module_inst, "aliased-add");
+    ASSERT_NE(func, nullptr);
+
+    uint8_t *memory = func->canon_memory_ref.of.memory->memory_data;
+    uint32_t payload_ptr = 64;
+    uint32_t payload_len = 5;
+    memcpy(memory, &payload_ptr, sizeof(payload_ptr));
+    memcpy(memory + sizeof(payload_ptr), &payload_len, sizeof(payload_len));
+    memcpy(memory + payload_ptr, "hello", payload_len);
+
+    wasm_component_value_t args[2] = { make_component_s32_value(0),
+                                       make_component_s32_value(0) };
+    wasm_component_value_t result = {};
+
+    ASSERT_TRUE(wasm_runtime_call_component_values(module_inst, func, 1, &result, 2,
+                                                   args))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(result.type.kind, WASM_COMPONENT_VALUE_TYPE_DEFINED);
+    ASSERT_EQ(result.storage_kind, WASM_COMPONENT_VALUE_STORAGE_OWNED);
+    ASSERT_EQ(result.byte_size, payload_len);
+    ASSERT_EQ(memcmp(wasm_component_value_get_data(&result), "hello", payload_len),
+              0);
+
+    wasm_component_value_destroy(&result);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest, TestPublicComponentCallRejectsMemoryBackedListLift)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "public-component-call-list-u8-raw-api";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(
+        append_component_export_alias_sections((WASMComponentModule *)module));
+    const int32_t list_u8_type_idx = append_component_list_type(
+        (WASMComponentModule *)module, WASM_COMP_PRIMVAL_U8, false, 0);
+    ASSERT_GE(list_u8_type_idx, 0);
+    ASSERT_TRUE(configure_canon_lift_result_type_idx(
+        (WASMComponentModule *)module,
+        find_first_canon_lift((WASMComponentModule *)module),
+        (uint32_t)list_u8_type_idx, true));
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func =
+        wasm_runtime_lookup_component_function(module_inst, "aliased-add");
+    ASSERT_NE(func, nullptr);
+
+    wasm_val_t args[2] = {};
+    wasm_val_t result = {};
+    ASSERT_FALSE(
+        wasm_runtime_call_component(module_inst, func, 1, &result, 2, args));
+    ASSERT_STREQ(wasm_runtime_get_exception(module_inst),
+                 "component canon lift function uses memory-backed values; call "
+                 "through the component value API");
+
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest, TestPublicComponentCallRejectsMalformedListU8Payload)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "public-component-call-list-u8-malformed";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(
+        append_component_export_alias_sections((WASMComponentModule *)module));
+    const int32_t list_u8_type_idx = append_component_list_type(
+        (WASMComponentModule *)module, WASM_COMP_PRIMVAL_U8, false, 0);
+    ASSERT_GE(list_u8_type_idx, 0);
+    ASSERT_TRUE(configure_canon_lift_result_type_idx(
+        (WASMComponentModule *)module,
+        find_first_canon_lift((WASMComponentModule *)module),
+        (uint32_t)list_u8_type_idx, true));
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func =
+        wasm_runtime_lookup_component_function(module_inst, "aliased-add");
+    ASSERT_NE(func, nullptr);
+
+    uint8_t *memory = func->canon_memory_ref.of.memory->memory_data;
+    uint32_t payload_ptr = UINT32_MAX - 1;
+    uint32_t payload_len = 4;
+    memcpy(memory, &payload_ptr, sizeof(payload_ptr));
+    memcpy(memory + sizeof(payload_ptr), &payload_len, sizeof(payload_len));
+
+    wasm_component_value_t args[2] = { make_component_s32_value(0),
+                                       make_component_s32_value(0) };
+    wasm_component_value_t result = {};
+
+    ASSERT_FALSE(wasm_runtime_call_component_values(module_inst, func, 1, &result,
+                                                    2, args));
+    ASSERT_STREQ(wasm_runtime_get_exception(module_inst),
+                 "component canon lift function list<u8> result payload is out "
+                 "of bounds");
+
+    wasm_component_value_destroy(&result);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest, TestPublicComponentCallRejectsUnsupportedListU8ElementType)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "public-component-call-list-u8-wrong-element";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(
+        append_component_export_alias_sections((WASMComponentModule *)module));
+    const int32_t list_s32_type_idx = append_component_list_type(
+        (WASMComponentModule *)module, WASM_COMP_PRIMVAL_S32, false, 0);
+    ASSERT_GE(list_s32_type_idx, 0);
+    ASSERT_TRUE(configure_canon_lift_result_type_idx(
+        (WASMComponentModule *)module,
+        find_first_canon_lift((WASMComponentModule *)module),
+        (uint32_t)list_s32_type_idx, true));
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func =
+        wasm_runtime_lookup_component_function(module_inst, "aliased-add");
+    ASSERT_NE(func, nullptr);
+
+    wasm_component_value_t args[2] = { make_component_s32_value(0),
+                                       make_component_s32_value(0) };
+    wasm_component_value_t result = {};
+
+    ASSERT_FALSE(wasm_runtime_call_component_values(module_inst, func, 1, &result,
+                                                    2, args));
+    ASSERT_STREQ(wasm_runtime_get_exception(module_inst),
+                 "component canon lift function result 0 only supports "
+                 "list<u8> results");
+
+    wasm_component_value_destroy(&result);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest, TestPublicComponentCallRejectsFixedLengthListU8Result)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "public-component-call-list-u8-fixed-length";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(
+        append_component_export_alias_sections((WASMComponentModule *)module));
+    const int32_t list_len_u8_type_idx = append_component_list_type(
+        (WASMComponentModule *)module, WASM_COMP_PRIMVAL_U8, true, 4);
+    ASSERT_GE(list_len_u8_type_idx, 0);
+    ASSERT_TRUE(configure_canon_lift_result_type_idx(
+        (WASMComponentModule *)module,
+        find_first_canon_lift((WASMComponentModule *)module),
+        (uint32_t)list_len_u8_type_idx, true));
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func =
+        wasm_runtime_lookup_component_function(module_inst, "aliased-add");
+    ASSERT_NE(func, nullptr);
+
+    wasm_component_value_t args[2] = { make_component_s32_value(0),
+                                       make_component_s32_value(0) };
+    wasm_component_value_t result = {};
+
+    ASSERT_FALSE(wasm_runtime_call_component_values(module_inst, func, 1, &result,
+                                                    2, args));
+    ASSERT_STREQ(wasm_runtime_get_exception(module_inst),
+                 "component canon lift function result 0 only supports "
+                 "variable-length list<u8> results");
+
+    wasm_component_value_destroy(&result);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest, TestPublicComponentCallListU8CopiesBeforePostReturn)
+{
+    bool ret = helper->read_wasm_file("list_u8_post_return.component.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "public-component-call-list-u8-post-return";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    const int32_t list_u8_type_idx = append_component_list_type(
+        (WASMComponentModule *)module, WASM_COMP_PRIMVAL_U8, false, 0);
+    ASSERT_GE(list_u8_type_idx, 0);
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func =
+        wasm_runtime_lookup_component_function(module_inst, "echo");
+    ASSERT_NE(func, nullptr);
+    WASMComponentFuncType *func_type = lookup_local_component_func_type(
+        (WASMComponentModule *)module, func->type_idx);
+    ASSERT_NE(func_type, nullptr);
+    ASSERT_NE(func_type->results, nullptr);
+    ASSERT_EQ(func_type->results->tag, WASM_COMP_RESULT_LIST_WITH_TYPE);
+    ASSERT_NE(func_type->results->results, nullptr);
+    func_type->results->results->type = WASM_COMP_VAL_TYPE_IDX;
+    func_type->results->results->type_specific.type_idx =
+        (uint32_t)list_u8_type_idx;
+
+    wasm_component_value_t first_arg[1] = { make_component_string_value("hello") };
+    wasm_component_value_t first_result = {};
+    ASSERT_TRUE(wasm_runtime_call_component_values(module_inst, func, 1,
+                                                   &first_result, 1, first_arg))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(first_result.type.kind, WASM_COMPONENT_VALUE_TYPE_DEFINED);
+    ASSERT_EQ(first_result.storage_kind, WASM_COMPONENT_VALUE_STORAGE_OWNED);
+    ASSERT_EQ(first_result.byte_size, 5u);
+    ASSERT_EQ(memcmp(wasm_component_value_get_data(&first_result), "hello", 5), 0);
+
+    wasm_component_value_t second_arg[1] = {
+        make_component_string_value("world!!!")
+    };
+    wasm_component_value_t second_result = {};
+    ASSERT_TRUE(wasm_runtime_call_component_values(module_inst, func, 1,
+                                                   &second_result, 1, second_arg))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(second_result.type.kind, WASM_COMPONENT_VALUE_TYPE_DEFINED);
+    ASSERT_EQ(second_result.storage_kind, WASM_COMPONENT_VALUE_STORAGE_OWNED);
+    ASSERT_EQ(second_result.byte_size, 8u);
+    ASSERT_EQ(memcmp(wasm_component_value_get_data(&second_result), "world!!!", 8),
+              0);
+    ASSERT_EQ(memcmp(wasm_component_value_get_data(&first_result), "hello", 5), 0);
+
+    wasm_component_value_destroy(&second_result);
+    wasm_component_value_destroy(&second_arg[0]);
+    wasm_component_value_destroy(&first_result);
+    wasm_component_value_destroy(&first_arg[0]);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
 TEST_F(BinaryParserTest, TestPublicComponentInstantiationBindsTopLevelImports)
 {
     bool ret = helper->read_wasm_file("add.wasm");
@@ -5720,6 +6592,215 @@ TEST_F(BinaryParserTest, TestPublicComponentInstantiationBindsTopLevelImports)
     BH_FREE(target_component_raw);
     wasm_runtime_deinstantiate(source_inst);
     wasm_runtime_unload(source_module);
+}
+
+TEST_F(BinaryParserTest, TestPublicComponentCallSupportsHostScalarFuncImports)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "public-component-host-scalar-import";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(append_top_level_s32_value_section(
+        (WASMComponentModule *)module, runtime_value_section_i32_two_bytes,
+        (uint32_t)sizeof(runtime_value_section_i32_two_bytes)));
+    ASSERT_TRUE(append_top_level_s32_value_section(
+        (WASMComponentModule *)module, runtime_value_section_i32_three_bytes,
+        (uint32_t)sizeof(runtime_value_section_i32_three_bytes)));
+    ASSERT_TRUE(append_top_level_host_function_import_sections(
+        (WASMComponentModule *)module, "host-add", "host-instance", "forwarded"));
+    ASSERT_TRUE(append_top_level_function_export_alias((WASMComponentModule *)module,
+                                                       "host-instance", "forwarded",
+                                                       "aliased-host-add"));
+
+    HostScalarCallState call_state = {};
+    wasm_component_func_import_binding_t func_import = {};
+    func_import.name = "host-add";
+    func_import.callback = host_scalar_add_callback;
+    func_import.user_data = &call_state;
+
+    struct InstantiationArgs2 *inst_args = nullptr;
+    ASSERT_TRUE(wasm_runtime_instantiation_args_create(&inst_args));
+    wasm_runtime_instantiation_args_set_default_stack_size(inst_args,
+                                                           helper->stack_size);
+    wasm_runtime_instantiation_args_set_host_managed_heap_size(
+        inst_args, helper->heap_size);
+    wasm_runtime_instantiation_args_set_wasi_stdio(inst_args, 0, 1, 2);
+    wasm_runtime_instantiation_args_set_wasi_dir(inst_args, nullptr, 0, nullptr,
+                                                 0);
+    wasm_runtime_instantiation_args_set_component_func_imports(inst_args,
+                                                               &func_import, 1);
+
+    wasm_module_inst_t module_inst = wasm_runtime_instantiate_ex2(
+        module, inst_args, helper->error_buf,
+        (uint32_t)sizeof(helper->error_buf));
+    wasm_runtime_instantiation_args_destroy(inst_args);
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t aliased =
+        wasm_runtime_lookup_component_function(module_inst, "aliased-host-add");
+    ASSERT_NE(aliased, nullptr);
+    wasm_component_instance_t host_instance =
+        wasm_runtime_lookup_component_instance(module_inst, "host-instance");
+    ASSERT_NE(host_instance, nullptr);
+    wasm_component_func_t forwarded =
+        wasm_component_instance_lookup_function(host_instance, "forwarded");
+    ASSERT_NE(forwarded, nullptr);
+
+    wasm_val_t args[2] = {};
+    args[0].kind = WASM_I32;
+    args[0].of.i32 = 7;
+    args[1].kind = WASM_I32;
+    args[1].of.i32 = 35;
+    wasm_val_t result = {};
+
+    ASSERT_TRUE(
+        wasm_runtime_call_component(module_inst, aliased, 1, &result, 2, args))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(result.kind, WASM_I32);
+    ASSERT_EQ(result.of.i32, 42);
+    ASSERT_EQ(call_state.call_count, 1);
+    ASSERT_EQ(call_state.last_a, 7);
+    ASSERT_EQ(call_state.last_b, 35);
+
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest, TestPublicComponentCallSupportsHostUtf8StringFuncImports)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "public-component-host-string-import";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(configure_first_canon_lift_for_utf8_string(
+        (WASMComponentModule *)module, true));
+    ASSERT_TRUE(append_top_level_host_function_import_sections(
+        (WASMComponentModule *)module, "host-add", "host-instance", "forwarded"));
+    ASSERT_TRUE(append_top_level_function_export_alias((WASMComponentModule *)module,
+                                                       "host-instance", "forwarded",
+                                                       "aliased-host-add"));
+
+    HostStringCallState call_state = {};
+    wasm_component_func_import_binding_t func_import = {};
+    func_import.name = "host-add";
+    func_import.callback = host_string_echo_callback;
+    func_import.user_data = &call_state;
+
+    struct InstantiationArgs2 *inst_args = nullptr;
+    ASSERT_TRUE(wasm_runtime_instantiation_args_create(&inst_args));
+    wasm_runtime_instantiation_args_set_default_stack_size(inst_args,
+                                                           helper->stack_size);
+    wasm_runtime_instantiation_args_set_host_managed_heap_size(
+        inst_args, helper->heap_size);
+    wasm_runtime_instantiation_args_set_wasi_stdio(inst_args, 0, 1, 2);
+    wasm_runtime_instantiation_args_set_wasi_dir(inst_args, nullptr, 0, nullptr,
+                                                 0);
+    wasm_runtime_instantiation_args_set_component_func_imports(inst_args,
+                                                               &func_import, 1);
+
+    wasm_module_inst_t module_inst = wasm_runtime_instantiate_ex2(
+        module, inst_args, helper->error_buf,
+        (uint32_t)sizeof(helper->error_buf));
+    wasm_runtime_instantiation_args_destroy(inst_args);
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func =
+        wasm_runtime_lookup_component_function(module_inst, "aliased-host-add");
+    ASSERT_NE(func, nullptr);
+
+    wasm_component_value_t arg = make_component_string_value("hello");
+    wasm_component_value_t result = {};
+    std::string result_string;
+    ASSERT_TRUE(
+        wasm_runtime_call_component_values(module_inst, func, 1, &result, 1, &arg))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(call_state.call_count, 1);
+    ASSERT_EQ(call_state.last_arg, "hello");
+    ASSERT_EQ(result.type.kind, WASM_COMPONENT_VALUE_TYPE_PRIMITIVE);
+    ASSERT_EQ(result.type.type.primitive_type,
+              WASM_COMPONENT_PRIMITIVE_VALUE_STRING);
+    ASSERT_TRUE(decode_component_string_arg(&result, &result_string));
+    ASSERT_EQ(result_string, "hello!");
+
+    wasm_component_value_destroy(&arg);
+    wasm_component_value_destroy(&result);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest, TestPublicComponentCallRejectsInvalidHostStringResult)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "public-component-host-invalid-string-result";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(configure_first_canon_lift_for_utf8_string(
+        (WASMComponentModule *)module, true));
+    ASSERT_TRUE(append_top_level_host_function_import_sections(
+        (WASMComponentModule *)module, "host-add", "host-instance", "forwarded"));
+    ASSERT_TRUE(append_top_level_function_export_alias((WASMComponentModule *)module,
+                                                       "host-instance", "forwarded",
+                                                       "aliased-host-add"));
+
+    wasm_component_func_import_binding_t func_import = {};
+    func_import.name = "host-add";
+    func_import.callback = host_invalid_string_result_callback;
+
+    struct InstantiationArgs2 *inst_args = nullptr;
+    ASSERT_TRUE(wasm_runtime_instantiation_args_create(&inst_args));
+    wasm_runtime_instantiation_args_set_default_stack_size(inst_args,
+                                                           helper->stack_size);
+    wasm_runtime_instantiation_args_set_host_managed_heap_size(
+        inst_args, helper->heap_size);
+    wasm_runtime_instantiation_args_set_wasi_stdio(inst_args, 0, 1, 2);
+    wasm_runtime_instantiation_args_set_wasi_dir(inst_args, nullptr, 0, nullptr,
+                                                 0);
+    wasm_runtime_instantiation_args_set_component_func_imports(inst_args,
+                                                               &func_import, 1);
+
+    wasm_module_inst_t module_inst = wasm_runtime_instantiate_ex2(
+        module, inst_args, helper->error_buf,
+        (uint32_t)sizeof(helper->error_buf));
+    wasm_runtime_instantiation_args_destroy(inst_args);
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func =
+        wasm_runtime_lookup_component_function(module_inst, "aliased-host-add");
+    ASSERT_NE(func, nullptr);
+
+    wasm_component_value_t arg = make_component_string_value("hello");
+    wasm_component_value_t result = {};
+    ASSERT_FALSE(
+        wasm_runtime_call_component_values(module_inst, func, 1, &result, 1, &arg));
+    ASSERT_STREQ(wasm_runtime_get_exception(module_inst),
+                 "component canon lift function result 0 does not contain valid "
+                 "UTF-8");
+
+    wasm_component_value_destroy(&arg);
+    wasm_component_value_destroy(&result);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
 }
 
 TEST_F(BinaryParserTest, TestPublicComponentInstantiationBindsTopLevelValueImports)
@@ -6303,6 +7384,72 @@ TEST_F(BinaryParserTest, TestRuntimeExecutesTopLevelScalarStartSections)
                      runtime_value_section_i32_five_bytes,
                      sizeof(runtime_value_section_i32_five_bytes)),
               0);
+
+    wasm_component_value_destroy(&value);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest, TestRuntimeExecutesTopLevelStartSectionWithHostFuncImport)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "runtime-top-level-host-start";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(append_top_level_s32_value_section(
+        (WASMComponentModule *)module, runtime_value_section_i32_two_bytes,
+        (uint32_t)sizeof(runtime_value_section_i32_two_bytes)));
+    ASSERT_TRUE(append_top_level_s32_value_section(
+        (WASMComponentModule *)module, runtime_value_section_i32_three_bytes,
+        (uint32_t)sizeof(runtime_value_section_i32_three_bytes)));
+    ASSERT_TRUE(append_top_level_host_function_import_sections(
+        (WASMComponentModule *)module, "host-add", "host-instance", "forwarded"));
+    uint32_t start_args[] = { 0, 1 };
+    ASSERT_TRUE(append_top_level_start_section((WASMComponentModule *)module, 1,
+                                               start_args, 2, 1));
+    ASSERT_TRUE(append_top_level_value_export_section(
+        (WASMComponentModule *)module, "start-result", 2));
+
+    HostScalarCallState call_state = {};
+    wasm_component_func_import_binding_t func_import = {};
+    func_import.name = "host-add";
+    func_import.callback = host_scalar_add_callback;
+    func_import.user_data = &call_state;
+
+    struct InstantiationArgs2 *inst_args = nullptr;
+    ASSERT_TRUE(wasm_runtime_instantiation_args_create(&inst_args));
+    wasm_runtime_instantiation_args_set_default_stack_size(inst_args,
+                                                           helper->stack_size);
+    wasm_runtime_instantiation_args_set_host_managed_heap_size(
+        inst_args, helper->heap_size);
+    wasm_runtime_instantiation_args_set_wasi_stdio(inst_args, 0, 1, 2);
+    wasm_runtime_instantiation_args_set_wasi_dir(inst_args, nullptr, 0, nullptr,
+                                                 0);
+    wasm_runtime_instantiation_args_set_component_func_imports(inst_args,
+                                                               &func_import, 1);
+
+    wasm_module_inst_t module_inst = wasm_runtime_instantiate_ex2(
+        module, inst_args, helper->error_buf,
+        (uint32_t)sizeof(helper->error_buf));
+    wasm_runtime_instantiation_args_destroy(inst_args);
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+    ASSERT_EQ(call_state.call_count, 1);
+
+    wasm_component_value_t value = {};
+    ASSERT_TRUE(
+        wasm_runtime_lookup_component_value(module_inst, "start-result", &value));
+    ASSERT_EQ(value.type.kind, WASM_COMPONENT_VALUE_TYPE_PRIMITIVE);
+    ASSERT_EQ(value.type.type.primitive_type, WASM_COMPONENT_PRIMITIVE_VALUE_S32);
+    ASSERT_EQ(value.storage_kind, WASM_COMPONENT_VALUE_STORAGE_INLINE);
+    ASSERT_EQ(value.byte_size, 1u);
+    ASSERT_EQ(((const uint8_t *)wasm_component_value_get_data(&value))[0], 5);
 
     wasm_component_value_destroy(&value);
     wasm_runtime_deinstantiate(module_inst);
@@ -6903,6 +8050,53 @@ TEST_F(BinaryParserTest, TestRuntimeBindsTopLevelComponentImports)
               expected_component);
 
     wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest, TestRuntimeRejectsUnsupportedHostFuncImportSlice)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "runtime-host-import-unsupported-slice";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(append_top_level_host_function_import_sections(
+        (WASMComponentModule *)module, "host-add", "host-instance", "forwarded"));
+    ASSERT_TRUE(
+        append_host_import_list_param_type((WASMComponentModule *)module, 0));
+
+    wasm_component_func_import_binding_t func_import = {};
+    func_import.name = "host-add";
+    func_import.callback = host_scalar_add_callback;
+
+    struct InstantiationArgs2 *inst_args = nullptr;
+    ASSERT_TRUE(wasm_runtime_instantiation_args_create(&inst_args));
+    wasm_runtime_instantiation_args_set_default_stack_size(inst_args,
+                                                           helper->stack_size);
+    wasm_runtime_instantiation_args_set_host_managed_heap_size(
+        inst_args, helper->heap_size);
+    wasm_runtime_instantiation_args_set_wasi_stdio(inst_args, 0, 1, 2);
+    wasm_runtime_instantiation_args_set_wasi_dir(inst_args, nullptr, 0, nullptr,
+                                                 0);
+    wasm_runtime_instantiation_args_set_component_func_imports(inst_args,
+                                                               &func_import, 1);
+
+    wasm_module_inst_t module_inst = wasm_runtime_instantiate_ex2(
+        module, inst_args, helper->error_buf,
+        (uint32_t)sizeof(helper->error_buf));
+    wasm_runtime_instantiation_args_destroy(inst_args);
+    ASSERT_EQ(module_inst, nullptr);
+    ASSERT_NE(strstr(helper->error_buf,
+                     "host component import \"host-add\" parameter 0 requires "
+                     "memory-backed Canonical ABI for list"),
+              nullptr);
+
     wasm_runtime_unload(module);
 }
 

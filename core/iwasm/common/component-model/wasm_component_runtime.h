@@ -6,6 +6,7 @@
 #ifndef WASM_COMPONENT_RUNTIME_H
 #define WASM_COMPONENT_RUNTIME_H
 
+#include "wasm_runtime_common.h"
 #include "wasm_component.h"
 #include "wasm_component_resource.h"
 #include "wasm_component_value.h"
@@ -54,6 +55,7 @@ typedef struct WASMComponentResolvedAlias {
 
 typedef enum WASMComponentRuntimeFuncKind {
     WASM_COMP_RUNTIME_FUNC_LIFT = 0,
+    WASM_COMP_RUNTIME_FUNC_HOST_IMPORT,
     WASM_COMP_RUNTIME_FUNC_UNSUPPORTED_CANON
 } WASMComponentRuntimeFuncKind;
 
@@ -63,6 +65,12 @@ typedef enum WASMComponentRuntimeStringEncoding {
     WASM_COMP_RUNTIME_STRING_ENCODING_UTF16,
     WASM_COMP_RUNTIME_STRING_ENCODING_LATIN1_UTF16
 } WASMComponentRuntimeStringEncoding;
+
+typedef enum WASMComponentRuntimeCanonLiftMemoryResultKind {
+    WASM_COMP_RUNTIME_CANON_LIFT_MEMORY_RESULT_NONE = 0,
+    WASM_COMP_RUNTIME_CANON_LIFT_MEMORY_RESULT_STRING,
+    WASM_COMP_RUNTIME_CANON_LIFT_MEMORY_RESULT_LIST_U8
+} WASMComponentRuntimeCanonLiftMemoryResultKind;
 
 typedef struct WASMComponentRuntimeFunc {
     WASMComponentRuntimeFuncKind kind;
@@ -74,9 +82,12 @@ typedef struct WASMComponentRuntimeFunc {
     WASMComponentCoreRuntimeRef canon_realloc_ref;
     WASMComponentCoreRuntimeRef canon_post_return_ref;
     WASMComponentRuntimeStringEncoding string_encoding;
+    WASMComponentRuntimeCanonLiftMemoryResultKind memory_result_kind;
     bool has_string_params;
     bool has_string_result;
     bool is_top_level_export;
+    wasm_component_host_func_callback_t host_callback;
+    void *host_user_data;
 } WASMComponentRuntimeFunc;
 
 struct WASMComponentRuntimeScope;
