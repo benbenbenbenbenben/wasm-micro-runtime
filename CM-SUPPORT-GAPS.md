@@ -116,7 +116,7 @@ What works today:
 - scalar parameter/result lifting via `wasm_runtime_call_component(...)`
 - UTF-8 string parameter/result handling via `wasm_runtime_call_component_values(...)`
 - top-level `list<u8>` parameter/result handling via `wasm_runtime_call_component_values(...)`
-- top-level tuple/record parameter/result handling when every leaf is scalar
+- top-level tuple/record parameters with scalar and nested UTF-8 string leaves
 - top-level exported `canon lift` tuple/record results with scalar and UTF-8 string leaves
 - memory / realloc / post-return validation and use for supported UTF-8 string lifts
 - host-provided top-level component-function imports for scalar / UTF-8 string / `list<u8>` signatures
@@ -208,7 +208,7 @@ The executable Canonical ABI surface is currently limited to:
 - scalar values
 - UTF-8 strings
 - top-level `list<u8>`
-- top-level tuple/record values with scalar leaves
+- top-level tuple/record parameters with scalar and nested UTF-8 string leaves
 - top-level exported tuple/record results with scalar and UTF-8 string leaves
 - top-level exported `canon lift`
 - top-level host-defined component-function imports for the same supported subset
@@ -218,6 +218,7 @@ Major Canonical ABI gaps remain:
 - no executable `canon lower`
 - no general adapter/lowering path for imported component functions beyond the supported host-callback subset
 - no list marshalling beyond UTF-8 strings and top-level `list<u8>`
+- no nested `list<u8>` leaves inside tuple/record parameter/result values
 - no variant / flags / enum / option / result marshalling
 - no nested `list<u8>` or other non-string memory-backed leaves inside tuple/record Canonical ABI values yet
 - no broader composite flattening/lifting rules beyond scalar-leaf tuple/record support
