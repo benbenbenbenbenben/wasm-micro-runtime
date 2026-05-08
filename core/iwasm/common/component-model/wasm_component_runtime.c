@@ -13,6 +13,10 @@ typedef struct WASMComponentRuntimeAllocCounts {
     uint32 core_module_count;
     uint32 core_instance_count;
     uint32 alias_count;
+    uint32 component_count;
+    uint32 component_instance_count;
+    uint32 component_func_count;
+    uint32 component_export_count;
 } WASMComponentRuntimeAllocCounts;
 
 static void
@@ -60,6 +64,21 @@ collect_component_runtime_alloc_counts(const WASMComponent *component,
             case WASM_COMP_SECTION_ALIASES:
                 counts->alias_count += section->parsed.alias_section->count;
                 break;
+            case WASM_COMP_SECTION_COMPONENT:
+                counts->component_count++;
+                break;
+            case WASM_COMP_SECTION_INSTANCES:
+                counts->component_instance_count +=
+                    section->parsed.instance_section->count;
+                break;
+            case WASM_COMP_SECTION_CANONS:
+                counts->component_func_count +=
+                    section->parsed.canon_section->count;
+                break;
+            case WASM_COMP_SECTION_EXPORTS:
+                counts->component_export_count +=
+                    section->parsed.export_section->count;
+                break;
             default:
                 break;
         }
@@ -80,6 +99,16 @@ destroy_component_core_instance(WASMComponentCoreRuntimeInstance *core_instance)
         core_instance->exports = NULL;
     }
     core_instance->export_count = 0;
+}
+
+static void
+destroy_component_runtime_instance(WASMComponentRuntimeInstance *component_inst)
+{
+    if (component_inst->exports) {
+        wasm_runtime_free(component_inst->exports);
+        component_inst->exports = NULL;
+    }
+    component_inst->export_count = 0;
 }
 
 static void
@@ -121,6 +150,24 @@ destroy_component_instance_graph(WASMComponentInstance *inst)
         wasm_runtime_free(inst->resolved_aliases);
         inst->resolved_aliases = NULL;
     }
+    if (inst->component_instances) {
+        for (i = 0; i < inst->component_instance_count; i++)
+            destroy_component_runtime_instance(&inst->component_instances[i]);
+        wasm_runtime_free(inst->component_instances);
+        inst->component_instances = NULL;
+    }
+    if (inst->component_exports) {
+        wasm_runtime_free(inst->component_exports);
+        inst->component_exports = NULL;
+    }
+    if (inst->component_funcs) {
+        wasm_runtime_free(inst->component_funcs);
+        inst->component_funcs = NULL;
+    }
+    if (inst->components) {
+        wasm_runtime_free(inst->components);
+        inst->components = NULL;
+    }
 
     inst->core_module_count = 0;
     inst->core_instance_count = 0;
@@ -129,6 +176,10 @@ destroy_component_instance_graph(WASMComponentInstance *inst)
     inst->core_memory_count = 0;
     inst->core_global_count = 0;
     inst->resolved_alias_count = 0;
+    inst->component_count = 0;
+    inst->component_func_count = 0;
+    inst->component_instance_count = 0;
+    inst->component_export_count = 0;
 }
 
 static bool
@@ -180,6 +231,22 @@ alloc_component_instance_graph(WASMComponentInstance *inst,
         || !alloc_component_runtime_array((void **)&inst->resolved_aliases,
                                           counts->alias_count,
                                           sizeof(*inst->resolved_aliases),
+                                          error_buf, error_buf_size)
+        || !alloc_component_runtime_array((void **)&inst->components,
+                                          counts->component_count,
+                                          sizeof(*inst->components), error_buf,
+                                          error_buf_size)
+        || !alloc_component_runtime_array((void **)&inst->component_funcs,
+                                          counts->component_func_count,
+                                          sizeof(*inst->component_funcs),
+                                          error_buf, error_buf_size)
+        || !alloc_component_runtime_array((void **)&inst->component_instances,
+                                          counts->component_instance_count,
+                                          sizeof(*inst->component_instances),
+                                          error_buf, error_buf_size)
+        || !alloc_component_runtime_array((void **)&inst->component_exports,
+                                          counts->component_export_count,
+                                          sizeof(*inst->component_exports),
                                           error_buf, error_buf_size)) {
         destroy_component_instance_graph(inst);
         return false;
@@ -256,6 +323,69 @@ resolve_core_sort_idx(const WASMComponentInstance *inst,
                 "unsupported core sort 0x%02x",
                 (unsigned)sort_idx->sort->core_sort);
     }
+}
+
+static bool
+resolve_component_sort_idx(const WASMComponentInstance *inst,
+                           const WASMComponentSortIdx *sort_idx,
+                           WASMComponentRuntimeRef *out_ref, char *error_buf,
+                           uint32 error_buf_size)
+{
+    if (!sort_idx || !sort_idx->sort)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size, "missing component sort index");
+
+    if (sort_idx->sort->sort == WASM_COMP_SORT_CORE_SORT)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "core sorts are not valid in component sort resolution");
+
+    switch (sort_idx->sort->sort) {
+        case WASM_COMP_SORT_FUNC:
+            if (sort_idx->idx >= inst->component_func_count)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "component func index %u is out of bounds", sort_idx->idx);
+            out_ref->type = WASM_COMP_RUNTIME_REF_FUNC;
+            out_ref->of.function = &inst->component_funcs[sort_idx->idx];
+            return true;
+        case WASM_COMP_SORT_INSTANCE:
+            if (sort_idx->idx >= inst->component_instance_count)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "component instance index %u is out of bounds",
+                    sort_idx->idx);
+            out_ref->type = WASM_COMP_RUNTIME_REF_INSTANCE;
+            out_ref->of.instance = &inst->component_instances[sort_idx->idx];
+            return true;
+        default:
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                "component sort 0x%02x is not supported yet",
+                (unsigned)sort_idx->sort->sort);
+    }
+}
+
+static const char *
+get_component_import_name(const WASMComponentImportName *import_name)
+{
+    if (!import_name)
+        return NULL;
+
+    return import_name->tag == WASM_COMP_IMPORTNAME_VERSIONED
+               ? import_name->imported.versioned.name->name
+               : import_name->imported.simple.name->name;
+}
+
+static const char *
+get_component_export_name(const WASMComponentExportName *export_name)
+{
+    if (!export_name)
+        return NULL;
+
+    return export_name->tag == WASM_COMP_IMPORTNAME_VERSIONED
+               ? export_name->exported.versioned.name->name
+               : export_name->exported.simple.name->name;
 }
 
 static bool
@@ -451,7 +581,9 @@ resolve_component_alias_section(WASMComponentInstance *inst,
         const char *name;
 
         if (alias_def->alias_target_type != WASM_COMP_ALIAS_TARGET_CORE_EXPORT)
-            continue;
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                "component aliases other than core export are not supported yet");
 
         if (!alias_def->sort || alias_def->sort->sort != WASM_COMP_SORT_CORE_SORT)
             return set_component_runtime_error_fmt(
@@ -498,6 +630,327 @@ resolve_component_alias_section(WASMComponentInstance *inst,
 }
 
 static bool
+append_component_canon_function(WASMComponentInstance *inst,
+                                const WASMComponentCanon *canon,
+                                char *error_buf, uint32 error_buf_size)
+{
+    WASMComponentRuntimeFunc *func;
+
+    if (inst->component_func_count >= UINT32_MAX)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size, "too many component functions");
+
+    func = &inst->component_funcs[inst->component_func_count++];
+    memset(func, 0, sizeof(*func));
+    func->canon_tag = canon->tag;
+
+    if (canon->tag == WASM_COMP_CANON_LIFT) {
+        if (canon->canon_data.lift.core_func_idx >= inst->core_func_count)
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                "canon lift core func index %u is out of bounds",
+                canon->canon_data.lift.core_func_idx);
+
+        if (inst->module->component.section_count == 0)
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size, "component type space is unavailable");
+
+        func->kind = WASM_COMP_RUNTIME_FUNC_LIFT;
+        func->type_idx = canon->canon_data.lift.type_idx;
+        func->canon_opts = canon->canon_data.lift.canon_opts;
+        func->core_func_ref = inst->core_funcs[canon->canon_data.lift.core_func_idx];
+
+        if (func->core_func_ref.type != WASM_COMP_CORE_RUNTIME_REF_FUNC)
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                "canon lift core func index %u does not resolve to a function",
+                canon->canon_data.lift.core_func_idx);
+    }
+    else {
+        func->kind = WASM_COMP_RUNTIME_FUNC_UNSUPPORTED_CANON;
+    }
+
+    return true;
+}
+
+static bool
+build_nested_component_instance_exports(
+    WASMComponentRuntimeInstance *runtime_inst, const WASMComponent *component,
+    WASMComponentRuntimeRef *bound_funcs, uint32 bound_func_count,
+    char *error_buf, uint32 error_buf_size)
+{
+    uint32 i, export_index = 0;
+
+    for (i = 0; i < component->section_count; i++) {
+        const WASMComponentSection *section = &component->sections[i];
+
+        switch (section->id) {
+            case WASM_COMP_SECTION_CORE_CUSTOM:
+            case WASM_COMP_SECTION_TYPE:
+                break;
+            case WASM_COMP_SECTION_IMPORTS:
+                break;
+            case WASM_COMP_SECTION_EXPORTS: {
+                uint32 j;
+                const WASMComponentExportSection *export_section =
+                    section->parsed.export_section;
+
+                for (j = 0; j < export_section->count; j++, export_index++) {
+                    const WASMComponentExport *component_export =
+                        &export_section->exports[j];
+                    WASMComponentRuntimeRef ref;
+
+                    if (!component_export->sort_idx
+                        || !component_export->sort_idx->sort
+                        || component_export->sort_idx->sort->sort
+                               != WASM_COMP_SORT_FUNC)
+                        return set_component_runtime_error_fmt(
+                            error_buf, error_buf_size,
+                            "nested component export sorts other than func are "
+                            "not supported yet");
+
+                    if (component_export->sort_idx->idx >= bound_func_count)
+                        return set_component_runtime_error_fmt(
+                            error_buf, error_buf_size,
+                            "nested component func index %u is out of bounds",
+                            component_export->sort_idx->idx);
+
+                    ref = bound_funcs[component_export->sort_idx->idx];
+                    runtime_inst->exports[export_index].name =
+                        get_component_export_name(component_export->export_name);
+                    runtime_inst->exports[export_index].ref = ref;
+                }
+                break;
+            }
+            default:
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "nested component section 0x%02x is not supported yet",
+                    (unsigned)section->id);
+        }
+    }
+
+    runtime_inst->export_count = export_index;
+    return true;
+}
+
+static bool
+instantiate_nested_component_instance(WASMComponentInstance *inst,
+                                      const WASMComponentInst *component_inst,
+                                      char *error_buf, uint32 error_buf_size)
+{
+    WASMComponentRuntimeInstance *runtime_inst =
+        &inst->component_instances[inst->component_instance_count];
+    const WASMComponent *nested_component;
+    uint32 i, import_count = 0, export_count = 0;
+    WASMComponentRuntimeRef *bound_funcs = NULL;
+
+    if (component_inst->expression.with_args.idx >= inst->component_count)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "nested component index %u is out of bounds",
+            component_inst->expression.with_args.idx);
+
+    nested_component = inst->components[component_inst->expression.with_args.idx];
+    for (i = 0; i < nested_component->section_count; i++) {
+        const WASMComponentSection *section = &nested_component->sections[i];
+
+        switch (section->id) {
+            case WASM_COMP_SECTION_CORE_CUSTOM:
+            case WASM_COMP_SECTION_TYPE:
+                break;
+            case WASM_COMP_SECTION_IMPORTS:
+                import_count += section->parsed.import_section->count;
+                break;
+            case WASM_COMP_SECTION_EXPORTS:
+                export_count += section->parsed.export_section->count;
+                break;
+            default:
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "nested component section 0x%02x is not supported yet",
+                    (unsigned)section->id);
+        }
+    }
+
+    if (component_inst->expression.with_args.arg_len != import_count)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "nested component import binding count mismatch");
+
+    if (!alloc_component_runtime_array((void **)&bound_funcs, import_count,
+                                       sizeof(*bound_funcs), error_buf,
+                                       error_buf_size)
+        || !alloc_component_runtime_array((void **)&runtime_inst->exports,
+                                          export_count,
+                                          sizeof(*runtime_inst->exports),
+                                          error_buf, error_buf_size)) {
+        if (bound_funcs)
+            wasm_runtime_free(bound_funcs);
+        return false;
+    }
+
+    for (i = 0; i < nested_component->section_count; i++) {
+        const WASMComponentSection *section = &nested_component->sections[i];
+
+        if (section->id == WASM_COMP_SECTION_IMPORTS) {
+            uint32 j;
+            const WASMComponentImportSection *import_section =
+                section->parsed.import_section;
+
+            for (j = 0; j < import_section->count; j++) {
+                const WASMComponentImport *component_import =
+                    &import_section->imports[j];
+                const char *import_name =
+                    get_component_import_name(component_import->import_name);
+                bool matched = false;
+                uint32 k;
+
+                    if (!component_import->extern_desc
+                        || component_import->extern_desc->type
+                               != WASM_COMP_EXTERN_FUNC) {
+                        set_component_runtime_error_fmt(
+                            error_buf, error_buf_size,
+                            "nested component imports other than func are not "
+                            "supported yet");
+                        goto fail;
+                    }
+
+                for (k = 0; k < component_inst->expression.with_args.arg_len; k++) {
+                    const WASMComponentInstArg *arg =
+                        &component_inst->expression.with_args.args[k];
+
+                    if (strcmp(arg->name->name, import_name))
+                        continue;
+
+                    if (!resolve_component_sort_idx(inst, arg->idx.sort_idx,
+                                                    &bound_funcs[j], error_buf,
+                                                    error_buf_size))
+                        goto fail;
+
+                    if (bound_funcs[j].type != WASM_COMP_RUNTIME_REF_FUNC) {
+                        set_component_runtime_error_fmt(
+                            error_buf, error_buf_size,
+                            "nested component import \"%s\" must bind to a "
+                            "component function",
+                            import_name);
+                        goto fail;
+                    }
+
+                    matched = true;
+                    break;
+                }
+
+                if (!matched) {
+                    set_component_runtime_error_fmt(
+                        error_buf, error_buf_size,
+                        "nested component import \"%s\" is missing a binding",
+                        import_name);
+                    goto fail;
+                }
+            }
+        }
+    }
+
+    if (!build_nested_component_instance_exports(runtime_inst, nested_component,
+                                                 bound_funcs, import_count,
+                                                 error_buf, error_buf_size))
+        goto fail;
+
+    wasm_runtime_free(bound_funcs);
+    inst->component_instance_count++;
+    return true;
+
+fail:
+    if (bound_funcs)
+        wasm_runtime_free(bound_funcs);
+    if (runtime_inst->exports) {
+        wasm_runtime_free(runtime_inst->exports);
+        runtime_inst->exports = NULL;
+    }
+    runtime_inst->export_count = 0;
+    return false;
+}
+
+static bool
+instantiate_component_runtime_instance(WASMComponentInstance *inst,
+                                       const WASMComponentInst *component_inst,
+                                       char *error_buf, uint32 error_buf_size)
+{
+    WASMComponentRuntimeInstance *runtime_inst =
+        &inst->component_instances[inst->component_instance_count];
+
+    memset(runtime_inst, 0, sizeof(*runtime_inst));
+
+    if (component_inst->instance_expression_tag
+        == WASM_COMP_INSTANCE_EXPRESSION_WITH_ARGS)
+        return instantiate_nested_component_instance(inst, component_inst,
+                                                     error_buf, error_buf_size);
+
+    if (component_inst->instance_expression_tag
+        == WASM_COMP_INSTANCE_EXPRESSION_WITHOUT_ARGS) {
+        uint32 i;
+        uint32 export_count =
+            component_inst->expression.without_args.inline_expr_len;
+
+        if (!alloc_component_runtime_array((void **)&runtime_inst->exports,
+                                           export_count,
+                                           sizeof(*runtime_inst->exports),
+                                           error_buf, error_buf_size))
+            return false;
+
+        runtime_inst->export_count = export_count;
+        for (i = 0; i < export_count; i++) {
+            const WASMComponentInlineExport *inline_export =
+                &component_inst->expression.without_args.inline_expr[i];
+
+            runtime_inst->exports[i].name = inline_export->name->name;
+            if (!resolve_component_sort_idx(inst, inline_export->sort_idx,
+                                            &runtime_inst->exports[i].ref,
+                                            error_buf, error_buf_size)) {
+                wasm_runtime_free(runtime_inst->exports);
+                runtime_inst->exports = NULL;
+                runtime_inst->export_count = 0;
+                return false;
+            }
+        }
+
+        inst->component_instance_count++;
+        return true;
+    }
+
+    return set_component_runtime_error_fmt(
+        error_buf, error_buf_size,
+        "unsupported component instance expression tag 0x%02x",
+        (unsigned)component_inst->instance_expression_tag);
+}
+
+static bool
+resolve_component_exports(WASMComponentInstance *inst,
+                          const WASMComponentExportSection *export_section,
+                          char *error_buf, uint32 error_buf_size)
+{
+    uint32 i;
+
+    for (i = 0; i < export_section->count; i++) {
+        const WASMComponentExport *component_export = &export_section->exports[i];
+
+        if (!resolve_component_sort_idx(inst, component_export->sort_idx,
+                                        &inst->component_exports
+                                             [inst->component_export_count]
+                                                 .ref,
+                                        error_buf, error_buf_size))
+            return false;
+
+        inst->component_exports[inst->component_export_count].name =
+            get_component_export_name(component_export->export_name);
+        inst->component_export_count++;
+    }
+
+    return true;
+}
+
+static bool
 build_component_instance_graph(WASMComponentInstance *inst, char *error_buf,
                                uint32 error_buf_size)
 {
@@ -535,6 +988,47 @@ build_component_instance_graph(WASMComponentInstance *inst, char *error_buf,
                 if (!resolve_component_alias_section(
                         inst, section->parsed.alias_section, error_buf,
                         error_buf_size))
+                    return false;
+                break;
+            case WASM_COMP_SECTION_COMPONENT:
+                inst->components[inst->component_count++] =
+                    section->parsed.component;
+                break;
+            case WASM_COMP_SECTION_IMPORTS:
+                if (section->parsed.import_section->count > 0)
+                    return set_component_runtime_error_fmt(
+                        error_buf, error_buf_size,
+                        "top-level component imports are not supported yet");
+                break;
+            case WASM_COMP_SECTION_CANONS: {
+                uint32 j;
+                const WASMComponentCanonSection *canon_section =
+                    section->parsed.canon_section;
+
+                for (j = 0; j < canon_section->count; j++) {
+                    if (!append_component_canon_function(
+                            inst, &canon_section->canons[j], error_buf,
+                            error_buf_size))
+                        return false;
+                }
+                break;
+            }
+            case WASM_COMP_SECTION_INSTANCES: {
+                uint32 j;
+                const WASMComponentInstSection *inst_section =
+                    section->parsed.instance_section;
+
+                for (j = 0; j < inst_section->count; j++) {
+                    if (!instantiate_component_runtime_instance(
+                            inst, &inst_section->instances[j], error_buf,
+                            error_buf_size))
+                        return false;
+                }
+                break;
+            }
+            case WASM_COMP_SECTION_EXPORTS:
+                if (!resolve_component_exports(inst, section->parsed.export_section,
+                                               error_buf, error_buf_size))
                     return false;
                 break;
             default:

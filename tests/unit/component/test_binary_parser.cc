@@ -262,3 +262,52 @@ TEST_F(BinaryParserTest, TestRuntimeBuildsCoreInstanceGraphAndAliases)
     wasm_runtime_deinstantiate(module_inst);
     wasm_runtime_unload(module);
 }
+
+TEST_F(BinaryParserTest, TestRuntimeResolvesCanonLiftedExports)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "runtime-component-exports";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    auto *component_inst = (WASMComponentInstance *)module_inst;
+    ASSERT_EQ(component_inst->component_func_count, 1u);
+    ASSERT_EQ(component_inst->component_instance_count, 1u);
+    ASSERT_EQ(component_inst->component_export_count, 1u);
+
+    const WASMComponentRuntimeFunc &lifted_func =
+        component_inst->component_funcs[0];
+    ASSERT_EQ(lifted_func.kind, WASM_COMP_RUNTIME_FUNC_LIFT);
+    ASSERT_EQ(lifted_func.core_func_ref.type, WASM_COMP_CORE_RUNTIME_REF_FUNC);
+    ASSERT_NE(lifted_func.core_func_ref.of.function, nullptr);
+
+    const WASMComponentNamedExport &top_export =
+        component_inst->component_exports[0];
+    ASSERT_EQ(std::string(top_export.name),
+              "test:project/my-interface@0.1.0");
+    ASSERT_EQ(top_export.ref.type, WASM_COMP_RUNTIME_REF_INSTANCE);
+    ASSERT_NE(top_export.ref.of.instance, nullptr);
+    ASSERT_EQ(top_export.ref.of.instance->export_count, 1u);
+
+    const WASMComponentNamedExport &nested_export =
+        top_export.ref.of.instance->exports[0];
+    ASSERT_EQ(std::string(nested_export.name), "add");
+    ASSERT_EQ(nested_export.ref.type, WASM_COMP_RUNTIME_REF_FUNC);
+    ASSERT_EQ(nested_export.ref.of.function, &component_inst->component_funcs[0]);
+
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}

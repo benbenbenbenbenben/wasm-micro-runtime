@@ -47,6 +47,44 @@ typedef struct WASMComponentResolvedAlias {
     WASMComponentCoreRuntimeRef ref;
 } WASMComponentResolvedAlias;
 
+typedef enum WASMComponentRuntimeFuncKind {
+    WASM_COMP_RUNTIME_FUNC_LIFT = 0,
+    WASM_COMP_RUNTIME_FUNC_UNSUPPORTED_CANON
+} WASMComponentRuntimeFuncKind;
+
+typedef struct WASMComponentRuntimeFunc {
+    WASMComponentRuntimeFuncKind kind;
+    WASMComponentCanonType canon_tag;
+    uint32 type_idx;
+    WASMComponentCanonOpts *canon_opts;
+    WASMComponentCoreRuntimeRef core_func_ref;
+} WASMComponentRuntimeFunc;
+
+typedef enum WASMComponentRuntimeRefType {
+    WASM_COMP_RUNTIME_REF_FUNC = 0,
+    WASM_COMP_RUNTIME_REF_INSTANCE
+} WASMComponentRuntimeRefType;
+
+struct WASMComponentRuntimeInstance;
+
+typedef struct WASMComponentRuntimeRef {
+    WASMComponentRuntimeRefType type;
+    union {
+        WASMComponentRuntimeFunc *function;
+        struct WASMComponentRuntimeInstance *instance;
+    } of;
+} WASMComponentRuntimeRef;
+
+typedef struct WASMComponentNamedExport {
+    const char *name;
+    WASMComponentRuntimeRef ref;
+} WASMComponentNamedExport;
+
+typedef struct WASMComponentRuntimeInstance {
+    uint32 export_count;
+    WASMComponentNamedExport *exports;
+} WASMComponentRuntimeInstance;
+
 typedef struct WASMComponentModule {
     uint32 module_type;
     WASMComponent component;
@@ -73,6 +111,14 @@ struct WASMComponentInstance {
     WASMComponentCoreRuntimeRef *core_globals;
     uint32 resolved_alias_count;
     WASMComponentResolvedAlias *resolved_aliases;
+    uint32 component_count;
+    WASMComponent **components;
+    uint32 component_func_count;
+    WASMComponentRuntimeFunc *component_funcs;
+    uint32 component_instance_count;
+    WASMComponentRuntimeInstance *component_instances;
+    uint32 component_export_count;
+    WASMComponentNamedExport *component_exports;
 };
 
 WASMComponentModule *
