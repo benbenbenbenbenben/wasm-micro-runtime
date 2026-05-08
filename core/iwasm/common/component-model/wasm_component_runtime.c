@@ -6515,7 +6515,7 @@ wasm_component_call(WASMComponentInstance *inst,
                     uint32 num_args, wasm_val_t *args)
 {
     return wasm_component_call_internal(inst, function, num_results, results,
-                                        num_args, args, true);
+                                        num_args, args, false);
 }
 
 bool
@@ -6527,7 +6527,7 @@ wasm_component_call_values(WASMComponentInstance *inst,
                            const wasm_component_value_t *args)
 {
     return wasm_component_call_values_internal(inst, function, num_results,
-                                               results, num_args, args, true);
+                                               results, num_args, args, false);
 }
 
 static bool

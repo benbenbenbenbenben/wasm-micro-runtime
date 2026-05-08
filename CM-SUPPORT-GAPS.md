@@ -112,21 +112,21 @@ Canonical ABI is no longer metadata-only.
 What works today:
 
 - `canon lift` runtime metadata resolution
-- direct calling of top-level exported canon-lift functions
+- direct calling of supported top-level and nested canon-lift function handles
 - scalar parameter/result lifting via `wasm_runtime_call_component(...)`
 - UTF-8 string parameter/result handling via `wasm_runtime_call_component_values(...)`
 - top-level `list<u8>` parameter/result handling via `wasm_runtime_call_component_values(...)`
 - top-level tuple/record parameters with scalar, nested UTF-8 string, and nested `list<u8>` leaves
 - top-level exported `canon lift` tuple/record results with scalar, UTF-8 string, and nested `list<u8>` leaves
 - memory / realloc / post-return validation and use for supported UTF-8 string lifts
-- host-provided top-level component-function imports for scalar / UTF-8 string / `list<u8>` signatures
-- host-provided top-level component-function imports for tuple/record parameters with scalar, UTF-8 string, and nested `list<u8>` leaves
-- host-provided top-level component-function imports for tuple/record results with scalar leaves
+- host-provided component-function imports for scalar / UTF-8 string / `list<u8>` signatures
+- host-provided component-function imports for tuple/record parameters with scalar, UTF-8 string, and nested `list<u8>` leaves
+- host-provided component-function imports for tuple/record results with scalar leaves
 
 Current supported execution envelope is intentionally narrow:
 
 - only `canon lift` is executable
-- calls must target top-level exported canon-lift functions or the currently supported top-level host-import callback path
+- calls may target supported top-level or nested canon-lift / host-import function handles discovered through the runtime graph
 - scalar signatures work through the `wasm_val_t` API
 - UTF-8 string / `list<u8>` / tuple-record signatures work through the component-value API
 - raw `wasm_runtime_call_component(...)` stays scalar-only
@@ -239,8 +239,8 @@ Current limitations include:
 
 - generic `wasm_runtime_lookup_function(...)` still rejects component instances
 - generic `wasm_runtime_create_exec_env(...)` still rejects component instances
-- `wasm_runtime_call_component(...)` / `wasm_runtime_call_component_values(...)` only accept top-level exported canon-lift handles
-- nested function handles can be discovered, but not invoked through the public top-level call API
+- `wasm_runtime_call_component(...)` remains scalar-only even for nested handles
+- `wasm_runtime_call_component_values(...)` still only supports the current string / `list<u8>` / limited tuple-record subset
 - top-level import binding is limited to existing runtime handles / public values and the current supported host callback subset, not arbitrary host-native lowered adapters
 - host-import composite results are limited to tuple/record shapes whose leaves are all scalar
 - there is still no public resource import/export contract comparable to the current function/value/instance/component/core-module surface
@@ -338,7 +338,7 @@ This fork is already useful for:
 - loading and instantiating component binaries
 - exploring non-trivial component runtime graphs
 - enumerating and looking up component exports through public APIs
-- calling supported top-level canon-lift exports
+- calling supported top-level and nested component function handles
 - exercising scalar and UTF-8 string lift execution
 - using value imports/exports and value sections
 - experimenting with limited top-level and nested start execution

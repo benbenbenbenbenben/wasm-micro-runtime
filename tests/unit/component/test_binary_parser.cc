@@ -6993,7 +6993,7 @@ TEST_F(BinaryParserTest, TestPublicComponentValueExportLookupReturnsOwnedCopy)
     wasm_runtime_unload(module);
 }
 
-TEST_F(BinaryParserTest, TestPublicComponentCallRejectsNestedCanonLiftHandle)
+TEST_F(BinaryParserTest, TestPublicComponentCallInvokesNestedScalarCanonLiftHandle)
 {
     bool ret = helper->read_wasm_file("add.wasm");
     ASSERT_TRUE(ret);
@@ -7027,11 +7027,56 @@ TEST_F(BinaryParserTest, TestPublicComponentCallRejectsNestedCanonLiftHandle)
     args[1].of.i32 = 2;
     wasm_val_t results[1] = {};
 
+    ASSERT_TRUE(
+        wasm_runtime_call_component(module_inst, func, 1, results, 2, args))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(results[0].kind, WASM_I32);
+    ASSERT_EQ(results[0].of.i32, 3);
+    ASSERT_EQ(wasm_runtime_get_exception(module_inst), nullptr);
+
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestPublicComponentCallRejectsNestedMemoryBackedCanonLiftInRawApi)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "public-component-call-nested-memory-backed-raw";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(
+        append_component_export_alias_sections((WASMComponentModule *)module));
+    ASSERT_TRUE(configure_first_canon_lift_for_utf8_string(
+        (WASMComponentModule *)module, true));
+
+    wasm_module_inst_t module_inst =
+        instantiate_component_with_default_wasi(module, helper.get());
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_instance_t exported_instance =
+        wasm_runtime_lookup_component_instance(module_inst, "aliased-instance");
+    ASSERT_NE(exported_instance, nullptr);
+
+    wasm_component_func_t func =
+        wasm_component_instance_lookup_function(exported_instance, "add");
+    ASSERT_NE(func, nullptr);
+
+    wasm_val_t arg = {};
+    wasm_val_t result = {};
+
     ASSERT_FALSE(
-        wasm_runtime_call_component(module_inst, func, 1, results, 2, args));
+        wasm_runtime_call_component(module_inst, func, 1, &result, 1, &arg));
     ASSERT_STREQ(wasm_runtime_get_exception(module_inst),
-                 "component call only supports top-level exported canon lift "
-                 "functions");
+                 "component canon lift function uses string values; call "
+                 "through the component value API");
 
     wasm_runtime_deinstantiate(module_inst);
     wasm_runtime_unload(module);
@@ -8773,11 +8818,22 @@ TEST_F(BinaryParserTest, TestPublicComponentCallRejectsCompositeParamOnRawApi)
     wasm_component_func_t func =
         wasm_runtime_lookup_component_function(module_inst, "aliased-add");
     ASSERT_NE(func, nullptr);
+    wasm_component_instance_t exported_instance =
+        wasm_runtime_lookup_component_instance(module_inst, "aliased-instance");
+    ASSERT_NE(exported_instance, nullptr);
+    wasm_component_func_t nested_func =
+        wasm_component_instance_lookup_function(exported_instance, "add");
+    ASSERT_NE(nested_func, nullptr);
 
     wasm_val_t arg = {};
     wasm_val_t result = {};
     ASSERT_FALSE(
         wasm_runtime_call_component(module_inst, func, 1, &result, 1, &arg));
+    ASSERT_STREQ(wasm_runtime_get_exception(module_inst),
+                 "component canon lift function uses unsupported scalar "
+                 "flattening for parameters");
+    ASSERT_FALSE(
+        wasm_runtime_call_component(module_inst, nested_func, 1, &result, 1, &arg));
     ASSERT_STREQ(wasm_runtime_get_exception(module_inst),
                  "component canon lift function uses unsupported scalar "
                  "flattening for parameters");
@@ -11378,7 +11434,7 @@ TEST_F(BinaryParserTest, TestPublicComponentCallSupportsHostListU8FuncImports)
     call_state.next_result.clear();
     wasm_component_value_t empty_arg = make_component_list_u8_value(nullptr, 0);
     wasm_component_value_t empty_result = {};
-    ASSERT_TRUE(wasm_runtime_call_component_values(module_inst, aliased, 1,
+    ASSERT_TRUE(wasm_runtime_call_component_values(module_inst, forwarded, 1,
                                                    &empty_result, 1, &empty_arg))
         << wasm_runtime_get_exception(module_inst);
     ASSERT_EQ(call_state.call_count, 2);
@@ -11452,11 +11508,22 @@ TEST_F(BinaryParserTest, TestPublicComponentCallRejectsHostListU8FuncImportsInRa
     wasm_component_func_t func =
         wasm_runtime_lookup_component_function(module_inst, "aliased-host-add");
     ASSERT_NE(func, nullptr);
+    wasm_component_instance_t host_instance =
+        wasm_runtime_lookup_component_instance(module_inst, "host-instance");
+    ASSERT_NE(host_instance, nullptr);
+    wasm_component_func_t forwarded =
+        wasm_component_instance_lookup_function(host_instance, "forwarded");
+    ASSERT_NE(forwarded, nullptr);
 
     wasm_val_t arg = {};
     wasm_val_t result = {};
     ASSERT_FALSE(
         wasm_runtime_call_component(module_inst, func, 1, &result, 1, &arg));
+    ASSERT_STREQ(wasm_runtime_get_exception(module_inst),
+                 "host component function uses memory-backed values; call "
+                 "through the component value API");
+    ASSERT_FALSE(
+        wasm_runtime_call_component(module_inst, forwarded, 1, &result, 1, &arg));
     ASSERT_STREQ(wasm_runtime_get_exception(module_inst),
                  "host component function uses memory-backed values; call "
                  "through the component value API");
