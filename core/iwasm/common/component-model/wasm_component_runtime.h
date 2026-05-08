@@ -60,6 +60,14 @@ typedef struct WASMComponentRuntimeFunc {
     WASMComponentCoreRuntimeRef core_func_ref;
 } WASMComponentRuntimeFunc;
 
+struct WASMComponentRuntimeScope;
+
+typedef struct WASMComponentRuntimeComponent {
+    WASMComponent *component;
+    struct WASMComponentRuntimeScope *scope;
+    bool owns_scope;
+} WASMComponentRuntimeComponent;
+
 typedef enum WASMComponentRuntimeRefType {
     WASM_COMP_RUNTIME_REF_FUNC = 0,
     WASM_COMP_RUNTIME_REF_INSTANCE,
@@ -73,7 +81,7 @@ typedef struct WASMComponentRuntimeRef {
     union {
         WASMComponentRuntimeFunc *function;
         struct WASMComponentRuntimeInstance *instance;
-        WASMComponent *component;
+        WASMComponentRuntimeComponent *component;
     } of;
 } WASMComponentRuntimeRef;
 
@@ -88,6 +96,8 @@ typedef struct WASMComponentRuntimeInstance {
     WASMComponentNamedExport *exports;
     uint32 owned_instance_count;
     struct WASMComponentRuntimeInstance *owned_instances;
+    uint32 owned_component_count;
+    WASMComponentRuntimeComponent *owned_components;
 } WASMComponentRuntimeInstance;
 
 typedef struct WASMComponentModule {
@@ -117,7 +127,7 @@ struct WASMComponentInstance {
     uint32 resolved_alias_count;
     WASMComponentResolvedAlias *resolved_aliases;
     uint32 component_count;
-    WASMComponent **components;
+    WASMComponentRuntimeComponent *components;
     uint32 component_func_count;
     WASMComponentRuntimeFunc *component_funcs;
     uint32 component_instance_count;
