@@ -1402,6 +1402,13 @@ typedef struct WASMComponentCanonLiftValueInfo {
     wasm_valkind_t public_kind;
 } WASMComponentCanonLiftValueInfo;
 
+typedef struct WASMComponentCanonLiftValueShape {
+    bool declared_as_defined;
+    bool is_primitive;
+    uint8 prim_type;
+    const WASMComponentDefValType *def_type;
+} WASMComponentCanonLiftValueShape;
+
 static bool
 lookup_component_call_primitive_type(const WASMComponent *component,
                                      const WASMComponentValueType *value_type,
@@ -1489,6 +1496,54 @@ resolve_component_runtime_primitive_type(const WASMComponent *component,
         *is_primitive = true;
         *prim_type_out = def_type->def_val.primval;
     }
+    return true;
+}
+
+static bool
+resolve_component_canon_lift_value_shape(const WASMComponent *component,
+                                         const WASMComponentValueType *value_type,
+                                         const char *position, uint32 index,
+                                         WASMComponentCanonLiftValueShape *out_shape,
+                                         WASMComponentInstance *inst)
+{
+    const WASMComponentTypes *type_entry;
+
+    memset(out_shape, 0, sizeof(*out_shape));
+
+    if (!value_type)
+        return set_component_call_error_fmt(
+            inst, "component canon lift function %s %u is missing a type",
+            position, index);
+
+    if (value_type->type == WASM_COMP_VAL_TYPE_PRIMVAL) {
+        out_shape->is_primitive = true;
+        out_shape->prim_type = value_type->type_specific.primval_type;
+        return true;
+    }
+
+    out_shape->declared_as_defined = true;
+    type_entry =
+        wasm_component_lookup_type(component, value_type->type_specific.type_idx);
+    if (!type_entry)
+        return set_component_call_error_fmt(
+            inst,
+            "component canon lift function %s %u uses unresolved type index %u",
+            position, index, value_type->type_specific.type_idx);
+
+    if (type_entry->tag != WASM_COMP_DEF_TYPE || !type_entry->type.def_val_type)
+        return set_component_call_error_fmt(
+            inst,
+            "component canon lift function %s %u uses non-value type index %u",
+            position, index, value_type->type_specific.type_idx);
+
+    if (type_entry->type.def_val_type->tag == WASM_COMP_DEF_VAL_PRIMVAL) {
+        out_shape->is_primitive = true;
+        out_shape->prim_type = type_entry->type.def_val_type->def_val.primval;
+    }
+    else {
+        out_shape->def_type = type_entry->type.def_val_type;
+    }
+
     return true;
 }
 
@@ -1764,15 +1819,18 @@ static bool
 validate_component_host_import_value_type(
     const WASMComponent *component, const WASMComponentValueType *value_type,
     const char *import_name, const char *position, uint32 index,
-    bool *is_string_out, char *error_buf, uint32 error_buf_size)
+    bool *is_string_out, bool *is_list_u8_out, char *error_buf,
+    uint32 error_buf_size)
 {
     const WASMComponentTypes *type_entry;
     WASMComponentDefValType *def_type;
     uint8 prim_type;
     uint8 ignored_core_type = 0;
     wasm_valkind_t ignored_public_kind = WASM_I32;
+    const WASMComponentValueType *element_type;
 
     *is_string_out = false;
+    *is_list_u8_out = false;
 
     if (!value_type)
         return set_component_runtime_error_fmt(
@@ -1839,13 +1897,70 @@ validate_component_host_import_value_type(
             import_name, position, index, component_prim_type_name(prim_type));
     }
 
-    if (def_type->tag == WASM_COMP_DEF_VAL_LIST
-        || def_type->tag == WASM_COMP_DEF_VAL_LIST_LEN)
+    if (def_type->tag == WASM_COMP_DEF_VAL_LIST) {
+        if (!def_type->def_val.list || !def_type->def_val.list->element_type)
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                "host component import \"%s\" %s %u uses malformed list type",
+                import_name, position, index);
+
+        element_type = def_type->def_val.list->element_type;
+        if (element_type->type == WASM_COMP_VAL_TYPE_PRIMVAL)
+            prim_type = element_type->type_specific.primval_type;
+        else {
+            type_entry = wasm_component_lookup_type(
+                component, element_type->type_specific.type_idx);
+            if (!type_entry)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "host component import \"%s\" %s %u uses unresolved type "
+                    "index %u",
+                    import_name, position, index,
+                    element_type->type_specific.type_idx);
+            if (type_entry->tag != WASM_COMP_DEF_TYPE
+                || !type_entry->type.def_val_type)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "host component import \"%s\" %s %u uses non-value type "
+                    "index %u",
+                    import_name, position, index,
+                    element_type->type_specific.type_idx);
+            if (type_entry->type.def_val_type->tag != WASM_COMP_DEF_VAL_PRIMVAL)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    !strcmp(position, "result")
+                        ? "host component import \"%s\" %s %u only supports "
+                          "list<u8> results"
+                        : "host component import \"%s\" %s %u only supports "
+                          "list<u8> parameters",
+                    import_name, position, index);
+            prim_type = type_entry->type.def_val_type->def_val.primval;
+        }
+
+        if (prim_type == WASM_COMP_PRIMVAL_U8) {
+            *is_list_u8_out = true;
+            return true;
+        }
+
         return set_component_runtime_error_fmt(
             error_buf, error_buf_size,
-            "host component import \"%s\" %s %u requires memory-backed "
-            "Canonical ABI for %s",
-            import_name, position, index, component_def_type_name(def_type->tag));
+            !strcmp(position, "result")
+                ? "host component import \"%s\" %s %u only supports list<u8> "
+                  "results"
+                : "host component import \"%s\" %s %u only supports list<u8> "
+                  "parameters",
+            import_name, position, index);
+    }
+
+    if (def_type->tag == WASM_COMP_DEF_VAL_LIST_LEN)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            !strcmp(position, "result")
+                ? "host component import \"%s\" %s %u only supports "
+                  "variable-length list<u8> results"
+                : "host component import \"%s\" %s %u only supports "
+                  "variable-length list<u8> parameters",
+            import_name, position, index);
 
     return set_component_runtime_error_fmt(
         error_buf, error_buf_size,
@@ -1865,7 +1980,9 @@ validate_component_host_import_func_type(WASMComponentInstance *inst,
     uint32 i;
 
     function->has_string_params = false;
+    function->has_list_u8_params = false;
     function->has_string_result = false;
+    function->has_list_u8_result = false;
 
     type_entry =
         wasm_component_lookup_type(&inst->module->component, function->type_idx);
@@ -1885,14 +2002,18 @@ validate_component_host_import_func_type(WASMComponentInstance *inst,
     if (func_type->params) {
         for (i = 0; i < func_type->params->count; i++) {
             bool is_string;
+            bool is_list_u8;
 
             if (!validate_component_host_import_value_type(
                     &inst->module->component,
                     func_type->params->params[i].value_type, import_name,
-                    "parameter", i, &is_string, error_buf, error_buf_size))
+                    "parameter", i, &is_string, &is_list_u8, error_buf,
+                    error_buf_size))
                 return false;
             if (is_string)
                 function->has_string_params = true;
+            if (is_list_u8)
+                function->has_list_u8_params = true;
         }
     }
 
@@ -1906,7 +2027,7 @@ validate_component_host_import_func_type(WASMComponentInstance *inst,
         if (!validate_component_host_import_value_type(
                 &inst->module->component, func_type->results->results,
                 import_name, "result", 0, &function->has_string_result,
-                error_buf, error_buf_size))
+                &function->has_list_u8_result, error_buf, error_buf_size))
             return false;
     }
 
@@ -2609,6 +2730,425 @@ static bool
 decode_component_public_string_value(
     WASMComponentInstance *inst, const wasm_component_value_t *value,
     const WASMComponentCanonLiftValueInfo *type_info, const char *position,
+    uint32 index, const uint8 **payload_out, uint32 *payload_len_out);
+
+static bool
+decode_component_public_list_u8_value(
+    WASMComponentInstance *inst, const wasm_component_value_t *value,
+    const WASMComponentCanonLiftValueInfo *type_info, const char *position,
+    uint32 index, const uint8 **payload_out, uint32 *payload_len_out);
+
+static bool
+get_component_canon_memory_bytes(WASMComponentInstance *inst,
+                                 const WASMComponentRuntimeFunc *function,
+                                 uint32 offset, uint32 size,
+                                 const char *description, uint8 **bytes_out);
+
+static bool
+call_component_canon_realloc(WASMComponentInstance *inst,
+                             const WASMComponentRuntimeFunc *function,
+                             uint32 new_size, uint32 *ptr_out);
+
+static bool
+decode_component_public_char_prefix(WASMComponentInstance *inst, const uint8 *data,
+                                    uint32 byte_size, const char *position,
+                                    uint32 index, uint32 *code_point_out,
+                                    uint32 *consumed_out)
+{
+    uint32 char_len;
+
+    if (!data || byte_size == 0)
+        return set_component_call_error_fmt(
+            inst, "component canon lift function %s %u does not contain a valid "
+                  "char value",
+            position, index);
+
+    if ((data[0] & 0x80) == 0)
+        char_len = 1;
+    else if ((data[0] & 0xE0) == 0xC0)
+        char_len = 2;
+    else if ((data[0] & 0xF0) == 0xE0)
+        char_len = 3;
+    else if ((data[0] & 0xF8) == 0xF0)
+        char_len = 4;
+    else
+        return set_component_call_error_fmt(
+            inst, "component canon lift function %s %u does not contain a valid "
+                  "char value",
+            position, index);
+
+    if (char_len > byte_size)
+        return set_component_call_error_fmt(
+            inst, "component canon lift function %s %u does not contain a valid "
+                  "char value",
+            position, index);
+
+    if (!decode_component_public_char(inst, data, char_len, position, index,
+                                      code_point_out))
+        return false;
+
+    *consumed_out = char_len;
+    return true;
+}
+
+static bool
+decode_component_public_scalar_prefix(
+    WASMComponentInstance *inst, const uint8 *data, uint32 byte_size,
+    uint8 prim_type, wasm_valkind_t public_kind, const char *position,
+    uint32 index, wasm_val_t *out_value, uint32 *consumed_out)
+{
+    uint64 leb_value = 0;
+    uint32 code_point = 0;
+    size_t offset = 0;
+    bh_leb_read_status_t status;
+
+    memset(out_value, 0, sizeof(*out_value));
+    out_value->kind = public_kind;
+
+    switch (prim_type) {
+        case WASM_COMP_PRIMVAL_BOOL:
+            if (!data || byte_size < 1 || (data[0] != 0 && data[0] != 1))
+                return set_component_call_error_fmt(
+                    inst, "component canon lift function %s %u does not contain "
+                          "a valid bool value",
+                    position, index);
+            out_value->of.i32 = data[0];
+            *consumed_out = 1;
+            return true;
+        case WASM_COMP_PRIMVAL_S8:
+            if (!data || byte_size < 1)
+                return set_component_call_error_fmt(
+                    inst, "component canon lift function %s %u does not contain "
+                          "a valid s8 value",
+                    position, index);
+            out_value->of.i32 = (int8)data[0];
+            *consumed_out = 1;
+            return true;
+        case WASM_COMP_PRIMVAL_U8:
+            if (!data || byte_size < 1)
+                return set_component_call_error_fmt(
+                    inst, "component canon lift function %s %u does not contain "
+                          "a valid u8 value",
+                    position, index);
+            out_value->of.i32 = data[0];
+            *consumed_out = 1;
+            return true;
+        case WASM_COMP_PRIMVAL_S16:
+        case WASM_COMP_PRIMVAL_S32:
+            status = bh_leb_read(data, data + byte_size,
+                                 prim_type == WASM_COMP_PRIMVAL_S16 ? 16 : 32,
+                                 true, &leb_value, &offset);
+            if (status != BH_LEB_READ_SUCCESS)
+                return set_component_call_error_fmt(
+                    inst, "component canon lift function %s %u does not contain "
+                          "a valid %s value",
+                    position, index,
+                    prim_type == WASM_COMP_PRIMVAL_S16 ? "s16" : "s32");
+            out_value->of.i32 = (int32)leb_value;
+            *consumed_out = (uint32)offset;
+            return true;
+        case WASM_COMP_PRIMVAL_U16:
+        case WASM_COMP_PRIMVAL_U32:
+            status = bh_leb_read(data, data + byte_size,
+                                 prim_type == WASM_COMP_PRIMVAL_U16 ? 16 : 32,
+                                 false, &leb_value, &offset);
+            if (status != BH_LEB_READ_SUCCESS)
+                return set_component_call_error_fmt(
+                    inst, "component canon lift function %s %u does not contain "
+                          "a valid %s value",
+                    position, index,
+                    prim_type == WASM_COMP_PRIMVAL_U16 ? "u16" : "u32");
+            out_value->of.i32 = (int32)(uint32)leb_value;
+            *consumed_out = (uint32)offset;
+            return true;
+        case WASM_COMP_PRIMVAL_S64:
+            status = bh_leb_read(data, data + byte_size, 64, true, &leb_value,
+                                 &offset);
+            if (status != BH_LEB_READ_SUCCESS)
+                return set_component_call_error_fmt(
+                    inst, "component canon lift function %s %u does not contain "
+                          "a valid s64 value",
+                    position, index);
+            out_value->of.i64 = (int64)leb_value;
+            *consumed_out = (uint32)offset;
+            return true;
+        case WASM_COMP_PRIMVAL_U64:
+            status = bh_leb_read(data, data + byte_size, 64, false, &leb_value,
+                                 &offset);
+            if (status != BH_LEB_READ_SUCCESS)
+                return set_component_call_error_fmt(
+                    inst, "component canon lift function %s %u does not contain "
+                          "a valid u64 value",
+                    position, index);
+            out_value->of.i64 = (uint64)leb_value;
+            *consumed_out = (uint32)offset;
+            return true;
+        case WASM_COMP_PRIMVAL_F32:
+            if (!data || byte_size < sizeof(float32))
+                return set_component_call_error_fmt(
+                    inst, "component canon lift function %s %u does not contain "
+                          "a valid f32 value",
+                    position, index);
+            memcpy(&out_value->of.f32, data, sizeof(float32));
+            *consumed_out = sizeof(float32);
+            return true;
+        case WASM_COMP_PRIMVAL_F64:
+            if (!data || byte_size < sizeof(float64))
+                return set_component_call_error_fmt(
+                    inst, "component canon lift function %s %u does not contain "
+                          "a valid f64 value",
+                    position, index);
+            memcpy(&out_value->of.f64, data, sizeof(float64));
+            *consumed_out = sizeof(float64);
+            return true;
+        case WASM_COMP_PRIMVAL_CHAR:
+            if (!decode_component_public_char_prefix(inst, data, byte_size,
+                                                     position, index, &code_point,
+                                                     consumed_out))
+                return false;
+            out_value->of.i32 = (int32)code_point;
+            return true;
+        default:
+            return set_component_call_error_fmt(
+                inst, "component canon lift function %s %u uses unsupported "
+                      "component scalar type %s",
+                position, index, component_prim_type_name(prim_type));
+    }
+}
+
+static bool
+set_component_composite_param_leaf_error(WASMComponentInstance *inst,
+                                         uint32 index)
+{
+    return set_component_call_error_fmt(
+        inst, "component canon lift function parameter %u only supports "
+              "tuple/record parameters with scalar leaves",
+        index);
+}
+
+static bool
+set_component_param_flattening_error(WASMComponentInstance *inst)
+{
+    return set_component_call_error(
+        inst, "component canon lift function uses unsupported Canonical ABI "
+              "flattening for parameters");
+}
+
+static bool
+flatten_component_public_composite_bytes(
+    WASMComponentInstance *inst, const WASMComponent *component,
+    const WASMComponentValueType *value_type, const uint8 *data,
+    uint32 byte_size, uint32 *offset_io, uint32 param_index,
+    const WASMFuncType *core_type, wasm_val_t *core_args,
+    uint32 *core_arg_index_io)
+{
+    WASMComponentCanonLiftValueShape shape;
+
+    if (!resolve_component_canon_lift_value_shape(component, value_type,
+                                                  "parameter", param_index,
+                                                  &shape, inst))
+        return false;
+
+    if (shape.is_primitive) {
+        wasm_val_t flattened_value;
+        uint8 expected_core_type;
+        wasm_valkind_t public_kind;
+        uint32 consumed = 0;
+
+        if (!component_scalar_prim_to_core(shape.prim_type, &expected_core_type,
+                                           &public_kind))
+            return set_component_composite_param_leaf_error(inst, param_index);
+
+        if (*core_arg_index_io >= core_type->param_count)
+            return set_component_param_flattening_error(inst);
+
+        if (core_type->types[*core_arg_index_io] != expected_core_type)
+            return set_component_call_error_fmt(
+                inst, "component canon lift function parameter %u does not match "
+                      "the core function signature",
+                param_index);
+
+        if (!decode_component_public_scalar_prefix(
+                inst, data ? data + *offset_io : NULL, byte_size - *offset_io,
+                shape.prim_type, public_kind, "parameter", param_index,
+                &flattened_value, &consumed))
+            return false;
+
+        core_args[*core_arg_index_io] = flattened_value;
+        (*offset_io) += consumed;
+        (*core_arg_index_io)++;
+        return true;
+    }
+
+    if (!shape.def_type)
+        return set_component_composite_param_leaf_error(inst, param_index);
+
+    switch (shape.def_type->tag) {
+        case WASM_COMP_DEF_VAL_RECORD:
+            if (!shape.def_type->def_val.record)
+                return set_component_composite_param_leaf_error(inst, param_index);
+            for (uint32 i = 0; i < shape.def_type->def_val.record->count; i++) {
+                if (!flatten_component_public_composite_bytes(
+                        inst, component,
+                        shape.def_type->def_val.record->fields[i].value_type, data,
+                        byte_size, offset_io, param_index, core_type, core_args,
+                        core_arg_index_io))
+                    return false;
+            }
+            return true;
+        case WASM_COMP_DEF_VAL_TUPLE:
+            if (!shape.def_type->def_val.tuple)
+                return set_component_composite_param_leaf_error(inst, param_index);
+            for (uint32 i = 0; i < shape.def_type->def_val.tuple->count; i++) {
+                if (!flatten_component_public_composite_bytes(
+                        inst, component,
+                        &shape.def_type->def_val.tuple->element_types[i], data,
+                        byte_size, offset_io, param_index, core_type, core_args,
+                        core_arg_index_io))
+                    return false;
+            }
+            return true;
+        default:
+            return set_component_composite_param_leaf_error(inst, param_index);
+    }
+}
+
+static bool
+flatten_component_public_param_value(
+    WASMComponentInstance *inst, const WASMComponentRuntimeFunc *function,
+    const WASMComponent *component, const WASMComponentValueType *value_type,
+    const wasm_component_value_t *value, uint32 param_index,
+    const WASMFuncType *core_type, wasm_val_t *core_args,
+    uint32 *core_arg_index_io)
+{
+    WASMComponentCanonLiftValueShape shape;
+    WASMComponentCanonLiftValueInfo type_info;
+
+    if (!resolve_component_canon_lift_value_shape(component, value_type, "parameter",
+                                                  param_index, &shape, inst))
+        return false;
+
+    if (!shape.is_primitive && shape.def_type
+        && (shape.def_type->tag == WASM_COMP_DEF_VAL_RECORD
+            || shape.def_type->tag == WASM_COMP_DEF_VAL_TUPLE)) {
+        const uint8 *data;
+        uint32 offset = 0;
+
+        if (!value)
+            return set_component_call_error_fmt(
+                inst, "component canon lift function parameter %u value is null",
+                param_index);
+        if (value->type.kind != WASM_COMPONENT_VALUE_TYPE_DEFINED)
+            return set_component_call_error_fmt(
+                inst, "component canon lift function parameter %u expects a "
+                      "defined component value",
+                param_index);
+
+        data = wasm_component_value_get_data(value);
+        if (value->byte_size > 0 && !data)
+            return set_component_call_error_fmt(
+                inst, "component canon lift function parameter %u is missing "
+                      "backing bytes",
+                param_index);
+
+        if (!flatten_component_public_composite_bytes(
+                inst, component, value_type, data, value->byte_size, &offset,
+                param_index, core_type, core_args, core_arg_index_io))
+            return false;
+
+        if (offset != value->byte_size)
+            return set_component_call_error_fmt(
+                inst, "component canon lift function parameter %u contains "
+                      "trailing bytes",
+                param_index);
+        return true;
+    }
+
+    if (!lookup_component_canon_lift_value_type(component, value_type, "parameter",
+                                                param_index, true, true, false,
+                                                &type_info, inst))
+        return false;
+
+    if (type_info.kind == WASM_COMP_CANON_LIFT_VALUE_SCALAR) {
+        if (*core_arg_index_io >= core_type->param_count)
+            return set_component_param_flattening_error(inst);
+
+        if (!decode_component_public_scalar_value(
+                inst, value, &type_info, "parameter", param_index,
+                &core_args[*core_arg_index_io]))
+            return false;
+
+        if (core_type->types[*core_arg_index_io] != type_info.core_type)
+            return set_component_call_error_fmt(
+                inst, "component canon lift function parameter %u does not match "
+                      "the core function signature",
+                param_index);
+
+        (*core_arg_index_io)++;
+        return true;
+    }
+    else {
+        const uint8 *payload;
+        uint32 payload_len;
+        uint32 guest_ptr = 0;
+        uint8 *guest_bytes = NULL;
+
+        if (*core_arg_index_io + 1 >= core_type->param_count)
+            return set_component_param_flattening_error(inst);
+
+        if (type_info.kind == WASM_COMP_CANON_LIFT_VALUE_STRING) {
+            if (function->string_encoding != WASM_COMP_RUNTIME_STRING_ENCODING_UTF8)
+                return set_component_call_error(
+                    inst, "component canon lift function only supports UTF-8 "
+                          "string encoding");
+
+            if (!decode_component_public_string_value(inst, value, &type_info,
+                                                      "parameter", param_index,
+                                                      &payload, &payload_len))
+                return false;
+
+            if (!call_component_canon_realloc(inst, function, payload_len,
+                                              &guest_ptr))
+                return false;
+        }
+        else if (!decode_component_public_list_u8_value(
+                     inst, value, &type_info, "parameter", param_index,
+                     &payload, &payload_len)
+                 || !call_component_canon_realloc(inst, function, payload_len,
+                                                  &guest_ptr))
+            return false;
+
+        if (payload_len > 0) {
+            if (!get_component_canon_memory_bytes(
+                    inst, function, guest_ptr, payload_len,
+                    type_info.kind == WASM_COMP_CANON_LIFT_VALUE_STRING
+                        ? "string parameter buffer"
+                        : "list<u8> parameter buffer",
+                    &guest_bytes))
+                return false;
+            memcpy(guest_bytes, payload, payload_len);
+        }
+
+        if (core_type->types[*core_arg_index_io] != VALUE_TYPE_I32
+            || core_type->types[*core_arg_index_io + 1] != VALUE_TYPE_I32)
+            return set_component_call_error_fmt(
+                inst, "component canon lift function parameter %u does not match "
+                      "the core function signature",
+                param_index);
+
+        core_args[*core_arg_index_io].kind = WASM_I32;
+        core_args[*core_arg_index_io].of.i32 = (int32)guest_ptr;
+        core_args[*core_arg_index_io + 1].kind = WASM_I32;
+        core_args[*core_arg_index_io + 1].of.i32 = (int32)payload_len;
+        (*core_arg_index_io) += 2;
+        return true;
+    }
+}
+
+static bool
+decode_component_public_string_value(
+    WASMComponentInstance *inst, const wasm_component_value_t *value,
+    const WASMComponentCanonLiftValueInfo *type_info, const char *position,
     uint32 index, const uint8 **payload_out, uint32 *payload_len_out)
 {
     const uint8 *data = wasm_component_value_get_data(value);
@@ -3082,7 +3622,6 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
     wasm_val_t stack_args[16];
     wasm_val_t *core_args = stack_args;
     uint32 expected_result_count;
-    uint32 expected_core_param_count = 0;
     uint32 i, core_arg_index = 0;
     bool call_succeeded = false;
     bool have_memory_result_ptr = false;
@@ -3100,7 +3639,7 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
     wasm_runtime_clear_exception((WASMModuleInstanceCommon *)inst);
 
     if (function->kind == WASM_COMP_RUNTIME_FUNC_HOST_IMPORT) {
-        wasm_component_value_t callback_results[1] = { { { 0 } } };
+        wasm_component_value_t callback_results[1];
         wasm_val_t ignored = { 0 };
         char host_error_buf[128] = { 0 };
 
@@ -3128,6 +3667,8 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
                 inst,
                 "host component function expects %u results but received %u",
                 expected_result_count, num_results);
+        memset(callback_results, 0, sizeof(callback_results));
+
         if (num_args > 0 && !args)
             return set_component_call_error(
                 inst, "host component function arguments buffer is null");
@@ -3138,10 +3679,10 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
         for (i = 0; i < component_type->params->count; i++) {
             WASMComponentCanonLiftValueInfo type_info;
 
-        if (!lookup_component_canon_lift_value_type(
+            if (!lookup_component_canon_lift_value_type(
                     &inst->module->component,
                     component_type->params->params[i].value_type, "parameter", i,
-                    true, false, false, &type_info, inst))
+                    true, true, false, &type_info, inst))
                 return false;
 
             if (type_info.kind == WASM_COMP_CANON_LIFT_VALUE_SCALAR) {
@@ -3154,9 +3695,14 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
                 const uint8 *payload;
                 uint32 payload_len;
 
-                if (!decode_component_public_string_value(inst, &args[i], &type_info,
-                                                          "parameter", i, &payload,
-                                                          &payload_len))
+                if ((type_info.kind == WASM_COMP_CANON_LIFT_VALUE_STRING
+                     && !decode_component_public_string_value(
+                         inst, &args[i], &type_info, "parameter", i, &payload,
+                         &payload_len))
+                    || (type_info.kind == WASM_COMP_CANON_LIFT_VALUE_LIST_U8
+                        && !decode_component_public_list_u8_value(
+                            inst, &args[i], &type_info, "parameter", i,
+                            &payload, &payload_len)))
                     return false;
             }
         }
@@ -3177,7 +3723,7 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
         if (expected_result_count == 1) {
             if (!lookup_component_canon_lift_value_type(
                     &inst->module->component, component_type->results->results,
-                    "result", 0, true, false, false, &result_info, inst)) {
+                    "result", 0, true, false, true, &result_info, inst)) {
                 wasm_component_value_destroy(&callback_results[0]);
                 return false;
             }
@@ -3194,9 +3740,14 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
                 const uint8 *payload;
                 uint32 payload_len;
 
-                if (!decode_component_public_string_value(
-                        inst, &callback_results[0], &result_info, "result", 0,
-                        &payload, &payload_len)) {
+                if ((result_info.kind == WASM_COMP_CANON_LIFT_VALUE_STRING
+                     && !decode_component_public_string_value(
+                         inst, &callback_results[0], &result_info, "result", 0,
+                         &payload, &payload_len))
+                    || (result_info.kind == WASM_COMP_CANON_LIFT_VALUE_LIST_U8
+                        && !decode_component_public_list_u8_value(
+                            inst, &callback_results[0], &result_info, "result",
+                            0, &payload, &payload_len))) {
                     wasm_component_value_destroy(&callback_results[0]);
                     return false;
                 }
@@ -3273,23 +3824,6 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
                       : "component canon lift function does not support memory64 "
                         "list<u8> Canonical ABI");
 
-    for (i = 0; i < component_type->params->count; i++) {
-        WASMComponentCanonLiftValueInfo type_info;
-
-        if (!lookup_component_canon_lift_value_type(
-                &inst->module->component, component_type->params->params[i].value_type,
-                "parameter", i, true, true, false, &type_info, inst))
-            return false;
-
-        expected_core_param_count +=
-            type_info.kind == WASM_COMP_CANON_LIFT_VALUE_SCALAR ? 1 : 2;
-    }
-
-    if (expected_core_param_count != core_type->param_count)
-        return set_component_call_error(
-            inst, "component canon lift function uses unsupported Canonical ABI "
-                  "flattening for parameters");
-
     if (expected_result_count == 1) {
         if (!lookup_component_canon_lift_value_type(
                 &inst->module->component, component_type->results->results, "result",
@@ -3326,102 +3860,19 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
     memset(core_args, 0, sizeof(wasm_val_t) * core_type->param_count);
 
     for (i = 0; i < component_type->params->count; i++) {
-        WASMComponentCanonLiftValueInfo type_info;
-
-        if (!lookup_component_canon_lift_value_type(
-                &inst->module->component, component_type->params->params[i].value_type,
-                "parameter", i, true, true, false, &type_info, inst)) {
+        if (!flatten_component_public_param_value(
+                inst, function, &inst->module->component,
+                component_type->params->params[i].value_type, &args[i], i,
+                core_type, core_args, &core_arg_index)) {
             call_succeeded = false;
             goto cleanup;
         }
+    }
 
-        if (type_info.kind == WASM_COMP_CANON_LIFT_VALUE_SCALAR) {
-            if (!decode_component_public_scalar_value(inst, &args[i], &type_info,
-                                                      "parameter", i,
-                                                      &core_args[core_arg_index])) {
-                call_succeeded = false;
-                goto cleanup;
-            }
-            if (core_type->types[core_arg_index] != type_info.core_type) {
-                set_component_call_error_fmt(
-                    inst, "component canon lift function parameter %u does not "
-                          "match the core function signature",
-                    i);
-                call_succeeded = false;
-                goto cleanup;
-            }
-            core_arg_index++;
-        }
-        else {
-            const uint8 *payload;
-            uint32 payload_len;
-            uint32 guest_ptr = 0;
-            uint8 *guest_bytes = NULL;
-
-            if (type_info.kind == WASM_COMP_CANON_LIFT_VALUE_STRING) {
-                if (function->string_encoding
-                    != WASM_COMP_RUNTIME_STRING_ENCODING_UTF8) {
-                    set_component_call_error(
-                        inst, "component canon lift function only supports UTF-8 "
-                              "string encoding");
-                    call_succeeded = false;
-                    goto cleanup;
-                }
-
-                if (!decode_component_public_string_value(inst, &args[i], &type_info,
-                                                          "parameter", i, &payload,
-                                                          &payload_len)) {
-                    call_succeeded = false;
-                    goto cleanup;
-                }
-
-                if (!call_component_canon_realloc(inst, function, payload_len,
-                                                  &guest_ptr)) {
-                    call_succeeded = false;
-                    goto cleanup;
-                }
-            }
-            else if (!decode_component_public_list_u8_value(
-                         inst, &args[i], &type_info, "parameter", i, &payload,
-                         &payload_len)
-                || !call_component_canon_realloc(inst, function, payload_len,
-                                                 &guest_ptr)) {
-                call_succeeded = false;
-                goto cleanup;
-            }
-
-            if (payload_len > 0) {
-                if (!get_component_canon_memory_bytes(inst, function, guest_ptr,
-                                                      payload_len,
-                                                      type_info.kind
-                                                              == WASM_COMP_CANON_LIFT_VALUE_STRING
-                                                          ? "string parameter "
-                                                            "buffer"
-                                                          : "list<u8> "
-                                                            "parameter buffer",
-                                                      &guest_bytes)) {
-                    call_succeeded = false;
-                    goto cleanup;
-                }
-                memcpy(guest_bytes, payload, payload_len);
-            }
-
-            if (core_type->types[core_arg_index] != VALUE_TYPE_I32
-                || core_type->types[core_arg_index + 1] != VALUE_TYPE_I32) {
-                set_component_call_error_fmt(
-                    inst, "component canon lift function parameter %u does not "
-                          "match the core function signature",
-                    i);
-                call_succeeded = false;
-                goto cleanup;
-            }
-
-            core_args[core_arg_index].kind = WASM_I32;
-            core_args[core_arg_index].of.i32 = (int32)guest_ptr;
-            core_args[core_arg_index + 1].kind = WASM_I32;
-            core_args[core_arg_index + 1].of.i32 = (int32)payload_len;
-            core_arg_index += 2;
-        }
+    if (core_arg_index != core_type->param_count) {
+        set_component_param_flattening_error(inst);
+        call_succeeded = false;
+        goto cleanup;
     }
 
     exec_env = wasm_runtime_get_exec_env_singleton(
@@ -3606,10 +4057,15 @@ wasm_component_call_internal(WASMComponentInstance *inst,
                                          &component_type))
             return false;
 
-        if (function->has_string_params || function->has_string_result)
+        if (function->has_string_params || function->has_string_result
+            || function->has_list_u8_params || function->has_list_u8_result)
             return set_component_call_error(
-                inst, "host component function uses string values; call through "
-                      "the component value API");
+                inst,
+                function->has_string_params || function->has_string_result
+                    ? "host component function uses string values; call through "
+                      "the component value API"
+                    : "host component function uses memory-backed values; call "
+                      "through the component value API");
 
         if (!component_type || !component_type->params)
             return set_component_call_error(
