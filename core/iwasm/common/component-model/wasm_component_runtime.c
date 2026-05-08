@@ -7459,10 +7459,8 @@ count_nested_component_local_bindings(const WASMComponent *nested_component,
                 break;
             }
             case WASM_COMP_SECTION_CORE_MODULE:
-                return set_component_runtime_error_fmt(
-                    error_buf, error_buf_size,
-                    "nested component core module sections are not supported "
-                    "yet");
+                (*core_module_count)++;
+                break;
             case WASM_COMP_SECTION_CORE_INSTANCE:
                 return set_component_runtime_error_fmt(
                     error_buf, error_buf_size,
@@ -8419,6 +8417,15 @@ build_component_runtime_instance_from_component(
         switch (section->id) {
             case WASM_COMP_SECTION_CORE_CUSTOM:
             case WASM_COMP_SECTION_TYPE:
+                break;
+            case WASM_COMP_SECTION_CORE_MODULE:
+                if (!section->parsed.core_module
+                    || !section->parsed.core_module->module_handle
+                    || !append_nested_component_local_core_module(
+                        &bindings,
+                        (wasm_module_t)section->parsed.core_module->module_handle,
+                        error_buf, error_buf_size))
+                    goto fail;
                 break;
             case WASM_COMP_SECTION_COMPONENT:
                 if (!append_nested_component_definition(

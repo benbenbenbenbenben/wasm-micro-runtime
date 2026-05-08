@@ -15,7 +15,7 @@ The main remaining gaps are now centered on:
 - broader composite component values and memory-backed leaves inside composites
 - operational resource semantics
 - remaining public host API limitations
-- nested core-module / core-instance / core-type runtime support
+- nested core-instance / core-type runtime support
 
 ## 1. What is implemented today
 
@@ -313,13 +313,17 @@ So resources have a foundation, not a finished runtime.
 
 This remains one of the clearest hard gaps.
 
+Nested components now support:
+
+- nested local `core module` sections
+- export/re-export of those nested core modules through nested component instances
+
 Nested components still reject:
 
-- nested `core module` sections
 - nested `core instance` sections
 - nested `core type` sections
 
-The runtime can still thread some existing core handles through component graphs, but it does **not** yet construct a full nested core runtime.
+The runtime can now thread nested local core-module handles through component graphs, but it still does **not** construct a full nested core runtime.
 
 ## 9. Remaining spec limitations still apply
 
