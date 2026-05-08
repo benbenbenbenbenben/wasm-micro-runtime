@@ -18,6 +18,7 @@ static std::vector<std::string> component_files = {
     "complex_with_host.wasm",
     "complex.wasm",
     "list_u8_post_return.component.wasm",
+    "multivalue_record_tuple.component.wasm",
     "logging_service.component.wasm",
     "processor_and_logging_merged_wac_plug.wasm",
     "processor_service.component.wasm",
@@ -1401,6 +1402,35 @@ append_component_s32_payload(std::vector<uint8_t> *payload, int32_t value)
         }
         payload->push_back(byte);
     }
+}
+
+static void
+append_component_u64_payload(std::vector<uint8_t> *payload, uint64_t value)
+{
+    do {
+        uint8_t byte = (uint8_t)(value & 0x7f);
+        value >>= 7;
+        if (value != 0) {
+            byte |= 0x80;
+        }
+        payload->push_back(byte);
+    } while (value != 0);
+}
+
+static void
+append_component_f32_payload(std::vector<uint8_t> *payload, float value)
+{
+    uint8_t bytes[sizeof(value)];
+    memcpy(bytes, &value, sizeof(bytes));
+    payload->insert(payload->end(), bytes, bytes + sizeof(bytes));
+}
+
+static void
+append_component_f64_payload(std::vector<uint8_t> *payload, double value)
+{
+    uint8_t bytes[sizeof(value)];
+    memcpy(bytes, &value, sizeof(bytes));
+    payload->insert(payload->end(), bytes, bytes + sizeof(bytes));
 }
 
 static bool
@@ -6916,6 +6946,274 @@ TEST_F(BinaryParserTest, TestPublicComponentCallListU8CopiesBeforePostReturn)
     wasm_component_value_destroy(&second_arg[0]);
     wasm_component_value_destroy(&first_result);
     wasm_component_value_destroy(&first_arg[0]);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest, TestPublicComponentCallSupportsTupleLiftResult)
+{
+    bool ret = helper->read_wasm_file("multivalue_record_tuple.component.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "public-component-call-tuple-result";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func =
+        wasm_runtime_lookup_component_function(module_inst, "tuple-result");
+    ASSERT_NE(func, nullptr);
+
+    std::vector<uint8_t> expected_payload;
+    wasm_component_value_t result = {};
+
+    append_component_s32_payload(&expected_payload, 42);
+    append_component_u64_payload(&expected_payload, 7);
+    append_component_f32_payload(&expected_payload, 1.5f);
+
+    ASSERT_TRUE(
+        wasm_runtime_call_component_values(module_inst, func, 1, &result, 0, nullptr))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(result.type.kind, WASM_COMPONENT_VALUE_TYPE_DEFINED);
+    ASSERT_EQ(result.storage_kind, WASM_COMPONENT_VALUE_STORAGE_INLINE);
+    ASSERT_EQ(result.byte_size, expected_payload.size());
+    ASSERT_EQ(memcmp(wasm_component_value_get_data(&result), expected_payload.data(),
+                     expected_payload.size()),
+              0);
+
+    wasm_component_value_destroy(&result);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest, TestPublicComponentCallSupportsNestedRecordLiftResult)
+{
+    bool ret = helper->read_wasm_file("multivalue_record_tuple.component.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "public-component-call-record-result";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func =
+        wasm_runtime_lookup_component_function(module_inst, "record-result");
+    ASSERT_NE(func, nullptr);
+
+    std::vector<uint8_t> expected_payload;
+    wasm_component_value_t result = {};
+
+    append_component_s32_payload(&expected_payload, -17);
+    append_component_u64_payload(&expected_payload, UINT64_MAX);
+    append_component_f64_payload(&expected_payload, 6.25);
+
+    ASSERT_TRUE(
+        wasm_runtime_call_component_values(module_inst, func, 1, &result, 0, nullptr))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(result.type.kind, WASM_COMPONENT_VALUE_TYPE_DEFINED);
+    ASSERT_EQ(result.storage_kind, WASM_COMPONENT_VALUE_STORAGE_OWNED);
+    ASSERT_EQ(result.byte_size, expected_payload.size());
+    ASSERT_GT(result.byte_size, WASM_COMPONENT_VALUE_INLINE_STORAGE_SIZE);
+    ASSERT_EQ(memcmp(wasm_component_value_get_data(&result), expected_payload.data(),
+                     expected_payload.size()),
+              0);
+
+    wasm_component_value_destroy(&result);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest, TestPublicComponentCallRejectsCompositeResultOnRawApi)
+{
+    bool ret = helper->read_wasm_file("multivalue_record_tuple.component.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "public-component-call-composite-result-raw-api";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func =
+        wasm_runtime_lookup_component_function(module_inst, "tuple-result");
+    ASSERT_NE(func, nullptr);
+
+    wasm_val_t result = {};
+    ASSERT_FALSE(
+        wasm_runtime_call_component(module_inst, func, 1, &result, 0, nullptr));
+    ASSERT_STREQ(wasm_runtime_get_exception(module_inst),
+                 "component canon lift function only supports scalar signatures "
+                 "with at most one result");
+
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest, TestPublicComponentCallRejectsCompositeResultMalformedCoreShape)
+{
+    bool ret = helper->read_wasm_file("multivalue_record_tuple.component.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "public-component-call-composite-result-malformed";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func =
+        wasm_runtime_lookup_component_function(module_inst, "tuple-result");
+    ASSERT_NE(func, nullptr);
+
+    const int32_t tuple_type_idx = append_component_tuple_type(
+        (WASMComponentModule *)module,
+        { make_component_primitive_value_type(WASM_COMP_PRIMVAL_S32),
+          make_component_primitive_value_type(WASM_COMP_PRIMVAL_U64),
+          make_component_primitive_value_type(WASM_COMP_PRIMVAL_F32),
+          make_component_primitive_value_type(WASM_COMP_PRIMVAL_S32) });
+    ASSERT_GE(tuple_type_idx, 0);
+
+    WASMComponentFuncType *func_type = lookup_local_component_func_type(
+        (WASMComponentModule *)module, func->type_idx);
+    ASSERT_NE(func_type, nullptr);
+    ASSERT_NE(func_type->results, nullptr);
+    ASSERT_NE(func_type->results->results, nullptr);
+    func_type->results->results->type = WASM_COMP_VAL_TYPE_IDX;
+    func_type->results->results->type_specific.type_idx =
+        (uint32_t)tuple_type_idx;
+
+    wasm_component_value_t result = {};
+    ASSERT_FALSE(
+        wasm_runtime_call_component_values(module_inst, func, 1, &result, 0, nullptr));
+    ASSERT_STREQ(wasm_runtime_get_exception(module_inst),
+                 "component canon lift function uses unsupported Canonical ABI "
+                 "flattening for results");
+
+    wasm_component_value_destroy(&result);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest, TestPublicComponentCallRejectsCompositeResultNonScalarLeaf)
+{
+    bool ret = helper->read_wasm_file("multivalue_record_tuple.component.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "public-component-call-composite-result-nonscalar";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func =
+        wasm_runtime_lookup_component_function(module_inst, "tuple-result");
+    ASSERT_NE(func, nullptr);
+
+    const int32_t record_type_idx = append_component_record_type(
+        (WASMComponentModule *)module,
+        { { "lhs", make_component_primitive_value_type(WASM_COMP_PRIMVAL_S32) },
+          { "rhs",
+            make_component_primitive_value_type(WASM_COMP_PRIMVAL_STRING) } });
+    ASSERT_GE(record_type_idx, 0);
+
+    WASMComponentFuncType *func_type = lookup_local_component_func_type(
+        (WASMComponentModule *)module, func->type_idx);
+    ASSERT_NE(func_type, nullptr);
+    ASSERT_NE(func_type->results, nullptr);
+    ASSERT_NE(func_type->results->results, nullptr);
+    func_type->results->results->type = WASM_COMP_VAL_TYPE_IDX;
+    func_type->results->results->type_specific.type_idx =
+        (uint32_t)record_type_idx;
+
+    wasm_component_value_t result = {};
+    ASSERT_FALSE(
+        wasm_runtime_call_component_values(module_inst, func, 1, &result, 0, nullptr));
+    ASSERT_STREQ(wasm_runtime_get_exception(module_inst),
+                 "component canon lift function result 0 only supports "
+                 "tuple/record results with scalar leaves");
+
+    wasm_component_value_destroy(&result);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest, TestPublicComponentCallRejectsInvalidCompositeResultLeafValue)
+{
+    bool ret = helper->read_wasm_file("multivalue_record_tuple.component.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "public-component-call-composite-result-invalid-leaf";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func =
+        wasm_runtime_lookup_component_function(module_inst, "invalid-bool-result");
+    ASSERT_NE(func, nullptr);
+
+    wasm_component_value_t result = {};
+    ASSERT_FALSE(
+        wasm_runtime_call_component_values(module_inst, func, 1, &result, 0, nullptr));
+    ASSERT_STREQ(wasm_runtime_get_exception(module_inst),
+                 "component canon lift function result 0 expects bool 0 or 1");
+
+    wasm_component_value_destroy(&result);
     wasm_runtime_deinstantiate(module_inst);
     wasm_runtime_unload(module);
 }

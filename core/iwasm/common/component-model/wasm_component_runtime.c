@@ -2062,7 +2062,8 @@ is_valid_unicode_scalar(uint32 value)
 }
 
 static bool
-validate_component_scalar_value(WASMComponentInstance *inst, wasm_val_t *value,
+validate_component_scalar_value(WASMComponentInstance *inst,
+                                const wasm_val_t *value,
                                 wasm_valkind_t expected_kind, uint8 prim_type,
                                 const char *position, uint32 index)
 {
@@ -3249,6 +3250,266 @@ copy_component_memory_payload(WASMComponentInstance *inst, const uint8 *payload,
 static bool
 init_component_public_scalar_result(
     WASMComponentInstance *inst, const WASMComponentCanonLiftValueInfo *type_info,
+    const wasm_val_t *result, wasm_component_value_t *value);
+
+typedef struct WASMComponentCompositeFlatLeaf {
+    WASMComponentCanonLiftValueInfo type_info;
+} WASMComponentCompositeFlatLeaf;
+
+typedef struct WASMComponentResultPayloadBuilder {
+    uint8 inline_storage[WASM_COMPONENT_VALUE_INLINE_STORAGE_SIZE];
+    uint8 *storage;
+    uint32 size;
+    uint32 capacity;
+} WASMComponentResultPayloadBuilder;
+
+static bool
+set_component_composite_result_leaf_error(WASMComponentInstance *inst,
+                                          uint32 index)
+{
+    return set_component_call_error_fmt(
+        inst, "component canon lift function result %u only supports "
+              "tuple/record results with scalar leaves",
+        index);
+}
+
+static bool
+set_component_result_flattening_error(WASMComponentInstance *inst)
+{
+    return set_component_call_error(
+        inst, "component canon lift function uses unsupported Canonical ABI "
+              "flattening for results");
+}
+
+static void
+init_component_result_payload_builder(
+    WASMComponentResultPayloadBuilder *builder)
+{
+    memset(builder, 0, sizeof(*builder));
+    builder->storage = builder->inline_storage;
+    builder->capacity = sizeof(builder->inline_storage);
+}
+
+static void
+destroy_component_result_payload_builder(
+    WASMComponentResultPayloadBuilder *builder)
+{
+    if (builder->storage != builder->inline_storage && builder->storage)
+        wasm_runtime_free(builder->storage);
+}
+
+static bool
+append_component_result_payload_bytes(
+    WASMComponentInstance *inst, WASMComponentResultPayloadBuilder *builder,
+    const uint8 *bytes, uint32 byte_count)
+{
+    uint32 required_capacity;
+    uint32 new_capacity;
+    uint8 *new_storage;
+
+    if (byte_count == 0)
+        return true;
+
+    if (!bytes)
+        return set_component_call_error(
+            inst, "component canon lift function result is missing backing bytes");
+
+    required_capacity = builder->size + byte_count;
+    if (required_capacity < builder->size)
+        return set_component_call_error(
+            inst, "component canon lift function result is too large");
+
+    if (required_capacity > builder->capacity) {
+        new_capacity = builder->capacity;
+        while (new_capacity < required_capacity) {
+            if (new_capacity > UINT32_MAX / 2)
+                new_capacity = required_capacity;
+            else
+                new_capacity *= 2;
+        }
+
+        new_storage = wasm_runtime_malloc(new_capacity);
+        if (!new_storage)
+            return set_component_call_error(
+                inst, "component canon lift function could not allocate result "
+                      "storage");
+
+        if (builder->size > 0)
+            memcpy(new_storage, builder->storage, builder->size);
+        if (builder->storage != builder->inline_storage)
+            wasm_runtime_free(builder->storage);
+        builder->storage = new_storage;
+        builder->capacity = new_capacity;
+    }
+
+    memcpy(builder->storage + builder->size, bytes, byte_count);
+    builder->size += byte_count;
+    return true;
+}
+
+static bool
+finish_component_result_payload(
+    wasm_component_value_t *value, WASMComponentResultPayloadBuilder *builder)
+{
+    wasm_component_value_destroy(value);
+    value->type.kind = WASM_COMPONENT_VALUE_TYPE_DEFINED;
+    value->byte_size = builder->size;
+
+    if (builder->size == 0) {
+        builder->storage = builder->inline_storage;
+        builder->capacity = sizeof(builder->inline_storage);
+        return true;
+    }
+
+    if (builder->storage == builder->inline_storage) {
+        value->storage_kind = WASM_COMPONENT_VALUE_STORAGE_INLINE;
+        memcpy(value->storage.inline_storage, builder->inline_storage,
+               builder->size);
+        return true;
+    }
+
+    value->storage_kind = WASM_COMPONENT_VALUE_STORAGE_OWNED;
+    value->storage.owned_data = builder->storage;
+    builder->storage = builder->inline_storage;
+    builder->capacity = sizeof(builder->inline_storage);
+    builder->size = 0;
+    return true;
+}
+
+static bool
+collect_component_composite_result_leaves(
+    WASMComponentInstance *inst, const WASMComponent *component,
+    const WASMComponentValueType *value_type, uint32 result_index,
+    WASMComponentCompositeFlatLeaf *flat_leaves, uint32 leaf_capacity,
+    uint32 *leaf_count_io)
+{
+    WASMComponentCanonLiftValueShape shape;
+
+    if (!resolve_component_canon_lift_value_shape(component, value_type, "result",
+                                                  result_index, &shape, inst))
+        return false;
+
+    if (shape.is_primitive) {
+        WASMComponentCompositeFlatLeaf *flat_leaf;
+
+        if (*leaf_count_io >= leaf_capacity)
+            return set_component_result_flattening_error(inst);
+
+        flat_leaf = &flat_leaves[*leaf_count_io];
+        memset(flat_leaf, 0, sizeof(*flat_leaf));
+        flat_leaf->type_info.kind = WASM_COMP_CANON_LIFT_VALUE_SCALAR;
+        flat_leaf->type_info.prim_type = shape.prim_type;
+        if (!component_scalar_prim_to_core(shape.prim_type,
+                                           &flat_leaf->type_info.core_type,
+                                           &flat_leaf->type_info.public_kind))
+            return set_component_composite_result_leaf_error(inst, result_index);
+        (*leaf_count_io)++;
+        return true;
+    }
+
+    if (!shape.def_type)
+        return set_component_composite_result_leaf_error(inst, result_index);
+
+    switch (shape.def_type->tag) {
+        case WASM_COMP_DEF_VAL_RECORD:
+            if (!shape.def_type->def_val.record)
+                return set_component_composite_result_leaf_error(inst, result_index);
+            for (uint32 i = 0; i < shape.def_type->def_val.record->count; i++) {
+                if (!collect_component_composite_result_leaves(
+                        inst, component,
+                        shape.def_type->def_val.record->fields[i].value_type,
+                        result_index, flat_leaves, leaf_capacity, leaf_count_io))
+                    return false;
+            }
+            return true;
+        case WASM_COMP_DEF_VAL_TUPLE:
+            if (!shape.def_type->def_val.tuple)
+                return set_component_composite_result_leaf_error(inst, result_index);
+            for (uint32 i = 0; i < shape.def_type->def_val.tuple->count; i++) {
+                if (!collect_component_composite_result_leaves(
+                        inst, component,
+                        &shape.def_type->def_val.tuple->element_types[i],
+                        result_index, flat_leaves, leaf_capacity, leaf_count_io))
+                    return false;
+            }
+            return true;
+        default:
+            return set_component_composite_result_leaf_error(inst, result_index);
+    }
+}
+
+static bool
+validate_component_composite_result_signature(
+    WASMComponentInstance *inst, const WASMComponent *component,
+    const WASMComponentValueType *value_type, uint32 result_index,
+    const WASMFuncType *core_type,
+    WASMComponentCompositeFlatLeaf *flat_leaves, uint32 flat_leaf_capacity,
+    uint32 *flat_leaf_count_out)
+{
+    uint32 i;
+
+    *flat_leaf_count_out = 0;
+    if (!collect_component_composite_result_leaves(
+            inst, component, value_type, result_index, flat_leaves,
+            flat_leaf_capacity, flat_leaf_count_out))
+        return false;
+
+    if (*flat_leaf_count_out != core_type->result_count)
+        return set_component_result_flattening_error(inst);
+
+    for (i = 0; i < *flat_leaf_count_out; i++) {
+        if (core_type->types[core_type->param_count + i]
+            != flat_leaves[i].type_info.core_type)
+            return set_component_call_error(
+                inst, "component canon lift function result does not match the "
+                      "core function signature");
+    }
+
+    return true;
+}
+
+static bool
+init_component_public_composite_result(
+    WASMComponentInstance *inst,
+    const WASMComponentCompositeFlatLeaf *flat_leaves, uint32 flat_leaf_count,
+    const wasm_val_t *core_results, wasm_component_value_t *value)
+{
+    WASMComponentResultPayloadBuilder builder;
+    wasm_component_value_t leaf_value = { 0 };
+    const uint8 *leaf_bytes;
+    uint32 i;
+
+    init_component_result_payload_builder(&builder);
+
+    for (i = 0; i < flat_leaf_count; i++) {
+        if (!validate_component_scalar_value(inst, &core_results[i],
+                                             flat_leaves[i].type_info.public_kind,
+                                             flat_leaves[i].type_info.prim_type,
+                                             "result", 0)
+            || !init_component_public_scalar_result(
+                inst, &flat_leaves[i].type_info, &core_results[i], &leaf_value)) {
+            destroy_component_result_payload_builder(&builder);
+            return false;
+        }
+
+        leaf_bytes = wasm_component_value_get_data(&leaf_value);
+        if (!append_component_result_payload_bytes(inst, &builder, leaf_bytes,
+                                                   leaf_value.byte_size)) {
+            destroy_component_result_payload_builder(&builder);
+            return false;
+        }
+    }
+
+    if (!finish_component_result_payload(value, &builder)) {
+        destroy_component_result_payload_builder(&builder);
+        return false;
+    }
+    return true;
+}
+
+static bool
+init_component_public_scalar_result(
+    WASMComponentInstance *inst, const WASMComponentCanonLiftValueInfo *type_info,
     const wasm_val_t *result, wasm_component_value_t *value)
 {
     uint8 storage[16];
@@ -3617,13 +3878,18 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
     WASMComponentFuncType *component_type = NULL;
     WASMFuncType *core_type = NULL;
     WASMExecEnv *exec_env;
+    WASMComponentCanonLiftValueShape result_shape;
+    WASMComponentCompositeFlatLeaf stack_result_leaves[16];
+    WASMComponentCompositeFlatLeaf *result_leaves = stack_result_leaves;
     WASMComponentCanonLiftValueInfo result_info;
-    wasm_val_t core_result = { 0 };
     wasm_val_t stack_args[16];
     wasm_val_t *core_args = stack_args;
+    wasm_val_t stack_results[16];
+    wasm_val_t *core_results = stack_results;
     uint32 expected_result_count;
-    uint32 i, core_arg_index = 0;
+    uint32 i, core_arg_index = 0, flat_result_count = 0;
     bool call_succeeded = false;
+    bool has_composite_result = false;
     bool have_memory_result_ptr = false;
     uint32 memory_result_retptr = 0;
 
@@ -3821,29 +4087,64 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
                                  == WASM_COMP_RUNTIME_CANON_LIFT_MEMORY_RESULT_STRING
                       ? "component canon lift function does not support memory64 "
                         "string Canonical ABI"
-                      : "component canon lift function does not support memory64 "
-                        "list<u8> Canonical ABI");
+                       : "component canon lift function does not support memory64 "
+                         "list<u8> Canonical ABI");
 
     if (expected_result_count == 1) {
-        if (!lookup_component_canon_lift_value_type(
+        if (!resolve_component_canon_lift_value_shape(
                 &inst->module->component, component_type->results->results, "result",
-                0, true, false, true, &result_info, inst))
+                0, &result_shape, inst))
             return false;
 
-        if (result_info.kind == WASM_COMP_CANON_LIFT_VALUE_STRING
-            || result_info.kind == WASM_COMP_CANON_LIFT_VALUE_LIST_U8) {
-            if (core_type->result_count != 1
-                || core_type->types[core_type->param_count] != VALUE_TYPE_I32)
-                return set_component_call_error(
-                    inst, "component canon lift function only supports a single "
-                          "memory-backed result returned through memory");
+        has_composite_result =
+            !result_shape.is_primitive && result_shape.def_type
+            && (result_shape.def_type->tag == WASM_COMP_DEF_VAL_RECORD
+                || result_shape.def_type->tag == WASM_COMP_DEF_VAL_TUPLE);
+
+        if (has_composite_result) {
+            if (core_type->result_count
+                > sizeof(stack_result_leaves) / sizeof(stack_result_leaves[0])) {
+                result_leaves = wasm_runtime_malloc(
+                    sizeof(WASMComponentCompositeFlatLeaf)
+                    * core_type->result_count);
+                if (!result_leaves)
+                    return set_component_call_error(
+                        inst, "component canon lift function could not allocate "
+                              "result flattening metadata");
+            }
+
+            if (!validate_component_composite_result_signature(
+                    inst, &inst->module->component,
+                    component_type->results->results, 0, core_type, result_leaves,
+                    core_type->result_count, &flat_result_count))
+                goto cleanup;
         }
-        else if (core_type->result_count != 1
-                 || core_type->types[core_type->param_count]
-                        != result_info.core_type)
-            return set_component_call_error(
-                inst, "component canon lift function result does not match the "
-                      "core function signature");
+        else {
+            if (!lookup_component_canon_lift_value_type(
+                    &inst->module->component, component_type->results->results,
+                    "result", 0, true, false, true, &result_info, inst))
+                goto cleanup;
+
+            if (result_info.kind == WASM_COMP_CANON_LIFT_VALUE_STRING
+                || result_info.kind == WASM_COMP_CANON_LIFT_VALUE_LIST_U8) {
+                if (core_type->result_count != 1
+                    || core_type->types[core_type->param_count] != VALUE_TYPE_I32) {
+                    set_component_call_error(
+                        inst, "component canon lift function only supports a "
+                              "single memory-backed result returned through "
+                              "memory");
+                    goto cleanup;
+                }
+            }
+            else if (core_type->result_count != 1
+                     || core_type->types[core_type->param_count]
+                            != result_info.core_type) {
+                set_component_call_error(
+                    inst, "component canon lift function result does not match the "
+                          "core function signature");
+                goto cleanup;
+            }
+        }
     }
     else if (core_type->result_count != 0)
         return set_component_call_error(
@@ -3858,6 +4159,18 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
                       "storage");
     }
     memset(core_args, 0, sizeof(wasm_val_t) * core_type->param_count);
+    if (core_type->result_count
+        > sizeof(stack_results) / sizeof(stack_results[0])) {
+        core_results =
+            wasm_runtime_malloc(sizeof(wasm_val_t) * core_type->result_count);
+        if (!core_results) {
+            set_component_call_error(
+                inst, "component canon lift function could not allocate result "
+                      "storage");
+            goto cleanup;
+        }
+    }
+    memset(core_results, 0, sizeof(wasm_val_t) * core_type->result_count);
 
     for (i = 0; i < component_type->params->count; i++) {
         if (!flatten_component_public_param_value(
@@ -3889,7 +4202,7 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
         (WASMModuleInstanceCommon *)function->core_func_ref.owner_instance->module_inst);
     if (!wasm_runtime_call_wasm_a(exec_env, function->core_func_ref.of.function,
                                   core_type->result_count,
-                                  core_type->result_count ? &core_result : NULL,
+                                  core_type->result_count ? core_results : NULL,
                                   core_type->param_count, core_args)) {
         const char *core_exception = wasm_runtime_get_exception(
             (WASMModuleInstanceCommon *)function->core_func_ref.owner_instance
@@ -3905,13 +4218,21 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
     }
 
     if (expected_result_count == 1) {
-        if (result_info.kind == WASM_COMP_CANON_LIFT_VALUE_SCALAR) {
-            if (!validate_component_scalar_value(inst, &core_result,
+        if (has_composite_result) {
+            if (!init_component_public_composite_result(
+                    inst, result_leaves, flat_result_count, core_results,
+                    &results[0])) {
+                call_succeeded = false;
+                goto cleanup;
+            }
+        }
+        else if (result_info.kind == WASM_COMP_CANON_LIFT_VALUE_SCALAR) {
+            if (!validate_component_scalar_value(inst, &core_results[0],
                                                  result_info.public_kind,
                                                  result_info.prim_type, "result",
                                                  0)
                 || !init_component_public_scalar_result(inst, &result_info,
-                                                        &core_result,
+                                                        &core_results[0],
                                                         &results[0])) {
                 call_succeeded = false;
                 goto cleanup;
@@ -3927,7 +4248,7 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
                     ? "string"
                     : "list<u8>";
 
-            if (core_result.kind != WASM_I32) {
+            if (core_results[0].kind != WASM_I32) {
                 set_component_call_error(
                     inst,
                     result_info.kind == WASM_COMP_CANON_LIFT_VALUE_STRING
@@ -3939,7 +4260,7 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
                 goto cleanup;
             }
 
-            memory_result_retptr = (uint32)core_result.of.i32;
+            memory_result_retptr = (uint32)core_results[0].of.i32;
             have_memory_result_ptr = true;
             if (!get_component_canon_memory_bytes(
                     inst, function, memory_result_retptr, 8,
@@ -4016,6 +4337,10 @@ cleanup:
 
     if (core_args != stack_args)
         wasm_runtime_free(core_args);
+    if (core_results != stack_results)
+        wasm_runtime_free(core_results);
+    if (result_leaves != stack_result_leaves)
+        wasm_runtime_free(result_leaves);
     return call_succeeded;
 }
 
