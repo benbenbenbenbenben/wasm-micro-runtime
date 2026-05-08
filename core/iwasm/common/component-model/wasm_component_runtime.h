@@ -81,6 +81,7 @@ typedef struct WASMComponentNamedExport {
 } WASMComponentNamedExport;
 
 typedef struct WASMComponentRuntimeInstance {
+    bool owns_exports;
     uint32 export_count;
     WASMComponentNamedExport *exports;
 } WASMComponentRuntimeInstance;

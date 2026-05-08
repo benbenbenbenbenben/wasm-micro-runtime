@@ -62,8 +62,28 @@ collect_component_runtime_alloc_counts(const WASMComponent *component,
                     section->parsed.core_instance_section->count;
                 break;
             case WASM_COMP_SECTION_ALIASES:
-                counts->alias_count += section->parsed.alias_section->count;
+            {
+                uint32 j;
+                const WASMComponentAliasSection *alias_section =
+                    section->parsed.alias_section;
+
+                counts->alias_count += alias_section->count;
+                for (j = 0; j < alias_section->count; j++) {
+                    const WASMComponentAliasDefinition *alias =
+                        &alias_section->aliases[j];
+
+                    if (alias->alias_target_type != WASM_COMP_ALIAS_TARGET_EXPORT
+                        || !alias->sort
+                        || alias->sort->sort == WASM_COMP_SORT_CORE_SORT)
+                        continue;
+
+                    if (alias->sort->sort == WASM_COMP_SORT_FUNC)
+                        counts->component_func_count++;
+                    else if (alias->sort->sort == WASM_COMP_SORT_INSTANCE)
+                        counts->component_instance_count++;
+                }
                 break;
+            }
             case WASM_COMP_SECTION_COMPONENT:
                 counts->component_count++;
                 break;
@@ -104,10 +124,11 @@ destroy_component_core_instance(WASMComponentCoreRuntimeInstance *core_instance)
 static void
 destroy_component_runtime_instance(WASMComponentRuntimeInstance *component_inst)
 {
-    if (component_inst->exports) {
+    if (component_inst->owns_exports && component_inst->exports) {
         wasm_runtime_free(component_inst->exports);
         component_inst->exports = NULL;
     }
+    component_inst->owns_exports = false;
     component_inst->export_count = 0;
 }
 
@@ -389,6 +410,34 @@ get_component_export_name(const WASMComponentExportName *export_name)
 }
 
 static bool
+lookup_component_instance_export(const WASMComponentRuntimeInstance *component_inst,
+                                 const char *name,
+                                 WASMComponentRuntimeRefType expected_type,
+                                 WASMComponentRuntimeRef *out_ref,
+                                 char *error_buf, uint32 error_buf_size)
+{
+    uint32 i;
+
+    for (i = 0; i < component_inst->export_count; i++) {
+        const WASMComponentNamedExport *export_item = &component_inst->exports[i];
+
+        if (!strcmp(export_item->name, name)) {
+            if (export_item->ref.type != expected_type)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "component export \"%s\" resolved to an unexpected type",
+                    name);
+            *out_ref = export_item->ref;
+            return true;
+        }
+    }
+
+    return set_component_runtime_error_fmt(
+        error_buf, error_buf_size,
+        "component export \"%s\" was not found on component instance", name);
+}
+
+static bool
 lookup_core_instance_export(const WASMComponentCoreRuntimeInstance *core_instance,
                             const char *name,
                             WASMComponentCoreRuntimeRefType expected_type,
@@ -503,6 +552,46 @@ append_core_alias(WASMComponentInstance *inst, const char *name,
 }
 
 static bool
+append_component_alias(WASMComponentInstance *inst, const char *name,
+                       const WASMComponentAliasDefinition *alias_def,
+                       WASMComponentRuntimeRef ref, char *error_buf,
+                       uint32 error_buf_size)
+{
+    switch (alias_def->sort->sort) {
+        case WASM_COMP_SORT_FUNC:
+            if (ref.type != WASM_COMP_RUNTIME_REF_FUNC)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "component alias \"%s\" did not resolve to a function",
+                    name);
+            inst->component_funcs[inst->component_func_count++] =
+                *ref.of.function;
+            return true;
+        case WASM_COMP_SORT_INSTANCE: {
+            WASMComponentRuntimeInstance *alias_inst =
+                &inst->component_instances[inst->component_instance_count++];
+
+            if (ref.type != WASM_COMP_RUNTIME_REF_INSTANCE)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "component alias \"%s\" did not resolve to an instance",
+                    name);
+
+            memset(alias_inst, 0, sizeof(*alias_inst));
+            alias_inst->owns_exports = false;
+            alias_inst->export_count = ref.of.instance->export_count;
+            alias_inst->exports = ref.of.instance->exports;
+            return true;
+        }
+        default:
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                "component alias sort 0x%02x is not supported yet",
+                (unsigned)alias_def->sort->sort);
+    }
+}
+
+static bool
 instantiate_component_core_instance(WASMComponentInstance *inst,
                                     const WASMComponentCoreInst *core_inst,
                                     char *error_buf, uint32 error_buf_size)
@@ -575,55 +664,104 @@ resolve_component_alias_section(WASMComponentInstance *inst,
     for (i = 0; i < alias_section->count; i++) {
         const WASMComponentAliasDefinition *alias_def =
             &alias_section->aliases[i];
-        const WASMComponentCoreRuntimeInstance *core_instance;
-        WASMComponentCoreRuntimeRef ref;
-        WASMComponentCoreRuntimeRefType expected_type;
-        const char *name;
+        if (alias_def->alias_target_type == WASM_COMP_ALIAS_TARGET_CORE_EXPORT) {
+            const WASMComponentCoreRuntimeInstance *core_instance;
+            WASMComponentCoreRuntimeRef ref;
+            WASMComponentCoreRuntimeRefType expected_type;
+            const char *name;
 
-        if (alias_def->alias_target_type != WASM_COMP_ALIAS_TARGET_CORE_EXPORT)
-            return set_component_runtime_error_fmt(
-                error_buf, error_buf_size,
-                "component aliases other than core export are not supported yet");
-
-        if (!alias_def->sort || alias_def->sort->sort != WASM_COMP_SORT_CORE_SORT)
-            return set_component_runtime_error_fmt(
-                error_buf, error_buf_size,
-                "non-core alias sorts are not supported yet");
-
-        if (alias_def->target.core_exported.instance_idx >= inst->core_instance_count)
-            return set_component_runtime_error_fmt(
-                error_buf, error_buf_size,
-                "core alias instance index %u is out of bounds",
-                alias_def->target.core_exported.instance_idx);
-
-        switch (alias_def->sort->core_sort) {
-            case WASM_COMP_CORE_SORT_FUNC:
-                expected_type = WASM_COMP_CORE_RUNTIME_REF_FUNC;
-                break;
-            case WASM_COMP_CORE_SORT_TABLE:
-                expected_type = WASM_COMP_CORE_RUNTIME_REF_TABLE;
-                break;
-            case WASM_COMP_CORE_SORT_MEMORY:
-                expected_type = WASM_COMP_CORE_RUNTIME_REF_MEMORY;
-                break;
-            case WASM_COMP_CORE_SORT_GLOBAL:
-                expected_type = WASM_COMP_CORE_RUNTIME_REF_GLOBAL;
-                break;
-            default:
+            if (!alias_def->sort
+                || alias_def->sort->sort != WASM_COMP_SORT_CORE_SORT)
                 return set_component_runtime_error_fmt(
                     error_buf, error_buf_size,
-                    "core alias sort 0x%02x is not supported yet",
-                    (unsigned)alias_def->sort->core_sort);
+                    "non-core alias sorts are not supported yet");
+
+            if (alias_def->target.core_exported.instance_idx
+                >= inst->core_instance_count)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "core alias instance index %u is out of bounds",
+                    alias_def->target.core_exported.instance_idx);
+
+            switch (alias_def->sort->core_sort) {
+                case WASM_COMP_CORE_SORT_FUNC:
+                    expected_type = WASM_COMP_CORE_RUNTIME_REF_FUNC;
+                    break;
+                case WASM_COMP_CORE_SORT_TABLE:
+                    expected_type = WASM_COMP_CORE_RUNTIME_REF_TABLE;
+                    break;
+                case WASM_COMP_CORE_SORT_MEMORY:
+                    expected_type = WASM_COMP_CORE_RUNTIME_REF_MEMORY;
+                    break;
+                case WASM_COMP_CORE_SORT_GLOBAL:
+                    expected_type = WASM_COMP_CORE_RUNTIME_REF_GLOBAL;
+                    break;
+                default:
+                    return set_component_runtime_error_fmt(
+                        error_buf, error_buf_size,
+                        "core alias sort 0x%02x is not supported yet",
+                        (unsigned)alias_def->sort->core_sort);
+            }
+
+            core_instance = &inst->core_instances
+                                 [alias_def->target.core_exported.instance_idx];
+            name = alias_def->target.core_exported.name->name;
+            if (!lookup_core_instance_export(core_instance, name, expected_type,
+                                             &ref, error_buf, error_buf_size)
+                || !append_core_alias(inst, name, alias_def, ref, error_buf,
+                                      error_buf_size))
+                return false;
+            continue;
         }
 
-        core_instance =
-            &inst->core_instances[alias_def->target.core_exported.instance_idx];
-        name = alias_def->target.core_exported.name->name;
-        if (!lookup_core_instance_export(core_instance, name, expected_type, &ref,
-                                         error_buf, error_buf_size)
-            || !append_core_alias(inst, name, alias_def, ref, error_buf,
-                                  error_buf_size))
-            return false;
+        if (alias_def->alias_target_type == WASM_COMP_ALIAS_TARGET_EXPORT) {
+            const WASMComponentRuntimeInstance *component_instance;
+            WASMComponentRuntimeRef ref;
+            WASMComponentRuntimeRefType expected_type;
+            const char *name;
+
+            if (!alias_def->sort
+                || alias_def->sort->sort == WASM_COMP_SORT_CORE_SORT)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "component alias sorts must not use core sort encoding");
+
+            if (alias_def->target.exported.instance_idx
+                >= inst->component_instance_count)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "component alias instance index %u is out of bounds",
+                    alias_def->target.exported.instance_idx);
+
+            switch (alias_def->sort->sort) {
+                case WASM_COMP_SORT_FUNC:
+                    expected_type = WASM_COMP_RUNTIME_REF_FUNC;
+                    break;
+                case WASM_COMP_SORT_INSTANCE:
+                    expected_type = WASM_COMP_RUNTIME_REF_INSTANCE;
+                    break;
+                default:
+                    return set_component_runtime_error_fmt(
+                        error_buf, error_buf_size,
+                        "component alias sort 0x%02x is not supported yet",
+                        (unsigned)alias_def->sort->sort);
+            }
+
+            component_instance =
+                &inst->component_instances[alias_def->target.exported.instance_idx];
+            name = alias_def->target.exported.name->name;
+            if (!lookup_component_instance_export(component_instance, name,
+                                                  expected_type, &ref, error_buf,
+                                                  error_buf_size)
+                || !append_component_alias(inst, name, alias_def, ref, error_buf,
+                                           error_buf_size))
+                return false;
+            continue;
+        }
+
+        return set_component_runtime_error_fmt(error_buf, error_buf_size,
+                                               "outer aliases are not "
+                                               "supported yet");
     }
 
     return true;
@@ -730,6 +868,7 @@ build_nested_component_instance_exports(
         }
     }
 
+    runtime_inst->owns_exports = true;
     runtime_inst->export_count = export_index;
     return true;
 }
@@ -899,6 +1038,7 @@ instantiate_component_runtime_instance(WASMComponentInstance *inst,
                                            error_buf, error_buf_size))
             return false;
 
+        runtime_inst->owns_exports = true;
         runtime_inst->export_count = export_count;
         for (i = 0; i < export_count; i++) {
             const WASMComponentInlineExport *inline_export =
