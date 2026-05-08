@@ -156,13 +156,15 @@ Start sections are no longer blanket-rejected.
 
 Implemented slices include:
 
-- top-level scalar start execution
-- nested scalar start execution
+- top-level start execution for the current public-value subset
+- nested start execution for the current public-value subset
 - result materialization back into component values
 
 This support is still intentionally narrow:
 
-- scalar-only start arguments/results
+- start arguments/results are limited to the currently supported public-value
+  subset: UTF-8 strings, top-level `list<u8>`, and tuple/record values with
+  scalar / nested UTF-8 string / nested `list<u8>` leaves
 - at most one result
 - execution routes through supported canon-lift function shapes
 
@@ -193,7 +195,8 @@ This is a real runtime substrate, but not yet full resource semantics.
 - top-level component import binding
 - public value import/export flows
 - top-level and nested value sections
-- top-level and nested scalar start execution
+- top-level and nested start execution for the current supported public-value
+  subset, still capped at a single result
 - top-level host function imports across scalar / UTF-8 string / `list<u8>` / supported tuple-record parameter slices with scalar, UTF-8 string, and nested `list<u8>` leaves, plus scalar-leaf tuple-record results
 - resource-state and owned-handle cleanup foundations
 

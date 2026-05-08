@@ -6560,312 +6560,37 @@ set_component_start_error_from_exception(WASMComponentInstance *inst,
 }
 
 static bool
-resolve_component_start_scalar_type(const WASMComponent *component,
-                                    const WASMComponentValueType *value_type,
-                                    const char *position, uint32 index,
-                                    uint8 *prim_type_out,
-                                    wasm_valkind_t *public_kind_out,
-                                    char *error_buf,
-                                    uint32 error_buf_size)
+resolve_component_start_function_type(
+    WASMComponentInstance *inst, const WASMComponentRuntimeFunc *function,
+    WASMComponentFuncType **out_component_type)
 {
-    const WASMComponentTypes *type_entry;
-    WASMComponentDefValType *def_type;
-    uint8 prim_type;
-    uint8 ignored_core_type;
+    WASMFuncType *ignored_core_type = NULL;
 
-    if (!value_type)
-        return set_component_runtime_error_fmt(
-            error_buf, error_buf_size,
-            "component start section %s %u is missing a type", position, index);
+    if (function->kind == WASM_COMP_RUNTIME_FUNC_HOST_IMPORT)
+        return resolve_component_func_type(inst, function, "host component function",
+                                           out_component_type);
 
-    if (value_type->type == WASM_COMP_VAL_TYPE_PRIMVAL) {
-        prim_type = value_type->type_specific.primval_type;
-        if (!component_scalar_prim_to_core(prim_type, &ignored_core_type,
-                                           public_kind_out)) {
-            if (prim_type == WASM_COMP_PRIMVAL_STRING)
-                return set_component_runtime_error_fmt(
-                    error_buf, error_buf_size,
-                    "component start section %s %u requires memory-backed "
-                    "Canonical ABI for string",
-                    position, index);
-            if (prim_type == WASM_COMP_PRIMVAL_ERROR_CONTEXT)
-                return set_component_runtime_error_fmt(
-                    error_buf, error_buf_size,
-                    "component start section %s %u uses unsupported component "
-                    "scalar type error-context",
-                    position, index);
-            return set_component_runtime_error_fmt(
-                error_buf, error_buf_size,
-                "component start section %s %u uses unsupported component "
-                "scalar type %s",
-                position, index, component_prim_type_name(prim_type));
-        }
-        *prim_type_out = prim_type;
-        return true;
-    }
+    if (function->kind != WASM_COMP_RUNTIME_FUNC_LIFT)
+        return set_component_call_error(
+            inst, "component start section only supports canon lift and host "
+                  "component functions");
 
-    type_entry =
-        wasm_component_lookup_type(component, value_type->type_specific.type_idx);
-    if (!type_entry)
-        return set_component_runtime_error_fmt(
-            error_buf, error_buf_size,
-            "component start section %s %u uses unresolved type index %u",
-            position, index, value_type->type_specific.type_idx);
-
-    if (type_entry->tag != WASM_COMP_DEF_TYPE)
-        return set_component_runtime_error_fmt(
-            error_buf, error_buf_size,
-            "component start section %s %u uses non-value type index %u",
-            position, index, value_type->type_specific.type_idx);
-
-    def_type = type_entry->type.def_val_type;
-    if (def_type->tag == WASM_COMP_DEF_VAL_PRIMVAL) {
-        prim_type = def_type->def_val.primval;
-        if (!component_scalar_prim_to_core(prim_type, &ignored_core_type,
-                                           public_kind_out)) {
-            if (prim_type == WASM_COMP_PRIMVAL_STRING)
-                return set_component_runtime_error_fmt(
-                    error_buf, error_buf_size,
-                    "component start section %s %u requires memory-backed "
-                    "Canonical ABI for string",
-                    position, index);
-            if (prim_type == WASM_COMP_PRIMVAL_ERROR_CONTEXT)
-                return set_component_runtime_error_fmt(
-                    error_buf, error_buf_size,
-                    "component start section %s %u uses unsupported component "
-                    "scalar type error-context",
-                    position, index);
-            return set_component_runtime_error_fmt(
-                error_buf, error_buf_size,
-                "component start section %s %u uses unsupported component "
-                "scalar type %s",
-                position, index, component_prim_type_name(prim_type));
-        }
-        *prim_type_out = prim_type;
-        return true;
-    }
-
-    if (def_type->tag == WASM_COMP_DEF_VAL_LIST
-        || def_type->tag == WASM_COMP_DEF_VAL_LIST_LEN)
-        return set_component_runtime_error_fmt(
-            error_buf, error_buf_size,
-            "component start section %s %u requires memory-backed Canonical "
-            "ABI for %s",
-            position, index, component_def_type_name(def_type->tag));
-
-    return set_component_runtime_error_fmt(
-        error_buf, error_buf_size,
-        "component start section %s %u uses unsupported non-scalar %s type",
-        position, index, component_def_type_name(def_type->tag));
+    return resolve_component_canon_lift_type(inst, function, out_component_type,
+                                             &ignored_core_type);
 }
 
-static bool
-decode_component_start_leb(const uint8 *data, uint32 byte_size, uint32 maxbits,
-                           bool sign, const char *type_name,
-                           const char *position, uint32 index, uint64 *out_value,
-                           char *error_buf, uint32 error_buf_size)
+static void
+destroy_component_public_values(wasm_component_value_t *values, uint32 count)
 {
-    size_t offset = 0;
-    bh_leb_read_status_t status;
+    uint32 i;
 
-    if (!data || byte_size == 0)
-        return set_component_runtime_error_fmt(
-            error_buf, error_buf_size,
-            "component start section %s %u is missing %s bytes", position,
-            index, type_name);
+    if (!values)
+        return;
 
-    status = bh_leb_read(data, data + byte_size, maxbits, sign, out_value, &offset);
-    if (status != BH_LEB_READ_SUCCESS || offset != byte_size)
-        return set_component_runtime_error_fmt(
-            error_buf, error_buf_size,
-            "component start section %s %u does not contain a valid %s value",
-            position, index, type_name);
+    for (i = 0; i < count; i++)
+        wasm_component_value_destroy(&values[i]);
 
-    return true;
-}
-
-static bool
-decode_component_start_char(const uint8 *data, uint32 byte_size,
-                            const char *position, uint32 index,
-                            uint32 *code_point_out, char *error_buf,
-                            uint32 error_buf_size)
-{
-    uint32 code_point;
-
-    if (!data || !wasm_component_validate_single_utf8_scalar(data, byte_size))
-        return set_component_runtime_error_fmt(
-            error_buf, error_buf_size,
-            "component start section %s %u does not contain a valid char value",
-            position, index);
-
-    switch (byte_size) {
-        case 1:
-            code_point = data[0];
-            break;
-        case 2:
-            code_point =
-                ((uint32)(data[0] & 0x1F) << 6) | (uint32)(data[1] & 0x3F);
-            break;
-        case 3:
-            code_point = ((uint32)(data[0] & 0x0F) << 12)
-                         | ((uint32)(data[1] & 0x3F) << 6)
-                         | (uint32)(data[2] & 0x3F);
-            break;
-        case 4:
-            code_point = ((uint32)(data[0] & 0x07) << 18)
-                         | ((uint32)(data[1] & 0x3F) << 12)
-                         | ((uint32)(data[2] & 0x3F) << 6)
-                         | (uint32)(data[3] & 0x3F);
-            break;
-        default:
-            return set_component_runtime_error_fmt(
-                error_buf, error_buf_size,
-                "component start section %s %u does not contain a valid char "
-                "value",
-                position, index);
-    }
-
-    *code_point_out = code_point;
-    return true;
-}
-
-static bool
-decode_component_start_argument(const WASMComponent *component,
-                                const WASMComponentRuntimeValue *runtime_value,
-                                uint32 index, wasm_val_t *out_arg,
-                                char *error_buf, uint32 error_buf_size)
-{
-    const uint8 *data =
-        wasm_component_runtime_value_get_data(runtime_value);
-    uint8 prim_type;
-    wasm_valkind_t expected_kind;
-    uint64 decoded_u64;
-    uint32 code_point;
-
-    if (!runtime_value || !out_arg)
-        return set_component_runtime_error_fmt(
-            error_buf, error_buf_size,
-            "component start section argument %u is null", index);
-
-    if (!resolve_component_start_scalar_type(component,
-                                             runtime_value->type.declared_type,
-                                             "argument", index, &prim_type,
-                                             &expected_kind, error_buf,
-                                             error_buf_size))
-        return false;
-
-    memset(out_arg, 0, sizeof(*out_arg));
-    out_arg->kind = expected_kind;
-
-    switch (prim_type) {
-        case WASM_COMP_PRIMVAL_BOOL:
-            if (!data || runtime_value->byte_size != 1
-                || (data[0] != 0 && data[0] != 1))
-                return set_component_runtime_error_fmt(
-                    error_buf, error_buf_size,
-                    "component start section argument %u does not contain a "
-                    "valid bool value",
-                    index);
-            out_arg->of.i32 = data[0];
-            return true;
-        case WASM_COMP_PRIMVAL_S8:
-            if (!data || runtime_value->byte_size != 1)
-                return set_component_runtime_error_fmt(
-                    error_buf, error_buf_size,
-                    "component start section argument %u does not contain a "
-                    "valid s8 value",
-                    index);
-            out_arg->of.i32 = (int8)data[0];
-            return true;
-        case WASM_COMP_PRIMVAL_U8:
-            if (!data || runtime_value->byte_size != 1)
-                return set_component_runtime_error_fmt(
-                    error_buf, error_buf_size,
-                    "component start section argument %u does not contain a "
-                    "valid u8 value",
-                    index);
-            out_arg->of.i32 = data[0];
-            return true;
-        case WASM_COMP_PRIMVAL_S16:
-            if (!decode_component_start_leb(data, runtime_value->byte_size, 16,
-                                            true, "s16", "argument", index,
-                                            &decoded_u64, error_buf,
-                                            error_buf_size))
-                return false;
-            out_arg->of.i32 = (int16)(uint16)decoded_u64;
-            return true;
-        case WASM_COMP_PRIMVAL_U16:
-            if (!decode_component_start_leb(data, runtime_value->byte_size, 16,
-                                            false, "u16", "argument", index,
-                                            &decoded_u64, error_buf,
-                                            error_buf_size))
-                return false;
-            out_arg->of.i32 = (uint16)decoded_u64;
-            return true;
-        case WASM_COMP_PRIMVAL_S32:
-            if (!decode_component_start_leb(data, runtime_value->byte_size, 32,
-                                            true, "s32", "argument", index,
-                                            &decoded_u64, error_buf,
-                                            error_buf_size))
-                return false;
-            out_arg->of.i32 = (int32)decoded_u64;
-            return true;
-        case WASM_COMP_PRIMVAL_U32:
-            if (!decode_component_start_leb(data, runtime_value->byte_size, 32,
-                                            false, "u32", "argument", index,
-                                            &decoded_u64, error_buf,
-                                            error_buf_size))
-                return false;
-            out_arg->of.i32 = (int32)(uint32)decoded_u64;
-            return true;
-        case WASM_COMP_PRIMVAL_S64:
-            if (!decode_component_start_leb(data, runtime_value->byte_size, 64,
-                                            true, "s64", "argument", index,
-                                            &decoded_u64, error_buf,
-                                            error_buf_size))
-                return false;
-            out_arg->of.i64 = (int64)decoded_u64;
-            return true;
-        case WASM_COMP_PRIMVAL_U64:
-            if (!decode_component_start_leb(data, runtime_value->byte_size, 64,
-                                            false, "u64", "argument", index,
-                                            &decoded_u64, error_buf,
-                                            error_buf_size))
-                return false;
-            out_arg->of.i64 = (int64)decoded_u64;
-            return true;
-        case WASM_COMP_PRIMVAL_F32:
-            if (!data || runtime_value->byte_size != sizeof(out_arg->of.f32))
-                return set_component_runtime_error_fmt(
-                    error_buf, error_buf_size,
-                    "component start section argument %u does not contain a "
-                    "valid f32 value",
-                    index);
-            memcpy(&out_arg->of.f32, data, sizeof(out_arg->of.f32));
-            return true;
-        case WASM_COMP_PRIMVAL_F64:
-            if (!data || runtime_value->byte_size != sizeof(out_arg->of.f64))
-                return set_component_runtime_error_fmt(
-                    error_buf, error_buf_size,
-                    "component start section argument %u does not contain a "
-                    "valid f64 value",
-                    index);
-            memcpy(&out_arg->of.f64, data, sizeof(out_arg->of.f64));
-            return true;
-        case WASM_COMP_PRIMVAL_CHAR:
-            if (!decode_component_start_char(data, runtime_value->byte_size,
-                                             "argument", index, &code_point,
-                                             error_buf, error_buf_size))
-                return false;
-            out_arg->of.i32 = (int32)code_point;
-            return true;
-        default:
-            return set_component_runtime_error_fmt(
-                error_buf, error_buf_size,
-                "component start section argument %u uses unsupported component "
-                "scalar type %s",
-                index, component_prim_type_name(prim_type));
-    }
+    wasm_runtime_free(values);
 }
 
 static uint32
@@ -6906,123 +6631,56 @@ encode_component_signed_leb(int64 value, uint8 *out_buf)
 }
 
 static bool
-encode_component_start_char(uint32 code_point, uint8 *out_buf,
-                            uint32 *out_len, char *error_buf,
-                            uint32 error_buf_size)
+execute_component_start_section_with_public_values(
+    WASMComponentInstance *inst, const WASMComponentRuntimeFunc *function,
+    const WASMComponentStartSection *start_section,
+    WASMComponentRuntimeValue *result_value, char *error_buf,
+    uint32 error_buf_size, const char *error_prefix, uint32 num_args,
+    wasm_component_value_t *public_args)
 {
-    if (!is_valid_unicode_scalar(code_point))
-        return set_component_runtime_error_fmt(
-            error_buf, error_buf_size,
-            "component start section result is not a valid Unicode scalar "
-            "value");
+    WASMComponentFuncType *component_type = NULL;
+    wasm_component_value_t public_result = { 0 };
 
-    if (code_point <= 0x7F) {
-        out_buf[0] = (uint8)code_point;
-        *out_len = 1;
-    }
-    else if (code_point <= 0x7FF) {
-        out_buf[0] = (uint8)(0xC0 | (code_point >> 6));
-        out_buf[1] = (uint8)(0x80 | (code_point & 0x3F));
-        *out_len = 2;
-    }
-    else if (code_point <= 0xFFFF) {
-        out_buf[0] = (uint8)(0xE0 | (code_point >> 12));
-        out_buf[1] = (uint8)(0x80 | ((code_point >> 6) & 0x3F));
-        out_buf[2] = (uint8)(0x80 | (code_point & 0x3F));
-        *out_len = 3;
-    }
-    else {
-        out_buf[0] = (uint8)(0xF0 | (code_point >> 18));
-        out_buf[1] = (uint8)(0x80 | ((code_point >> 12) & 0x3F));
-        out_buf[2] = (uint8)(0x80 | ((code_point >> 6) & 0x3F));
-        out_buf[3] = (uint8)(0x80 | (code_point & 0x3F));
-        *out_len = 4;
+    if (!wasm_component_call_values_internal(inst, function, start_section->result,
+                                             start_section->result ? &public_result
+                                                                   : NULL,
+                                             num_args, public_args, false)) {
+        wasm_component_value_destroy(&public_result);
+        return set_component_start_error_from_exception(inst, error_buf,
+                                                        error_buf_size,
+                                                        error_prefix);
     }
 
-    return true;
-}
+    if (start_section->result > 0) {
+        if (!resolve_component_start_function_type(inst, function, &component_type)) {
+            wasm_component_value_destroy(&public_result);
+            return set_component_start_error_from_exception(inst, error_buf,
+                                                            error_buf_size,
+                                                            error_prefix);
+        }
 
-static bool
-init_component_start_result_value(WASMComponentInstance *inst,
-                                  const WASMComponentValueType *value_type,
-                                  const wasm_val_t *result,
-                                  WASMComponentRuntimeValue *runtime_value,
-                                  char *error_buf, uint32 error_buf_size)
-{
-    uint8 storage[16];
-    uint8 prim_type;
-    wasm_valkind_t expected_kind;
-    uint32 storage_len = 0;
-
-    if (!resolve_component_start_scalar_type(&inst->module->component, value_type,
-                                             "result", 0, &prim_type,
-                                             &expected_kind, error_buf,
-                                             error_buf_size))
-        return false;
-
-    if (!result || result->kind != expected_kind)
-        return set_component_runtime_error_fmt(
-            error_buf, error_buf_size,
-            "component start section result kind %u does not match expected "
-            "kind %u",
-            result ? (unsigned)result->kind : UINT_MAX, (unsigned)expected_kind);
-
-    switch (prim_type) {
-        case WASM_COMP_PRIMVAL_BOOL:
-            if (result->of.i32 != 0 && result->of.i32 != 1)
-                return set_component_runtime_error_fmt(
-                    error_buf, error_buf_size,
-                    "component start section result is not a valid bool value");
-            storage[0] = (uint8)result->of.i32;
-            storage_len = 1;
-            break;
-        case WASM_COMP_PRIMVAL_S8:
-        case WASM_COMP_PRIMVAL_U8:
-            storage[0] = (uint8)result->of.i32;
-            storage_len = 1;
-            break;
-        case WASM_COMP_PRIMVAL_S16:
-        case WASM_COMP_PRIMVAL_S32:
-            storage_len = encode_component_signed_leb((int64)result->of.i32,
-                                                      storage);
-            break;
-        case WASM_COMP_PRIMVAL_U16:
-        case WASM_COMP_PRIMVAL_U32:
-            storage_len = encode_component_unsigned_leb((uint32)result->of.i32,
-                                                        storage);
-            break;
-        case WASM_COMP_PRIMVAL_S64:
-            storage_len = encode_component_signed_leb(result->of.i64, storage);
-            break;
-        case WASM_COMP_PRIMVAL_U64:
-            storage_len =
-                encode_component_unsigned_leb((uint64)result->of.i64, storage);
-            break;
-        case WASM_COMP_PRIMVAL_F32:
-            memcpy(storage, &result->of.f32, sizeof(result->of.f32));
-            storage_len = sizeof(result->of.f32);
-            break;
-        case WASM_COMP_PRIMVAL_F64:
-            memcpy(storage, &result->of.f64, sizeof(result->of.f64));
-            storage_len = sizeof(result->of.f64);
-            break;
-        case WASM_COMP_PRIMVAL_CHAR:
-            if (!encode_component_start_char((uint32)result->of.i32, storage,
-                                             &storage_len, error_buf,
-                                             error_buf_size))
-                return false;
-            break;
-        default:
+        if (!component_type || !component_type->results
+            || component_type->results->tag != WASM_COMP_RESULT_LIST_WITH_TYPE
+            || !component_type->results->results) {
+            wasm_component_value_destroy(&public_result);
             return set_component_runtime_error_fmt(
-                error_buf, error_buf_size,
-                "component start section result uses unsupported component "
-                "scalar type %s",
-                component_prim_type_name(prim_type));
+                error_buf, error_buf_size, "%s result metadata is missing",
+                error_prefix);
+        }
+
+        wasm_component_runtime_value_clear(result_value);
+        if (!wasm_component_runtime_value_init_public(
+                result_value, &inst->module->component,
+                component_type->results->results, &public_result, error_buf,
+                error_buf_size)) {
+            wasm_component_runtime_value_clear(result_value);
+            wasm_component_value_destroy(&public_result);
+            return false;
+        }
     }
 
-    return wasm_component_runtime_value_init_inline(
-        runtime_value, &inst->module->component, value_type, storage, storage_len,
-        error_buf, error_buf_size);
+    wasm_component_value_destroy(&public_result);
+    return true;
 }
 
 static bool
@@ -7031,12 +6689,7 @@ instantiate_component_start_section(WASMComponentInstance *inst,
                                     char *error_buf, uint32 error_buf_size)
 {
     const WASMComponentRuntimeFunc *function;
-    WASMComponentFuncType *component_type = NULL;
-    WASMFuncType *ignored_core_type = NULL;
-    wasm_val_t *args = NULL;
-    wasm_val_t result = { 0 };
     wasm_component_value_t *public_args = NULL;
-    wasm_component_value_t public_result = { 0 };
     uint32 i;
 
     if (!start_section)
@@ -7051,173 +6704,69 @@ instantiate_component_start_section(WASMComponentInstance *inst,
             start_section->func_idx);
 
     function = &inst->component_funcs[start_section->func_idx];
-    if (function->kind == WASM_COMP_RUNTIME_FUNC_HOST_IMPORT) {
-        if (!resolve_component_func_type(inst, function, "host component function",
-                                         &component_type))
-            return false;
-
-        if (start_section->value_args_count > 0) {
-            public_args = wasm_runtime_malloc(sizeof(wasm_component_value_t)
-                                              * start_section->value_args_count);
-            if (!public_args)
-                return set_component_runtime_error_fmt(
-                    error_buf, error_buf_size,
-                    "allocate memory failed for component start arguments");
-            memset(public_args, 0,
-                   sizeof(wasm_component_value_t) * start_section->value_args_count);
-        }
-
-        for (i = 0; i < start_section->value_args_count; i++) {
-            uint32 value_idx = start_section->value_args[i];
-
-            if (value_idx >= inst->component_value_count) {
-                wasm_runtime_free(public_args);
-                return set_component_runtime_error_fmt(
-                    error_buf, error_buf_size,
-                    "component start section value index %u is out of bounds",
-                    value_idx);
-            }
-
-            if (!wasm_component_public_value_copy(
-                    &public_args[i], &inst->component_values[value_idx], error_buf,
-                    error_buf_size)) {
-                for (uint32 j = 0; j < i; j++)
-                    wasm_component_value_destroy(&public_args[j]);
-                wasm_runtime_free(public_args);
-                return false;
-            }
-        }
-
-        if (!wasm_component_call_values_internal(inst, function,
-                                                 start_section->result,
-                                                 start_section->result
-                                                     ? &public_result
-                                                     : NULL,
-                                                 start_section->value_args_count,
-                                                 public_args, false)) {
-            for (i = 0; i < start_section->value_args_count; i++)
-                wasm_component_value_destroy(&public_args[i]);
-            wasm_component_value_destroy(&public_result);
-            wasm_runtime_free(public_args);
-            return set_component_start_error_from_exception(
-                inst, error_buf, error_buf_size, "component start section failed");
-        }
-
-        for (i = 0; i < start_section->value_args_count; i++)
-            wasm_component_value_destroy(&public_args[i]);
-        wasm_runtime_free(public_args);
-
-        if (start_section->result > 0) {
-            if (!component_type || !component_type->results
-                || component_type->results->tag != WASM_COMP_RESULT_LIST_WITH_TYPE
-                || !component_type->results->results) {
-                wasm_component_value_destroy(&public_result);
-                return set_component_runtime_error_fmt(
-                    error_buf, error_buf_size,
-                    "component start section result metadata is missing");
-            }
-
-            if (!wasm_component_runtime_value_init_public(
-                    &inst->component_values[inst->component_value_count],
-                    &inst->module->component, component_type->results->results,
-                    &public_result, error_buf, error_buf_size)) {
-                wasm_component_value_destroy(&public_result);
-                return false;
-            }
-
-            inst->component_value_count++;
-            wasm_component_value_destroy(&public_result);
-        }
-
-        return true;
-    }
-
     if (start_section->value_args_count > 0) {
-        args = wasm_runtime_malloc(sizeof(wasm_val_t)
-                                   * start_section->value_args_count);
-        if (!args)
+        public_args = wasm_runtime_malloc(sizeof(wasm_component_value_t)
+                                          * start_section->value_args_count);
+        if (!public_args)
             return set_component_runtime_error_fmt(
                 error_buf, error_buf_size,
                 "allocate memory failed for component start arguments");
-        memset(args, 0, sizeof(wasm_val_t) * start_section->value_args_count);
+        memset(public_args, 0,
+               sizeof(wasm_component_value_t) * start_section->value_args_count);
     }
 
     for (i = 0; i < start_section->value_args_count; i++) {
         uint32 value_idx = start_section->value_args[i];
 
         if (value_idx >= inst->component_value_count) {
-            wasm_runtime_free(args);
+            destroy_component_public_values(public_args,
+                                            start_section->value_args_count);
             return set_component_runtime_error_fmt(
                 error_buf, error_buf_size,
                 "component start section value index %u is out of bounds",
                 value_idx);
         }
 
-        if (!decode_component_start_argument(&inst->module->component,
-                                             &inst->component_values[value_idx],
-                                             i, &args[i], error_buf,
-                                             error_buf_size)) {
-            wasm_runtime_free(args);
+        if (!wasm_component_public_value_copy(&public_args[i],
+                                              &inst->component_values[value_idx],
+                                              error_buf, error_buf_size)) {
+            destroy_component_public_values(public_args,
+                                            start_section->value_args_count);
             return false;
         }
     }
 
-    if (!wasm_component_call_internal(inst, function, start_section->result,
-                                      start_section->result ? &result : NULL,
-                                      start_section->value_args_count, args,
-                                      false)) {
-        wasm_runtime_free(args);
-        return set_component_start_error_from_exception(
-            inst, error_buf, error_buf_size, "component start section failed");
+    if (!execute_component_start_section_with_public_values(
+            inst, function, start_section,
+            start_section->result
+                ? &inst->component_values[inst->component_value_count]
+                : NULL,
+            error_buf, error_buf_size, "component start section failed",
+            start_section->value_args_count, public_args)) {
+        if (start_section->result > 0)
+            wasm_component_runtime_value_clear(
+                &inst->component_values[inst->component_value_count]);
+        destroy_component_public_values(public_args,
+                                        start_section->value_args_count);
+        return false;
     }
 
-    if (start_section->result > 0) {
-        if (!resolve_component_canon_lift_type(inst, function, &component_type,
-                                               &ignored_core_type)) {
-            wasm_runtime_free(args);
-            return set_component_start_error_from_exception(
-                inst, error_buf, error_buf_size,
-                "component start section failed");
-        }
-
-        if (!component_type || !component_type->results
-            || component_type->results->tag != WASM_COMP_RESULT_LIST_WITH_TYPE
-            || !component_type->results->results) {
-            wasm_runtime_free(args);
-            return set_component_runtime_error_fmt(
-                error_buf, error_buf_size,
-                "component start section result metadata is missing");
-        }
-
-        if (!init_component_start_result_value(
-                inst, component_type->results->results, &result,
-                &inst->component_values[inst->component_value_count], error_buf,
-                error_buf_size)) {
-            wasm_runtime_free(args);
-            return false;
-        }
-
+    if (start_section->result > 0)
         inst->component_value_count++;
-    }
 
-    wasm_runtime_free(args);
+    destroy_component_public_values(public_args, start_section->value_args_count);
     return true;
 }
 
 static bool
 instantiate_nested_component_start_section(
     WASMComponentInstance *inst, WASMComponentRuntimeInstance *runtime_inst,
-    WASMNestedComponentLocalBindings *bindings, const WASMComponent *component,
+    WASMNestedComponentLocalBindings *bindings,
     const WASMComponentStartSection *start_section, char *error_buf,
     uint32 error_buf_size)
 {
     const WASMComponentRuntimeFunc *function;
-    WASMComponentFuncType *component_type = NULL;
-    WASMFuncType *ignored_core_type = NULL;
-    wasm_val_t *args = NULL;
-    wasm_val_t result = { 0 };
     wasm_component_value_t *public_args = NULL;
-    wasm_component_value_t public_result = { 0 };
     uint32 i;
 
     if (!start_section)
@@ -7240,113 +6789,23 @@ instantiate_nested_component_start_section(
             start_section->func_idx);
 
     function = bindings->funcs[start_section->func_idx].of.function;
-    if (function->kind == WASM_COMP_RUNTIME_FUNC_HOST_IMPORT) {
-        if (!resolve_component_func_type(inst, function, "host component function",
-                                         &component_type))
-            return false;
-
-        if (start_section->value_args_count > 0) {
-            public_args = wasm_runtime_malloc(sizeof(wasm_component_value_t)
-                                              * start_section->value_args_count);
-            if (!public_args)
-                return set_component_runtime_error_fmt(
-                    error_buf, error_buf_size,
-                    "allocate memory failed for nested component start arguments");
-            memset(public_args, 0,
-                   sizeof(wasm_component_value_t) * start_section->value_args_count);
-        }
-
-        for (i = 0; i < start_section->value_args_count; i++) {
-            uint32 value_idx = start_section->value_args[i];
-
-            if (value_idx >= bindings->value_count) {
-                wasm_runtime_free(public_args);
-                return set_component_runtime_error_fmt(
-                    error_buf, error_buf_size,
-                    "nested component start section value index %u is out of "
-                    "bounds",
-                    value_idx);
-            }
-
-            if (!wasm_component_public_value_copy(&public_args[i],
-                                                  bindings->values[value_idx],
-                                                  error_buf, error_buf_size)) {
-                for (uint32 j = 0; j < i; j++)
-                    wasm_component_value_destroy(&public_args[j]);
-                wasm_runtime_free(public_args);
-                return false;
-            }
-        }
-
-        if (!wasm_component_call_values_internal(inst, function,
-                                                 start_section->result,
-                                                 start_section->result
-                                                     ? &public_result
-                                                     : NULL,
-                                                 start_section->value_args_count,
-                                                 public_args, false)) {
-            for (i = 0; i < start_section->value_args_count; i++)
-                wasm_component_value_destroy(&public_args[i]);
-            wasm_component_value_destroy(&public_result);
-            wasm_runtime_free(public_args);
-            return set_component_start_error_from_exception(
-                inst, error_buf, error_buf_size,
-                "nested component start section failed");
-        }
-
-        for (i = 0; i < start_section->value_args_count; i++)
-            wasm_component_value_destroy(&public_args[i]);
-        wasm_runtime_free(public_args);
-
-        if (start_section->result > 0) {
-            WASMComponentRuntimeValue *runtime_value =
-                &runtime_inst->owned_values[runtime_inst->owned_value_count];
-
-            if (!component_type || !component_type->results
-                || component_type->results->tag != WASM_COMP_RESULT_LIST_WITH_TYPE
-                || !component_type->results->results) {
-                wasm_component_value_destroy(&public_result);
-                return set_component_runtime_error_fmt(
-                    error_buf, error_buf_size,
-                    "nested component start section result metadata is missing");
-            }
-
-            if (!wasm_component_runtime_value_init_public(
-                    runtime_value, component, component_type->results->results,
-                    &public_result, error_buf, error_buf_size)) {
-                wasm_component_value_destroy(&public_result);
-                return false;
-            }
-
-            if (!append_nested_component_local_value(bindings, runtime_value,
-                                                     error_buf, error_buf_size)) {
-                wasm_component_runtime_value_clear(runtime_value);
-                wasm_component_value_destroy(&public_result);
-                return false;
-            }
-
-            runtime_inst->owned_value_count++;
-            wasm_component_value_destroy(&public_result);
-        }
-
-        return true;
-    }
-
     if (start_section->value_args_count > 0) {
-        args = wasm_runtime_malloc(sizeof(wasm_val_t)
-                                   * start_section->value_args_count);
-        if (!args)
+        public_args = wasm_runtime_malloc(sizeof(wasm_component_value_t)
+                                          * start_section->value_args_count);
+        if (!public_args)
             return set_component_runtime_error_fmt(
                 error_buf, error_buf_size,
                 "allocate memory failed for nested component start arguments");
-        memset(args, 0, sizeof(wasm_val_t) * start_section->value_args_count);
+        memset(public_args, 0,
+               sizeof(wasm_component_value_t) * start_section->value_args_count);
     }
 
     for (i = 0; i < start_section->value_args_count; i++) {
         uint32 value_idx = start_section->value_args[i];
 
         if (value_idx >= bindings->value_count) {
-            wasm_runtime_free(args);
+            destroy_component_public_values(public_args,
+                                            start_section->value_args_count);
             return set_component_runtime_error_fmt(
                 error_buf, error_buf_size,
                 "nested component start section value index %u is out of "
@@ -7354,63 +6813,46 @@ instantiate_nested_component_start_section(
                 value_idx);
         }
 
-        if (!decode_component_start_argument(component, bindings->values[value_idx],
-                                             i, &args[i], error_buf,
-                                             error_buf_size)) {
-            wasm_runtime_free(args);
+        if (!wasm_component_public_value_copy(&public_args[i],
+                                              bindings->values[value_idx],
+                                              error_buf, error_buf_size)) {
+            destroy_component_public_values(public_args,
+                                            start_section->value_args_count);
             return false;
         }
     }
 
-    if (!wasm_component_call_internal(inst, function, start_section->result,
-                                      start_section->result ? &result : NULL,
-                                      start_section->value_args_count, args,
-                                      false)) {
-        wasm_runtime_free(args);
-        return set_component_start_error_from_exception(
-            inst, error_buf, error_buf_size,
-            "nested component start section failed");
+    if (!execute_component_start_section_with_public_values(
+            inst, function, start_section,
+            start_section->result
+                ? &runtime_inst->owned_values[runtime_inst->owned_value_count]
+                : NULL,
+            error_buf, error_buf_size, "nested component start section failed",
+            start_section->value_args_count, public_args)) {
+        if (start_section->result > 0)
+            wasm_component_runtime_value_clear(
+                &runtime_inst->owned_values[runtime_inst->owned_value_count]);
+        destroy_component_public_values(public_args,
+                                        start_section->value_args_count);
+        return false;
     }
 
     if (start_section->result > 0) {
         WASMComponentRuntimeValue *runtime_value =
             &runtime_inst->owned_values[runtime_inst->owned_value_count];
 
-        if (!resolve_component_canon_lift_type(inst, function, &component_type,
-                                               &ignored_core_type)) {
-            wasm_runtime_free(args);
-            return set_component_start_error_from_exception(
-                inst, error_buf, error_buf_size,
-                "nested component start section failed");
-        }
-
-        if (!component_type || !component_type->results
-            || component_type->results->tag != WASM_COMP_RESULT_LIST_WITH_TYPE
-            || !component_type->results->results) {
-            wasm_runtime_free(args);
-            return set_component_runtime_error_fmt(
-                error_buf, error_buf_size,
-                "nested component start section result metadata is missing");
-        }
-
-        if (!init_component_start_result_value(
-                inst, component_type->results->results, &result, runtime_value,
-                error_buf, error_buf_size)) {
-            wasm_runtime_free(args);
-            return false;
-        }
-
         if (!append_nested_component_local_value(bindings, runtime_value, error_buf,
                                                  error_buf_size)) {
             wasm_component_runtime_value_clear(runtime_value);
-            wasm_runtime_free(args);
+            destroy_component_public_values(public_args,
+                                            start_section->value_args_count);
             return false;
         }
 
         runtime_inst->owned_value_count++;
     }
 
-    wasm_runtime_free(args);
+    destroy_component_public_values(public_args, start_section->value_args_count);
     return true;
 }
 
@@ -9052,8 +8494,8 @@ build_component_runtime_instance_from_component(
                 break;
             case WASM_COMP_SECTION_START:
                 if (!instantiate_nested_component_start_section(
-                        inst, runtime_inst, &bindings, component,
-                        section->parsed.start_section, error_buf,
+                        inst, runtime_inst, &bindings, section->parsed.start_section,
+                        error_buf,
                         error_buf_size))
                     goto fail;
                 break;
