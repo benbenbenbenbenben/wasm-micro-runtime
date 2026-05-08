@@ -85,6 +85,7 @@ typedef struct WASMComponentRuntimeFunc {
     WASMComponentRuntimeCanonLiftMemoryResultKind memory_result_kind;
     bool has_string_params;
     bool has_list_u8_params;
+    bool has_composite_params;
     bool has_string_result;
     bool has_list_u8_result;
     bool is_top_level_export;

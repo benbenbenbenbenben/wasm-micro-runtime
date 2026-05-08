@@ -1819,8 +1819,8 @@ static bool
 validate_component_host_import_value_type(
     const WASMComponent *component, const WASMComponentValueType *value_type,
     const char *import_name, const char *position, uint32 index,
-    bool *is_string_out, bool *is_list_u8_out, char *error_buf,
-    uint32 error_buf_size)
+    bool *is_string_out, bool *is_list_u8_out, bool *is_composite_out,
+    char *error_buf, uint32 error_buf_size)
 {
     const WASMComponentTypes *type_entry;
     WASMComponentDefValType *def_type;
@@ -1831,6 +1831,7 @@ validate_component_host_import_value_type(
 
     *is_string_out = false;
     *is_list_u8_out = false;
+    *is_composite_out = false;
 
     if (!value_type)
         return set_component_runtime_error_fmt(
@@ -1962,6 +1963,69 @@ validate_component_host_import_value_type(
                   "variable-length list<u8> parameters",
             import_name, position, index);
 
+    if (!strcmp(position, "parameter")
+        && (def_type->tag == WASM_COMP_DEF_VAL_RECORD
+            || def_type->tag == WASM_COMP_DEF_VAL_TUPLE)) {
+        switch (def_type->tag) {
+            case WASM_COMP_DEF_VAL_RECORD:
+                if (!def_type->def_val.record)
+                    return set_component_runtime_error_fmt(
+                        error_buf, error_buf_size,
+                        "host component import \"%s\" parameter %u only supports "
+                        "tuple/record parameters with scalar leaves",
+                        import_name, index);
+                for (uint32 i = 0; i < def_type->def_val.record->count; i++) {
+                    bool nested_is_string = false;
+                    bool nested_is_list_u8 = false;
+                    bool nested_is_composite = false;
+
+                    if (!validate_component_host_import_value_type(
+                            component, def_type->def_val.record->fields[i].value_type,
+                            import_name, position, index, &nested_is_string,
+                            &nested_is_list_u8, &nested_is_composite, error_buf,
+                            error_buf_size))
+                        return false;
+                    if (nested_is_string || nested_is_list_u8)
+                        return set_component_runtime_error_fmt(
+                            error_buf, error_buf_size,
+                            "host component import \"%s\" parameter %u only "
+                            "supports tuple/record parameters with scalar leaves",
+                            import_name, index);
+                }
+                *is_composite_out = true;
+                return true;
+            case WASM_COMP_DEF_VAL_TUPLE:
+                if (!def_type->def_val.tuple)
+                    return set_component_runtime_error_fmt(
+                        error_buf, error_buf_size,
+                        "host component import \"%s\" parameter %u only supports "
+                        "tuple/record parameters with scalar leaves",
+                        import_name, index);
+                for (uint32 i = 0; i < def_type->def_val.tuple->count; i++) {
+                    bool nested_is_string = false;
+                    bool nested_is_list_u8 = false;
+                    bool nested_is_composite = false;
+
+                    if (!validate_component_host_import_value_type(
+                            component, &def_type->def_val.tuple->element_types[i],
+                            import_name, position, index, &nested_is_string,
+                            &nested_is_list_u8, &nested_is_composite, error_buf,
+                            error_buf_size))
+                        return false;
+                    if (nested_is_string || nested_is_list_u8)
+                        return set_component_runtime_error_fmt(
+                            error_buf, error_buf_size,
+                            "host component import \"%s\" parameter %u only "
+                            "supports tuple/record parameters with scalar leaves",
+                            import_name, index);
+                }
+                *is_composite_out = true;
+                return true;
+            default:
+                break;
+        }
+    }
+
     return set_component_runtime_error_fmt(
         error_buf, error_buf_size,
         "host component import \"%s\" %s %u uses unsupported non-scalar %s type",
@@ -1981,6 +2045,7 @@ validate_component_host_import_func_type(WASMComponentInstance *inst,
 
     function->has_string_params = false;
     function->has_list_u8_params = false;
+    function->has_composite_params = false;
     function->has_string_result = false;
     function->has_list_u8_result = false;
 
@@ -2003,22 +2068,28 @@ validate_component_host_import_func_type(WASMComponentInstance *inst,
         for (i = 0; i < func_type->params->count; i++) {
             bool is_string;
             bool is_list_u8;
+            bool is_composite;
 
             if (!validate_component_host_import_value_type(
                     &inst->module->component,
                     func_type->params->params[i].value_type, import_name,
-                    "parameter", i, &is_string, &is_list_u8, error_buf,
+                    "parameter", i, &is_string, &is_list_u8, &is_composite,
+                    error_buf,
                     error_buf_size))
                 return false;
             if (is_string)
                 function->has_string_params = true;
             if (is_list_u8)
                 function->has_list_u8_params = true;
+            if (is_composite)
+                function->has_composite_params = true;
         }
     }
 
     if (func_type->results
         && func_type->results->tag == WASM_COMP_RESULT_LIST_WITH_TYPE) {
+        bool is_composite = false;
+
         if (!func_type->results->results)
             return set_component_runtime_error_fmt(
                 error_buf, error_buf_size,
@@ -2027,8 +2098,10 @@ validate_component_host_import_func_type(WASMComponentInstance *inst,
         if (!validate_component_host_import_value_type(
                 &inst->module->component, func_type->results->results,
                 import_name, "result", 0, &function->has_string_result,
-                &function->has_list_u8_result, error_buf, error_buf_size))
+                &function->has_list_u8_result, &is_composite, error_buf,
+                error_buf_size))
             return false;
+        (void)is_composite;
     }
 
     return true;
@@ -2936,6 +3009,70 @@ set_component_param_flattening_error(WASMComponentInstance *inst)
 }
 
 static bool
+validate_component_public_composite_bytes(
+    WASMComponentInstance *inst, const WASMComponent *component,
+    const WASMComponentValueType *value_type, const uint8 *data,
+    uint32 byte_size, uint32 *offset_io, uint32 param_index)
+{
+    WASMComponentCanonLiftValueShape shape;
+
+    if (!resolve_component_canon_lift_value_shape(component, value_type,
+                                                  "parameter", param_index,
+                                                  &shape, inst))
+        return false;
+
+    if (shape.is_primitive) {
+        wasm_val_t ignored;
+        uint8 expected_core_type;
+        wasm_valkind_t public_kind;
+        uint32 consumed = 0;
+
+        if (!component_scalar_prim_to_core(shape.prim_type, &expected_core_type,
+                                           &public_kind))
+            return set_component_composite_param_leaf_error(inst, param_index);
+
+        if (!decode_component_public_scalar_prefix(
+                inst, data ? data + *offset_io : NULL, byte_size - *offset_io,
+                shape.prim_type, public_kind, "parameter", param_index, &ignored,
+                &consumed))
+            return false;
+
+        (*offset_io) += consumed;
+        return true;
+    }
+
+    if (!shape.def_type)
+        return set_component_composite_param_leaf_error(inst, param_index);
+
+    switch (shape.def_type->tag) {
+        case WASM_COMP_DEF_VAL_RECORD:
+            if (!shape.def_type->def_val.record)
+                return set_component_composite_param_leaf_error(inst, param_index);
+            for (uint32 i = 0; i < shape.def_type->def_val.record->count; i++) {
+                if (!validate_component_public_composite_bytes(
+                        inst, component,
+                        shape.def_type->def_val.record->fields[i].value_type, data,
+                        byte_size, offset_io, param_index))
+                    return false;
+            }
+            return true;
+        case WASM_COMP_DEF_VAL_TUPLE:
+            if (!shape.def_type->def_val.tuple)
+                return set_component_composite_param_leaf_error(inst, param_index);
+            for (uint32 i = 0; i < shape.def_type->def_val.tuple->count; i++) {
+                if (!validate_component_public_composite_bytes(
+                        inst, component,
+                        &shape.def_type->def_val.tuple->element_types[i], data,
+                        byte_size, offset_io, param_index))
+                    return false;
+            }
+            return true;
+        default:
+            return set_component_composite_param_leaf_error(inst, param_index);
+    }
+}
+
+static bool
 flatten_component_public_composite_bytes(
     WASMComponentInstance *inst, const WASMComponent *component,
     const WASMComponentValueType *value_type, const uint8 *data,
@@ -3012,6 +3149,42 @@ flatten_component_public_composite_bytes(
         default:
             return set_component_composite_param_leaf_error(inst, param_index);
     }
+}
+
+static bool
+validate_component_public_composite_param_value(
+    WASMComponentInstance *inst, const WASMComponent *component,
+    const WASMComponentValueType *value_type, const wasm_component_value_t *value,
+    uint32 param_index)
+{
+    const uint8 *data;
+    uint32 offset = 0;
+
+    if (!value)
+        return set_component_call_error_fmt(
+            inst, "host component function parameter %u value is null", param_index);
+    if (value->type.kind != WASM_COMPONENT_VALUE_TYPE_DEFINED)
+        return set_component_call_error_fmt(
+            inst, "host component function parameter %u expects a defined "
+                  "component value",
+            param_index);
+
+    data = wasm_component_value_get_data(value);
+    if (value->byte_size > 0 && !data)
+        return set_component_call_error_fmt(
+            inst, "host component function parameter %u is missing backing bytes",
+            param_index);
+
+    if (!validate_component_public_composite_bytes(
+            inst, component, value_type, data, value->byte_size, &offset,
+            param_index))
+        return false;
+
+    if (offset != value->byte_size)
+        return set_component_call_error_fmt(
+            inst, "host component function parameter %u contains trailing bytes",
+            param_index);
+    return true;
 }
 
 static bool
@@ -3943,7 +4116,24 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
                 inst, "host component function results buffer is null");
 
         for (i = 0; i < component_type->params->count; i++) {
+            WASMComponentCanonLiftValueShape shape;
             WASMComponentCanonLiftValueInfo type_info;
+
+            if (!resolve_component_canon_lift_value_shape(
+                    &inst->module->component,
+                    component_type->params->params[i].value_type, "parameter", i,
+                    &shape, inst))
+                return false;
+
+            if (!shape.is_primitive && shape.def_type
+                && (shape.def_type->tag == WASM_COMP_DEF_VAL_RECORD
+                    || shape.def_type->tag == WASM_COMP_DEF_VAL_TUPLE)) {
+                if (!validate_component_public_composite_param_value(
+                        inst, &inst->module->component,
+                        component_type->params->params[i].value_type, &args[i], i))
+                    return false;
+                continue;
+            }
 
             if (!lookup_component_canon_lift_value_type(
                     &inst->module->component,
@@ -4383,14 +4573,18 @@ wasm_component_call_internal(WASMComponentInstance *inst,
             return false;
 
         if (function->has_string_params || function->has_string_result
-            || function->has_list_u8_params || function->has_list_u8_result)
+            || function->has_list_u8_params || function->has_list_u8_result
+            || function->has_composite_params)
             return set_component_call_error(
                 inst,
                 function->has_string_params || function->has_string_result
                     ? "host component function uses string values; call through "
                       "the component value API"
-                    : "host component function uses memory-backed values; call "
-                      "through the component value API");
+                    : function->has_list_u8_params || function->has_list_u8_result
+                          ? "host component function uses memory-backed values; "
+                            "call through the component value API"
+                          : "host component function uses composite values; call "
+                            "through the component value API");
 
         if (!component_type || !component_type->params)
             return set_component_call_error(

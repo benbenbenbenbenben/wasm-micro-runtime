@@ -1,6 +1,6 @@
 # Component Model Support Gaps in This Fork
 
-This document summarizes the **current** state of component-model support in this fork after `29fe91ce feat: extend component runtime execution`.
+This document summarizes the **current** state of component-model support in this fork after the recent component-runtime execution work.
 
 The short version is:
 
@@ -10,9 +10,9 @@ The short version is:
 
 The main remaining gaps are now centered on:
 
-- Canonical ABI beyond scalar values and UTF-8 strings
+- Canonical ABI beyond the current scalar / UTF-8 string / `list<u8>` / scalar-leaf tuple-record slices
 - canon-lower / imported component-function lowering paths
-- broader composite component values
+- broader composite component values and memory-backed leaves inside composites
 - operational resource semantics
 - remaining public host API limitations
 - nested core-module / core-instance / core-type runtime support
@@ -21,7 +21,7 @@ The main remaining gaps are now centered on:
 
 The implementation is now best described as:
 
-> **A partial but executable component runtime: top-level component loading/instantiation, public import/export APIs, scalar and UTF-8 string canon-lift calls, runtime values, value imports/exports, start execution slices, and resource bookkeeping foundations are all present.**
+> **A partial but executable component runtime: top-level component loading/instantiation, public import/export APIs, scalar / UTF-8 string / `list<u8>` / limited tuple-record canon-lift calls, host-provided component-function imports for the currently supported subset, runtime values, value imports/exports, start execution slices, and resource bookkeeping foundations are all present.**
 
 ### 1.1 Top-level component loading, instantiation, and teardown
 
@@ -115,14 +115,19 @@ What works today:
 - direct calling of top-level exported canon-lift functions
 - scalar parameter/result lifting via `wasm_runtime_call_component(...)`
 - UTF-8 string parameter/result handling via `wasm_runtime_call_component_values(...)`
+- top-level `list<u8>` parameter/result handling via `wasm_runtime_call_component_values(...)`
+- top-level tuple/record parameter/result handling when every leaf is scalar
 - memory / realloc / post-return validation and use for supported UTF-8 string lifts
+- host-provided top-level component-function imports for scalar / UTF-8 string / `list<u8>` signatures
+- host-provided top-level component-function imports for tuple/record parameters with scalar leaves
 
 Current supported execution envelope is intentionally narrow:
 
 - only `canon lift` is executable
-- calls must target top-level exported canon-lift functions
+- calls must target top-level exported canon-lift functions or the currently supported top-level host-import callback path
 - scalar signatures work through the `wasm_val_t` API
-- UTF-8 string signatures work through the component-value API
+- UTF-8 string / `list<u8>` / tuple-record signatures work through the component-value API
+- raw `wasm_runtime_call_component(...)` stays scalar-only
 
 ### 1.6 Runtime values and value sections are implemented
 
@@ -181,10 +186,13 @@ This is a real runtime substrate, but not yet full resource semantics.
 - public component export discovery/lookup
 - public scalar component calls
 - public UTF-8 string component calls
+- public `list<u8>` component calls
+- public tuple/record component calls
 - top-level component import binding
 - public value import/export flows
 - top-level and nested value sections
 - top-level and nested scalar start execution
+- top-level host function imports across scalar / UTF-8 string / `list<u8>` / scalar-leaf tuple-record slices
 - resource-state and owned-handle cleanup foundations
 
 ## 2. What is still missing for full component-model support
@@ -197,18 +205,21 @@ The executable Canonical ABI surface is currently limited to:
 
 - scalar values
 - UTF-8 strings
+- top-level `list<u8>`
+- top-level tuple/record values with scalar leaves
 - top-level exported `canon lift`
+- top-level host-defined component-function imports for the same supported subset
 
 Major Canonical ABI gaps remain:
 
 - no executable `canon lower`
-- no adapter/lowering path for imported component functions
-- no host-defined native component-function implementation surface
-- no list marshalling beyond the special-cased UTF-8 string path
-- no record / tuple / variant / flags / enum / option / result marshalling
-- no broader composite flattening/lifting rules
+- no general adapter/lowering path for imported component functions beyond the supported host-callback subset
+- no list marshalling beyond UTF-8 strings and top-level `list<u8>`
+- no variant / flags / enum / option / result marshalling
+- no nested memory-backed leaves inside tuple/record Canonical ABI values yet
+- no broader composite flattening/lifting rules beyond scalar-leaf tuple/record support
 - no non-UTF-8 string encodings (`utf16`, `latin1+utf16`)
-- no `memory64` string Canonical ABI support
+- no `memory64` memory-backed Canonical ABI support
 - no `error-context` value support
 - no async/callback canon options
 
@@ -224,7 +235,8 @@ Current limitations include:
 - generic `wasm_runtime_create_exec_env(...)` still rejects component instances
 - `wasm_runtime_call_component(...)` / `wasm_runtime_call_component_values(...)` only accept top-level exported canon-lift handles
 - nested function handles can be discovered, but not invoked through the public top-level call API
-- top-level import binding is limited to existing runtime handles / public values, not arbitrary host-native lowered adapters
+- top-level import binding is limited to existing runtime handles / public values and the current supported host callback subset, not arbitrary host-native lowered adapters
+- host-import composite results are still limited beyond the current scalar/string/`list<u8>` surface
 - there is still no public resource import/export contract comparable to the current function/value/instance/component/core-module surface
 
 ## 5. Broader component values are still missing
@@ -235,13 +247,14 @@ What works today:
 
 - primitive scalar values
 - raw borrowed/owned value payload storage
-- the special UTF-8 string call path used by supported canon-lift calls
+- opaque defined-value payloads for UTF-8 strings and top-level `list<u8>` calls
+- opaque defined-value payloads for tuple/record composites in the currently supported scalar-leaf cases
 
 What is still missing:
 
-- first-class runtime semantics for lists
-- records
-- tuples
+- first-class runtime semantics for general lists
+- first-class typed runtime semantics for records
+- first-class typed runtime semantics for tuples
 - variants
 - flags
 - enums
@@ -347,4 +360,4 @@ If this feature is described as:
 
 The right maturity label today is:
 
-> **A real but still partial component runtime: public host APIs, scalar and UTF-8 string canon-lift calls, runtime values, value imports/exports, start execution slices, and resource bookkeeping foundations are implemented; full support is still blocked on canon-lower/imported-function lowering, broader composite Canonical ABI and value semantics, operational resources, remaining host API gaps, and nested core-runtime support.**
+> **A real but still partial component runtime: public host APIs, scalar / UTF-8 string / `list<u8>` / limited tuple-record canon-lift calls, supported host-provided component-function imports, runtime values, value imports/exports, start execution slices, and resource bookkeeping foundations are implemented; full support is still blocked on canon-lower/imported-function lowering, broader composite Canonical ABI and value semantics, operational resources, remaining host API gaps, and nested core-runtime support.**
