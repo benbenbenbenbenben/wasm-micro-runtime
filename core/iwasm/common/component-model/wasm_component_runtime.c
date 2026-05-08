@@ -1369,6 +1369,14 @@ count_nested_component_local_bindings(const WASMComponent *nested_component,
                 }
                 break;
             }
+            case WASM_COMP_SECTION_START:
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "nested component start sections are not supported yet");
+            case WASM_COMP_SECTION_VALUES:
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "nested component value sections are not supported yet");
             default:
                 return set_component_runtime_error_fmt(
                     error_buf, error_buf_size,
@@ -1913,6 +1921,16 @@ build_component_runtime_instance_from_component(
                         error_buf, error_buf_size))
                     goto fail;
                 break;
+            case WASM_COMP_SECTION_START:
+                set_component_runtime_error(
+                    error_buf, error_buf_size,
+                    "nested component start sections are not supported yet");
+                goto fail;
+            case WASM_COMP_SECTION_VALUES:
+                set_component_runtime_error(
+                    error_buf, error_buf_size,
+                    "nested component value sections are not supported yet");
+                goto fail;
             default:
                 goto fail;
         }
@@ -2124,6 +2142,16 @@ build_component_instance_graph(WASMComponentInstance *inst, char *error_buf,
                                                error_buf, error_buf_size))
                     return false;
                 break;
+            case WASM_COMP_SECTION_START:
+                set_component_runtime_error(
+                    error_buf, error_buf_size,
+                    "component start sections are not supported yet");
+                return false;
+            case WASM_COMP_SECTION_VALUES:
+                set_component_runtime_error(
+                    error_buf, error_buf_size,
+                    "component value sections are not supported yet");
+                return false;
             default:
                 break;
         }

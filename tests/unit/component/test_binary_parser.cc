@@ -2275,6 +2275,108 @@ append_nested_component_outer_alias_parent_sections(
            && export_section->parsed.export_section->exports[0].sort_idx;
 }
 
+static bool
+append_top_level_start_section(WASMComponentModule *component_module)
+{
+    WASMComponent *component = &component_module->component;
+    const uint32_t old_count = component->section_count;
+    const uint32_t new_count = old_count + 1;
+    auto *new_sections = (WASMComponentSection *)wasm_runtime_malloc(
+        sizeof(WASMComponentSection) * new_count);
+    if (!new_sections) {
+        return false;
+    }
+
+    memset(new_sections, 0, sizeof(WASMComponentSection) * new_count);
+    memcpy(new_sections, component->sections,
+           sizeof(WASMComponentSection) * old_count);
+    wasm_runtime_free(component->sections);
+    component->sections = new_sections;
+    component->section_count = new_count;
+
+    WASMComponentSection *start_section = &component->sections[old_count];
+    start_section->id = WASM_COMP_SECTION_START;
+    start_section->parsed.start_section =
+        (WASMComponentStartSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentStartSection));
+    if (!start_section->parsed.start_section) {
+        return false;
+    }
+
+    memset(start_section->parsed.start_section, 0, sizeof(WASMComponentStartSection));
+    start_section->parsed.start_section->func_idx = 0;
+    return true;
+}
+
+static bool
+append_nested_value_section(WASMComponentModule *component_module)
+{
+    WASMComponent *component = &component_module->component;
+    const uint32_t old_count = component->section_count;
+    const uint32_t new_count = old_count + 2;
+    auto *new_sections = (WASMComponentSection *)wasm_runtime_malloc(
+        sizeof(WASMComponentSection) * new_count);
+    if (!new_sections) {
+        return false;
+    }
+
+    memset(new_sections, 0, sizeof(WASMComponentSection) * new_count);
+    memcpy(new_sections, component->sections,
+           sizeof(WASMComponentSection) * old_count);
+    wasm_runtime_free(component->sections);
+    component->sections = new_sections;
+    component->section_count = new_count;
+
+    WASMComponentSection *component_section = &component->sections[old_count];
+    WASMComponentSection *instance_section = &component->sections[old_count + 1];
+
+    component_section->id = WASM_COMP_SECTION_COMPONENT;
+    component_section->parsed.component = create_empty_component();
+    if (!component_section->parsed.component) {
+        return false;
+    }
+    component_section->parsed.component->section_count = 1;
+    component_section->parsed.component->sections =
+        (WASMComponentSection *)wasm_runtime_malloc(sizeof(WASMComponentSection));
+    if (!component_section->parsed.component->sections) {
+        return false;
+    }
+    memset(component_section->parsed.component->sections, 0,
+           sizeof(WASMComponentSection));
+    component_section->parsed.component->sections[0].id = WASM_COMP_SECTION_VALUES;
+    component_section->parsed.component->sections[0].parsed.value_section =
+        (WASMComponentValueSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentValueSection));
+    if (!component_section->parsed.component->sections[0].parsed.value_section) {
+        return false;
+    }
+    memset(component_section->parsed.component->sections[0].parsed.value_section, 0,
+           sizeof(WASMComponentValueSection));
+
+    instance_section->id = WASM_COMP_SECTION_INSTANCES;
+    instance_section->parsed.instance_section =
+        (WASMComponentInstSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentInstSection));
+    if (!instance_section->parsed.instance_section) {
+        return false;
+    }
+    memset(instance_section->parsed.instance_section, 0,
+           sizeof(WASMComponentInstSection));
+    instance_section->parsed.instance_section->count = 1;
+    instance_section->parsed.instance_section->instances =
+        (WASMComponentInst *)wasm_runtime_malloc(sizeof(WASMComponentInst));
+    if (!instance_section->parsed.instance_section->instances) {
+        return false;
+    }
+    memset(instance_section->parsed.instance_section->instances, 0,
+           sizeof(WASMComponentInst));
+    instance_section->parsed.instance_section->instances[0].instance_expression_tag =
+        WASM_COMP_INSTANCE_EXPRESSION_WITH_ARGS;
+    instance_section->parsed.instance_section->instances[0].expression.with_args.idx =
+        1;
+    return true;
+}
+
 class BinaryParserTest : public testing::Test
 {
   public:
@@ -2927,6 +3029,60 @@ TEST_F(BinaryParserTest, TestRuntimeResolvesNestedOuterComponentAliasesInParentS
               expected_component);
 
     wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest, TestRuntimeRejectsTopLevelStartSections)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "runtime-top-level-start-sections";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(append_top_level_start_section((WASMComponentModule *)module));
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_EQ(module_inst, nullptr);
+    ASSERT_NE(strstr(helper->error_buf,
+                     "component start sections are not supported yet"),
+              nullptr);
+
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest, TestRuntimeRejectsNestedValueSections)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "runtime-nested-value-sections";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(append_nested_value_section((WASMComponentModule *)module));
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_EQ(module_inst, nullptr);
+    ASSERT_NE(strstr(helper->error_buf,
+                     "nested component value sections are not supported yet"),
+              nullptr);
+
     wasm_runtime_unload(module);
 }
 
