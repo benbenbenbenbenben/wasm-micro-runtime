@@ -93,6 +93,8 @@ collect_component_runtime_alloc_counts(const WASMComponent *component,
                         counts->component_func_count++;
                     else if (alias->sort->sort == WASM_COMP_SORT_INSTANCE)
                         counts->component_instance_count++;
+                    else if (alias->sort->sort == WASM_COMP_SORT_COMPONENT)
+                        counts->component_count++;
                 }
                 break;
             }
@@ -376,6 +378,16 @@ resolve_nested_component_local_sort_idx(
                     sort_idx->idx);
             *out_ref = bindings->instances[sort_idx->idx];
             return true;
+        case WASM_COMP_SORT_COMPONENT:
+            if (sort_idx->idx >= bindings->component_count)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "nested component index %u is out of bounds",
+                    sort_idx->idx);
+            memset(out_ref, 0, sizeof(*out_ref));
+            out_ref->type = WASM_COMP_RUNTIME_REF_COMPONENT;
+            out_ref->of.component = bindings->components[sort_idx->idx];
+            return true;
         default:
             return set_component_runtime_error_fmt(
                 error_buf, error_buf_size,
@@ -557,6 +569,14 @@ resolve_component_sort_idx(const WASMComponentInstance *inst,
                     sort_idx->idx);
             out_ref->type = WASM_COMP_RUNTIME_REF_INSTANCE;
             out_ref->of.instance = &inst->component_instances[sort_idx->idx];
+            return true;
+        case WASM_COMP_SORT_COMPONENT:
+            if (sort_idx->idx >= inst->component_count)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "component index %u is out of bounds", sort_idx->idx);
+            out_ref->type = WASM_COMP_RUNTIME_REF_COMPONENT;
+            out_ref->of.component = inst->components[sort_idx->idx];
             return true;
         default:
             return set_component_runtime_error_fmt(
@@ -762,6 +782,14 @@ append_component_alias(WASMComponentInstance *inst, const char *name,
             alias_inst->exports = ref.of.instance->exports;
             return true;
         }
+        case WASM_COMP_SORT_COMPONENT:
+            if (ref.type != WASM_COMP_RUNTIME_REF_COMPONENT)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "component alias \"%s\" did not resolve to a component",
+                    name);
+            inst->components[inst->component_count++] = ref.of.component;
+            return true;
         default:
             return set_component_runtime_error_fmt(
                 error_buf, error_buf_size,
@@ -912,17 +940,20 @@ resolve_component_alias_section(WASMComponentInstance *inst,
                     "component alias instance index %u is out of bounds",
                     alias_def->target.exported.instance_idx);
 
-            switch (alias_def->sort->sort) {
-                case WASM_COMP_SORT_FUNC:
-                    expected_type = WASM_COMP_RUNTIME_REF_FUNC;
-                    break;
-                case WASM_COMP_SORT_INSTANCE:
-                    expected_type = WASM_COMP_RUNTIME_REF_INSTANCE;
-                    break;
-                default:
-                    return set_component_runtime_error_fmt(
-                        error_buf, error_buf_size,
-                        "component alias sort 0x%02x is not supported yet",
+                switch (alias_def->sort->sort) {
+                    case WASM_COMP_SORT_FUNC:
+                        expected_type = WASM_COMP_RUNTIME_REF_FUNC;
+                        break;
+                    case WASM_COMP_SORT_INSTANCE:
+                        expected_type = WASM_COMP_RUNTIME_REF_INSTANCE;
+                        break;
+                    case WASM_COMP_SORT_COMPONENT:
+                        expected_type = WASM_COMP_RUNTIME_REF_COMPONENT;
+                        break;
+                    default:
+                        return set_component_runtime_error_fmt(
+                            error_buf, error_buf_size,
+                            "component alias sort 0x%02x is not supported yet",
                         (unsigned)alias_def->sort->sort);
             }
 
@@ -1018,6 +1049,10 @@ resolve_nested_component_exports(
             case WASM_COMP_SORT_INSTANCE:
                 expected_type = WASM_COMP_RUNTIME_REF_INSTANCE;
                 sort_name = "instance";
+                break;
+            case WASM_COMP_SORT_COMPONENT:
+                expected_type = WASM_COMP_RUNTIME_REF_COMPONENT;
+                sort_name = "component";
                 break;
             default:
                 return set_component_runtime_error_fmt(
@@ -1128,6 +1163,9 @@ count_nested_component_local_bindings(const WASMComponent *nested_component,
                             break;
                         case WASM_COMP_SORT_INSTANCE:
                             (*instance_count)++;
+                            break;
+                        case WASM_COMP_SORT_COMPONENT:
+                            (*component_count)++;
                             break;
                         default:
                             return set_component_runtime_error_fmt(
@@ -1487,6 +1525,9 @@ resolve_nested_component_alias_section(
             case WASM_COMP_SORT_INSTANCE:
                 expected_type = WASM_COMP_RUNTIME_REF_INSTANCE;
                 break;
+            case WASM_COMP_SORT_COMPONENT:
+                expected_type = WASM_COMP_RUNTIME_REF_COMPONENT;
+                break;
             default:
                 return set_component_runtime_error_fmt(
                     error_buf, error_buf_size,
@@ -1500,9 +1541,17 @@ resolve_nested_component_alias_section(
         name = alias_def->target.exported.name->name;
         if (!lookup_component_instance_export(component_instance, name,
                                               expected_type, &ref, error_buf,
-                                              error_buf_size)
-            || !append_nested_component_local_ref(bindings, ref, error_buf,
-                                                  error_buf_size))
+                                              error_buf_size))
+            return false;
+
+        if (alias_def->sort->sort == WASM_COMP_SORT_COMPONENT) {
+            if (!append_nested_component_local_component(bindings, ref.of.component,
+                                                         error_buf,
+                                                         error_buf_size))
+                return false;
+        }
+        else if (!append_nested_component_local_ref(bindings, ref, error_buf,
+                                                    error_buf_size))
             return false;
     }
 
