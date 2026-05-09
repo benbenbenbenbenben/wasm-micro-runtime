@@ -174,6 +174,8 @@ Implemented slices include:
 - nested value section instantiation
 - top-level value exports
 - top-level public value imports
+- typed top-level and nested value-instance import validation for the current
+  scalar / UTF-8 string / variable-length `list<u8>` / tuple-record leaf subset
 - aliasing/re-export of value references through the runtime graph
 
 This is real runtime value plumbing, even though full composite value semantics are still missing.

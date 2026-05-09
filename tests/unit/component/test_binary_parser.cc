@@ -467,6 +467,59 @@ init_single_instance_type_section(WASMComponentTypeSection *type_section,
 }
 
 static bool
+append_instance_type_to_type_section(WASMComponentTypeSection *type_section,
+                                     const char *export_name,
+                                     WASMComponentExternDesc *export_desc)
+{
+    auto *instance_type =
+        (WASMComponentInstType *)wasm_runtime_malloc(sizeof(WASMComponentInstType));
+    auto *instance_decls = (WASMComponentInstDecl *)wasm_runtime_malloc(
+        sizeof(WASMComponentInstDecl));
+    auto *export_decl =
+        (WASMComponentComponentDeclExport *)wasm_runtime_malloc(
+            sizeof(WASMComponentComponentDeclExport));
+    auto *new_types = type_section
+                          ? (WASMComponentTypes *)wasm_runtime_malloc(
+                                sizeof(WASMComponentTypes)
+                                * (type_section->count + 1))
+                          : nullptr;
+
+    if (!type_section || !export_name || !export_desc || !instance_type
+        || !instance_decls || !export_decl || !new_types) {
+        return false;
+    }
+
+    memset(instance_type, 0, sizeof(WASMComponentInstType));
+    memset(instance_decls, 0, sizeof(WASMComponentInstDecl));
+    memset(export_decl, 0, sizeof(WASMComponentComponentDeclExport));
+    memset(new_types, 0,
+           sizeof(WASMComponentTypes) * (type_section->count + 1));
+    memcpy(new_types, type_section->types,
+           sizeof(WASMComponentTypes) * type_section->count);
+
+    export_decl->export_name = create_export_name(export_name);
+    export_decl->extern_desc = export_desc;
+    if (!export_decl->export_name) {
+        return false;
+    }
+
+    instance_type->count = 1;
+    instance_type->instance_decls = instance_decls;
+    instance_decls[0].tag = WASM_COMP_COMPONENT_DECL_INSTANCE_EXPORTDECL;
+    instance_decls[0].decl.export_decl = export_decl;
+
+    new_types[type_section->count].tag = WASM_COMP_INSTANCE_TYPE;
+    new_types[type_section->count].type.instance_type = instance_type;
+
+    if (type_section->types) {
+        wasm_runtime_free(type_section->types);
+    }
+    type_section->types = new_types;
+    type_section->count++;
+    return true;
+}
+
+static bool
 append_top_level_resource_type_section(WASMComponentModule *component_module)
 {
     WASMComponent *component = &component_module->component;
@@ -2194,6 +2247,164 @@ append_component_record_string_list_value_type(
         { { "lhs", make_component_primitive_value_type(WASM_COMP_PRIMVAL_S32) },
           { rhs_field_name ? rhs_field_name : "rhs",
             make_component_type_index_value_type((uint32_t)inner_tuple_type_idx) } });
+}
+
+static bool
+clone_supported_value_type_into_component(
+    WASMComponent *target_component, const WASMComponent *source_component,
+    const WASMComponentValueType *source_value_type,
+    WASMComponentValueType *out_value_type)
+{
+    const WASMComponentTypes *type_entry;
+    const WASMComponentDefValType *def_type;
+
+    if (!target_component || !source_component || !source_value_type
+        || !out_value_type) {
+        return false;
+    }
+
+    if (source_value_type->type == WASM_COMP_VAL_TYPE_PRIMVAL) {
+        *out_value_type = *source_value_type;
+        return true;
+    }
+
+    type_entry = wasm_component_lookup_type(source_component,
+                                            source_value_type->type_specific.type_idx);
+    if (!type_entry || type_entry->tag != WASM_COMP_DEF_TYPE
+        || !(def_type = type_entry->type.def_val_type)) {
+        return false;
+    }
+
+    switch (def_type->tag) {
+        case WASM_COMP_DEF_VAL_PRIMVAL:
+            *out_value_type =
+                make_component_primitive_value_type(def_type->def_val.primval);
+            return true;
+        case WASM_COMP_DEF_VAL_LIST:
+        case WASM_COMP_DEF_VAL_LIST_LEN:
+        {
+            const WASMComponentValueType *element_type =
+                def_type->tag == WASM_COMP_DEF_VAL_LIST
+                    ? def_type->def_val.list
+                          ? def_type->def_val.list->element_type
+                          : nullptr
+                    : def_type->def_val.list_len
+                          ? def_type->def_val.list_len->element_type
+                          : nullptr;
+            WASMComponentPrimValType element_prim_type;
+            WASMComponentModule target_module = {};
+            int32_t type_idx;
+
+            if (!element_type) {
+                return false;
+            }
+
+            if (element_type->type == WASM_COMP_VAL_TYPE_PRIMVAL) {
+                element_prim_type = (WASMComponentPrimValType)
+                    element_type->type_specific.primval_type;
+            }
+            else {
+                const WASMComponentTypes *element_entry =
+                    wasm_component_lookup_type(
+                        source_component, element_type->type_specific.type_idx);
+                if (!element_entry || element_entry->tag != WASM_COMP_DEF_TYPE
+                    || !element_entry->type.def_val_type
+                    || element_entry->type.def_val_type->tag
+                           != WASM_COMP_DEF_VAL_PRIMVAL) {
+                    return false;
+                }
+                element_prim_type =
+                    element_entry->type.def_val_type->def_val.primval;
+            }
+
+            target_module.component = *target_component;
+            type_idx = append_component_list_type(
+                &target_module, element_prim_type,
+                def_type->tag == WASM_COMP_DEF_VAL_LIST_LEN,
+                def_type->tag == WASM_COMP_DEF_VAL_LIST_LEN
+                    ? def_type->def_val.list_len->len
+                    : 0);
+            if (type_idx < 0) {
+                return false;
+            }
+
+            *target_component = target_module.component;
+            *out_value_type = make_component_type_index_value_type((uint32_t)type_idx);
+            return true;
+        }
+        case WASM_COMP_DEF_VAL_TUPLE:
+        {
+            WASMComponentModule target_module = {};
+            std::vector<WASMComponentValueType> element_types;
+            int32_t type_idx;
+
+            if (!def_type->def_val.tuple) {
+                return false;
+            }
+
+            for (uint32_t i = 0; i < def_type->def_val.tuple->count; i++) {
+                WASMComponentValueType nested_value_type = {};
+                if (!clone_supported_value_type_into_component(
+                        target_component, source_component,
+                        &def_type->def_val.tuple->element_types[i],
+                        &nested_value_type)) {
+                    return false;
+                }
+                element_types.push_back(nested_value_type);
+            }
+
+            target_module.component = *target_component;
+            type_idx = append_component_tuple_type(&target_module, element_types);
+            if (type_idx < 0) {
+                return false;
+            }
+
+            *target_component = target_module.component;
+            *out_value_type = make_component_type_index_value_type((uint32_t)type_idx);
+            return true;
+        }
+        case WASM_COMP_DEF_VAL_RECORD:
+        {
+            WASMComponentModule target_module = {};
+            std::vector<TestComponentRecordFieldSpec> fields;
+            int32_t type_idx;
+
+            if (!def_type->def_val.record) {
+                return false;
+            }
+
+            for (uint32_t i = 0; i < def_type->def_val.record->count; i++) {
+                WASMComponentValueType nested_value_type = {};
+                const char *field_name =
+                    def_type->def_val.record->fields[i].label
+                    && def_type->def_val.record->fields[i].label->name
+                        ? def_type->def_val.record->fields[i].label->name
+                        : nullptr;
+
+                if (!field_name
+                    || !clone_supported_value_type_into_component(
+                        target_component, source_component,
+                        def_type->def_val.record->fields[i].value_type,
+                        &nested_value_type)) {
+                    return false;
+                }
+
+                fields.push_back({ field_name, nested_value_type });
+            }
+
+            target_module.component = *target_component;
+            type_idx = append_component_record_type(&target_module, fields);
+            if (type_idx < 0) {
+                return false;
+            }
+
+            *target_component = target_module.component;
+            *out_value_type = make_component_type_index_value_type((uint32_t)type_idx);
+            return true;
+        }
+        default:
+            return false;
+    }
 }
 
 static void
@@ -6214,6 +6425,123 @@ append_top_level_value_alias_sections(WASMComponentModule *component_module)
 }
 
 static bool
+append_top_level_inline_value_instance_sections_with_type_and_bytes(
+    WASMComponentModule *component_module,
+    const WASMComponentValueType &value_type, const uint8_t *bytes,
+    uint32_t byte_len, const char *instance_export_name,
+    const char *nested_export_name)
+{
+    WASMComponent *component = &component_module->component;
+    const uint32_t value_idx =
+        count_top_level_sort_entries(component, WASM_COMP_SORT_VALUE);
+    const uint32_t instance_idx =
+        count_top_level_sort_entries(component, WASM_COMP_SORT_INSTANCE);
+    const uint32_t old_count = component->section_count;
+    const uint32_t new_count = old_count + 3;
+    auto *new_sections = (WASMComponentSection *)wasm_runtime_malloc(
+        sizeof(WASMComponentSection) * new_count);
+
+    if (!new_sections || !instance_export_name || !nested_export_name) {
+        return false;
+    }
+
+    memset(new_sections, 0, sizeof(WASMComponentSection) * new_count);
+    memcpy(new_sections, component->sections,
+           sizeof(WASMComponentSection) * old_count);
+    wasm_runtime_free(component->sections);
+    component->sections = new_sections;
+    component->section_count = new_count;
+
+    auto *value_section = &component->sections[old_count];
+    auto *instance_section = &component->sections[old_count + 1];
+    auto *export_section = &component->sections[old_count + 2];
+
+    value_section->id = WASM_COMP_SECTION_VALUES;
+    value_section->parsed.value_section =
+        (WASMComponentValueSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentValueSection));
+    if (!value_section->parsed.value_section) {
+        return false;
+    }
+    memset(value_section->parsed.value_section, 0, sizeof(WASMComponentValueSection));
+    if (!init_value_section_with_type_and_bytes(value_section->parsed.value_section,
+                                                value_type, bytes, byte_len)) {
+        return false;
+    }
+
+    instance_section->id = WASM_COMP_SECTION_INSTANCES;
+    instance_section->parsed.instance_section =
+        (WASMComponentInstSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentInstSection));
+    if (!instance_section->parsed.instance_section) {
+        return false;
+    }
+    memset(instance_section->parsed.instance_section, 0,
+           sizeof(WASMComponentInstSection));
+    instance_section->parsed.instance_section->count = 1;
+    instance_section->parsed.instance_section->instances =
+        (WASMComponentInst *)wasm_runtime_malloc(sizeof(WASMComponentInst));
+    if (!instance_section->parsed.instance_section->instances) {
+        return false;
+    }
+    memset(instance_section->parsed.instance_section->instances, 0,
+           sizeof(WASMComponentInst));
+    instance_section->parsed.instance_section->instances[0].instance_expression_tag =
+        WASM_COMP_INSTANCE_EXPRESSION_WITHOUT_ARGS;
+    instance_section->parsed.instance_section->instances[0]
+        .expression.without_args.inline_expr_len = 1;
+    instance_section->parsed.instance_section->instances[0]
+        .expression.without_args.inline_expr =
+        (WASMComponentInlineExport *)wasm_runtime_malloc(
+            sizeof(WASMComponentInlineExport));
+    if (!instance_section->parsed.instance_section->instances[0]
+             .expression.without_args.inline_expr) {
+        return false;
+    }
+    memset(instance_section->parsed.instance_section->instances[0]
+               .expression.without_args.inline_expr,
+           0, sizeof(WASMComponentInlineExport));
+    instance_section->parsed.instance_section->instances[0]
+        .expression.without_args.inline_expr[0]
+        .name = clone_core_name(nested_export_name);
+    instance_section->parsed.instance_section->instances[0]
+        .expression.without_args.inline_expr[0]
+        .sort_idx = create_sort_idx(WASM_COMP_SORT_VALUE, value_idx);
+    if (!instance_section->parsed.instance_section->instances[0]
+             .expression.without_args.inline_expr[0]
+             .name
+        || !instance_section->parsed.instance_section->instances[0]
+                 .expression.without_args.inline_expr[0]
+                 .sort_idx) {
+        return false;
+    }
+
+    export_section->id = WASM_COMP_SECTION_EXPORTS;
+    export_section->parsed.export_section =
+        (WASMComponentExportSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentExportSection));
+    if (!export_section->parsed.export_section) {
+        return false;
+    }
+    memset(export_section->parsed.export_section, 0,
+           sizeof(WASMComponentExportSection));
+    export_section->parsed.export_section->count = 1;
+    export_section->parsed.export_section->exports =
+        (WASMComponentExport *)wasm_runtime_malloc(sizeof(WASMComponentExport));
+    if (!export_section->parsed.export_section->exports) {
+        return false;
+    }
+    memset(export_section->parsed.export_section->exports, 0,
+           sizeof(WASMComponentExport));
+    export_section->parsed.export_section->exports[0].export_name =
+        create_export_name(instance_export_name);
+    export_section->parsed.export_section->exports[0].sort_idx =
+        create_sort_idx(WASM_COMP_SORT_INSTANCE, instance_idx);
+    return export_section->parsed.export_section->exports[0].export_name
+           && export_section->parsed.export_section->exports[0].sort_idx;
+}
+
+static bool
 append_top_level_direct_component_import_sections(
     WASMComponentModule *component_module)
 {
@@ -8100,6 +8428,7 @@ append_nested_local_core_module_export_sections(
 static bool
 append_nested_typed_value_instance_reexport_sections_with_value_type(
     WASMComponentModule *component_module,
+    const WASMComponent *value_type_component,
     const WASMComponentValueType &value_type)
 {
     WASMComponent *component = &component_module->component;
@@ -8149,10 +8478,26 @@ append_nested_typed_value_instance_reexport_sections_with_value_type(
     if (!component_section->parsed.component->sections[0].parsed.type_section) {
         return false;
     }
-    if (!init_single_instance_type_section(
-            component_section->parsed.component->sections[0].parsed.type_section,
-            "forwarded-value", create_value_extern_desc(value_type))) {
-        return false;
+    if (value_type.type == WASM_COMP_VAL_TYPE_PRIMVAL) {
+        if (!init_single_instance_type_section(
+                component_section->parsed.component->sections[0].parsed.type_section,
+                "forwarded-value", create_value_extern_desc(value_type))) {
+            return false;
+        }
+    }
+    else {
+        WASMComponentValueType nested_value_type = {};
+
+        memset(component_section->parsed.component->sections[0].parsed.type_section, 0,
+               sizeof(WASMComponentTypeSection));
+        if (!clone_supported_value_type_into_component(
+                component_section->parsed.component, value_type_component,
+                &value_type, &nested_value_type)
+            || !append_instance_type_to_type_section(
+                component_section->parsed.component->sections[0].parsed.type_section,
+                "forwarded-value", create_value_extern_desc(nested_value_type))) {
+            return false;
+        }
     }
 
     component_section->parsed.component->sections[1].id = WASM_COMP_SECTION_IMPORTS;
@@ -8180,7 +8525,9 @@ append_nested_typed_value_instance_reexport_sections_with_value_type(
         create_import_name("source");
     component_section->parsed.component->sections[1]
         .parsed.import_section->imports[0].extern_desc =
-        create_instance_extern_desc(0);
+        create_instance_extern_desc(
+            component_section->parsed.component->sections[0].parsed.type_section->count
+            - 1);
     if (!component_section->parsed.component->sections[1]
              .parsed.import_section->imports[0].import_name
         || !component_section->parsed.component->sections[1]
@@ -8338,7 +8685,7 @@ append_nested_typed_value_instance_reexport_sections(
     value_type.type = WASM_COMP_VAL_TYPE_PRIMVAL;
     value_type.type_specific.primval_type = primitive_type;
     return append_nested_typed_value_instance_reexport_sections_with_value_type(
-        component_module, value_type);
+        component_module, &component_module->component, value_type);
 }
 
 static bool
@@ -16109,6 +16456,70 @@ TEST_F(BinaryParserTest, TestRuntimeBindsTypedNestedValueInstanceImports)
 }
 
 TEST_F(BinaryParserTest,
+       TestRuntimeBindsTypedNestedCompositeValueInstanceImports)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    const uint8_t nested_bytes[] = { 0x10, 0x20, 0x30, 0x40 };
+    std::vector<uint8_t> payload;
+    append_component_record_string_list_payload(&payload, 23, "nested-host",
+                                                nested_bytes,
+                                                (uint32_t)sizeof(nested_bytes));
+
+    LoadArgs load_args = {};
+    char module_name[] = "runtime-typed-nested-composite-value-instance-imports";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    const int32_t source_record_type_idx = append_component_record_string_list_value_type(
+        (WASMComponentModule *)module, false, 0, "rhs");
+    ASSERT_GE(source_record_type_idx, 0);
+    const WASMComponentValueType source_value_type =
+        make_component_type_index_value_type((uint32_t)source_record_type_idx);
+    ASSERT_TRUE(append_top_level_inline_value_instance_sections_with_type_and_bytes(
+        (WASMComponentModule *)module, source_value_type, payload.data(),
+        (uint32_t)payload.size(), "source-value-instance", "forwarded-value"));
+
+    const int32_t target_record_type_idx = append_component_record_string_list_value_type(
+        (WASMComponentModule *)module, false, 0, "rhs");
+    ASSERT_GE(target_record_type_idx, 0);
+    const WASMComponentValueType target_value_type =
+        make_component_type_index_value_type((uint32_t)target_record_type_idx);
+    ASSERT_TRUE(append_nested_typed_value_instance_reexport_sections_with_value_type(
+        (WASMComponentModule *)module, &((WASMComponentModule *)module)->component,
+        target_value_type));
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_instance_t forwarded_instance = wasm_runtime_lookup_component_instance(
+        module_inst, "typed-forwarded-value-instance");
+    ASSERT_NE(forwarded_instance, nullptr);
+    ASSERT_EQ(forwarded_instance->export_count, 1u);
+    ASSERT_EQ(std::string(forwarded_instance->exports[0].name), "forwarded-value");
+    ASSERT_EQ(forwarded_instance->exports[0].ref.type, WASM_COMP_RUNTIME_REF_VALUE);
+    ASSERT_EQ(forwarded_instance->exports[0].ref.of.value->type.kind,
+              WASM_COMP_RUNTIME_VALUE_TYPE_DEFINED);
+    ASSERT_EQ(forwarded_instance->exports[0].ref.of.value->type.type.defined_type->tag,
+              WASM_COMP_DEF_VAL_RECORD);
+    ASSERT_EQ(memcmp(wasm_component_runtime_value_get_data(
+                         forwarded_instance->exports[0].ref.of.value),
+                     payload.data(), payload.size()),
+              0);
+
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
        TestRuntimeRejectsMismatchedTypedNestedValueInstanceImports)
 {
     bool ret = helper->read_wasm_file("add.wasm");
@@ -16126,6 +16537,57 @@ TEST_F(BinaryParserTest,
         append_top_level_value_alias_sections((WASMComponentModule *)module));
     ASSERT_TRUE(append_nested_typed_value_instance_reexport_sections(
         (WASMComponentModule *)module, WASM_COMP_PRIMVAL_U32));
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_EQ(module_inst, nullptr);
+    ASSERT_NE(strstr(helper->error_buf, "value type mismatch"), nullptr);
+    ASSERT_NE(strstr(helper->error_buf, "forwarded-value"), nullptr);
+
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestRuntimeRejectsMismatchedTypedNestedCompositeValueInstanceImports)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    const uint8_t nested_bytes[] = { 0x10, 0x20, 0x30, 0x40 };
+    std::vector<uint8_t> payload;
+    append_component_record_string_list_payload(&payload, 23, "nested-host",
+                                                nested_bytes,
+                                                (uint32_t)sizeof(nested_bytes));
+
+    LoadArgs load_args = {};
+    char module_name[] =
+        "runtime-typed-nested-composite-value-instance-mismatch";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    const int32_t source_record_type_idx = append_component_record_string_list_value_type(
+        (WASMComponentModule *)module, false, 0, "rhs");
+    ASSERT_GE(source_record_type_idx, 0);
+    const WASMComponentValueType source_value_type =
+        make_component_type_index_value_type((uint32_t)source_record_type_idx);
+    ASSERT_TRUE(append_top_level_inline_value_instance_sections_with_type_and_bytes(
+        (WASMComponentModule *)module, source_value_type, payload.data(),
+        (uint32_t)payload.size(), "source-value-instance", "forwarded-value"));
+
+    const int32_t target_record_type_idx = append_component_record_string_list_value_type(
+        (WASMComponentModule *)module, false, 0, "rhs-mismatch");
+    ASSERT_GE(target_record_type_idx, 0);
+    const WASMComponentValueType target_value_type =
+        make_component_type_index_value_type((uint32_t)target_record_type_idx);
+    ASSERT_TRUE(append_nested_typed_value_instance_reexport_sections_with_value_type(
+        (WASMComponentModule *)module, &((WASMComponentModule *)module)->component,
+        target_value_type));
 
     wasm_module_inst_t module_inst =
         wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
