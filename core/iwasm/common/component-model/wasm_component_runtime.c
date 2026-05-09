@@ -10,6 +10,7 @@
 #include <string.h>
 #include "bh_leb128.h"
 #include "wasm_component_resource.h"
+#include "wasm_export.h"
 #include "wasm_memory.h"
 #include "wasm_runtime_common.h"
 
@@ -7777,8 +7778,405 @@ instantiate_nested_component_value_section(
     return true;
 }
 
+static uint32
+find_component_core_type_count(const WASMComponent *component)
+{
+    uint32 i, core_type_count = 0;
+
+    for (i = 0; i < component->section_count; i++) {
+        const WASMComponentSection *section = &component->sections[i];
+
+        if (section->id == WASM_COMP_SECTION_CORE_TYPE
+            && section->parsed.core_type_section)
+            core_type_count += section->parsed.core_type_section->count;
+    }
+
+    return core_type_count;
+}
+
 static bool
-validate_component_import_binding_type(const WASMComponentImport *component_import,
+nullable_strings_equal(const char *lhs, const char *rhs)
+{
+    if (!lhs || !rhs)
+        return lhs == rhs;
+    return strcmp(lhs, rhs) == 0;
+}
+
+static const WASMComponentCoreType *
+lookup_component_core_type(const WASMComponent *component, uint32 type_idx)
+{
+    uint32 i;
+
+    for (i = 0; i < component->section_count; i++) {
+        const WASMComponentSection *section = &component->sections[i];
+
+        if (section->id != WASM_COMP_SECTION_CORE_TYPE
+            || !section->parsed.core_type_section)
+            continue;
+
+        if (type_idx < section->parsed.core_type_section->count)
+            return &section->parsed.core_type_section->types[type_idx];
+
+        type_idx -= section->parsed.core_type_section->count;
+    }
+
+    return NULL;
+}
+
+static const WASMComponentCoreFuncType *
+resolve_component_core_func_type(const WASMComponentCoreType *type)
+{
+    if (!type || !type->deftype)
+        return NULL;
+
+    switch (type->deftype->tag) {
+        case WASM_CORE_DEFTYPE_SUBTYPE:
+            if (type->deftype->type.subtype
+                && type->deftype->type.subtype->comptype
+                && type->deftype->type.subtype->comptype->tag
+                       == WASM_CORE_COMPTYPE_FUNC)
+                return &type->deftype->type.subtype->comptype->type.func_type;
+            break;
+        case WASM_CORE_DEFTYPE_RECTYPE:
+            if (type->deftype->type.rectype
+                && type->deftype->type.rectype->subtype_count == 1
+                && type->deftype->type.rectype->subtypes
+                && type->deftype->type.rectype->subtypes[0].comptype.tag
+                       == WASM_CORE_COMPTYPE_FUNC)
+                return &type->deftype->type.rectype->subtypes[0].comptype.type
+                            .func_type;
+            break;
+        default:
+            break;
+    }
+
+    return NULL;
+}
+
+static const WASMComponentCoreFuncType *
+resolve_core_moduletype_func_type(const WASMComponentCoreModuleType *module_type,
+                                  uint32 type_idx)
+{
+    uint32 i;
+
+    if (!module_type)
+        return NULL;
+
+    for (i = 0; i < module_type->decl_count; i++) {
+        const WASMComponentCoreModuleDecl *decl = &module_type->declarations[i];
+
+        if (decl->tag != WASM_CORE_MODULEDECL_TYPE)
+            continue;
+
+        if (type_idx == 0)
+            return resolve_component_core_func_type(decl->decl.type_decl.type);
+
+        type_idx--;
+    }
+
+    return NULL;
+}
+
+static bool
+core_valtype_matches_runtime_type(const WASMComponentCoreValType *expected,
+                                  uint8 actual_type)
+{
+    if (!expected)
+        return false;
+
+    switch (expected->tag) {
+        case WASM_CORE_VALTYPE_NUM:
+            return (uint8)expected->type.num_type == actual_type;
+        case WASM_CORE_VALTYPE_VECTOR:
+            return (uint8)expected->type.vector_type == actual_type;
+        case WASM_CORE_VALTYPE_REF:
+            return (uint8)expected->type.ref_type == actual_type;
+        default:
+            return false;
+    }
+}
+
+static bool
+core_func_type_matches_runtime_type(const WASMComponentCoreFuncType *expected,
+                                    const WASMFuncType *actual)
+{
+    uint32 i;
+
+    if (!expected || !actual || expected->params.count != actual->param_count
+        || expected->results.count != actual->result_count)
+        return false;
+
+    for (i = 0; i < expected->params.count; i++) {
+        if (!core_valtype_matches_runtime_type(&expected->params.val_types[i],
+                                               actual->types[i]))
+            return false;
+    }
+
+    for (i = 0; i < expected->results.count; i++) {
+        if (!core_valtype_matches_runtime_type(
+                &expected->results.val_types[i],
+                actual->types[expected->params.count + i]))
+            return false;
+    }
+
+    return true;
+}
+
+static bool
+core_limits_match_runtime_table(const WASMComponentCoreLimits *expected,
+                                const WASMTableType *actual)
+{
+    if (!expected || !actual || expected->lim.limits.min != actual->init_size)
+        return false;
+
+    if (expected->tag == WASM_CORE_LIMITS_MAX)
+        return expected->lim.limits_max.max == actual->max_size;
+
+    return true;
+}
+
+static bool
+core_limits_match_runtime_memory(const WASMComponentCoreLimits *expected,
+                                 const WASMMemoryType *actual)
+{
+    if (!expected || !actual
+        || (expected->tag == WASM_CORE_LIMITS_MIN
+            && expected->lim.limits.min != actual->init_page_count)
+        || (expected->tag == WASM_CORE_LIMITS_MAX
+            && expected->lim.limits_max.min != actual->init_page_count))
+        return false;
+
+    if (expected->tag == WASM_CORE_LIMITS_MAX)
+        return expected->lim.limits_max.max == actual->max_page_count;
+
+    return true;
+}
+
+static bool
+validate_core_desc_against_runtime_type(
+    const WASMComponentCoreModuleType *module_type,
+    const WASMComponentCoreImportDesc *expected, const char *member_name,
+    bool is_import, const wasm_import_t *actual_import,
+    const wasm_export_t *actual_export, char *error_buf, uint32 error_buf_size)
+{
+    wasm_import_export_kind_t actual_kind =
+        is_import ? actual_import->kind : actual_export->kind;
+
+    switch (expected->type) {
+        case WASM_CORE_IMPORTDESC_FUNC:
+        {
+            const WASMComponentCoreFuncType *expected_func_type =
+                resolve_core_moduletype_func_type(module_type,
+                                                  expected->desc.func_type_idx);
+            const WASMFuncType *actual_func_type =
+                is_import ? actual_import->u.func_type : actual_export->u.func_type;
+
+            if (actual_kind != WASM_IMPORT_EXPORT_KIND_FUNC)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "component import expects core module %s \"%s\" to be a "
+                    "function",
+                    is_import ? "import" : "export", member_name);
+
+            if (!expected_func_type)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "component import core module uses unresolved function "
+                    "type index %u",
+                    expected->desc.func_type_idx);
+
+            if (!core_func_type_matches_runtime_type(expected_func_type,
+                                                     actual_func_type))
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "component import expects core module %s \"%s\" to match "
+                    "the declared function type",
+                    is_import ? "import" : "export", member_name);
+            return true;
+        }
+        case WASM_CORE_IMPORTDESC_TABLE:
+            if (actual_kind != WASM_IMPORT_EXPORT_KIND_TABLE)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "component import expects core module %s \"%s\" to be a "
+                    "table",
+                    is_import ? "import" : "export", member_name);
+            if (!core_limits_match_runtime_table(
+                    expected->desc.table_type.limits,
+                    is_import ? actual_import->u.table_type
+                              : actual_export->u.table_type)
+                || (uint8)expected->desc.table_type.ref_type
+                       != (is_import ? actual_import->u.table_type->elem_type
+                                     : actual_export->u.table_type->elem_type))
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "component import expects core module %s \"%s\" to match "
+                    "the declared table type",
+                    is_import ? "import" : "export", member_name);
+            return true;
+        case WASM_CORE_IMPORTDESC_MEMORY:
+            if (actual_kind != WASM_IMPORT_EXPORT_KIND_MEMORY)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "component import expects core module %s \"%s\" to be a "
+                    "memory",
+                    is_import ? "import" : "export", member_name);
+            if (!core_limits_match_runtime_memory(
+                    expected->desc.memory_type.limits,
+                    is_import ? actual_import->u.memory_type
+                              : actual_export->u.memory_type))
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "component import expects core module %s \"%s\" to match "
+                    "the declared memory type",
+                    is_import ? "import" : "export", member_name);
+            return true;
+        case WASM_CORE_IMPORTDESC_GLOBAL:
+            if (actual_kind != WASM_IMPORT_EXPORT_KIND_GLOBAL)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "component import expects core module %s \"%s\" to be a "
+                    "global",
+                    is_import ? "import" : "export", member_name);
+            if (!core_valtype_matches_runtime_type(
+                    &expected->desc.global_type.val_type,
+                    is_import ? actual_import->u.global_type->val_type
+                              : actual_export->u.global_type->val_type)
+                || expected->desc.global_type.is_mutable
+                       != (is_import ? actual_import->u.global_type->is_mutable
+                                     : actual_export->u.global_type->is_mutable))
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "component import expects core module %s \"%s\" to match "
+                    "the declared global type",
+                    is_import ? "import" : "export", member_name);
+            return true;
+        default:
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                "component import uses an unsupported core module member type");
+    }
+}
+
+static bool
+validate_core_module_against_type(const wasm_module_t module,
+                                  const WASMComponentCoreModuleType *module_type,
+                                  const char *import_name, char *error_buf,
+                                  uint32 error_buf_size)
+{
+    uint32 i;
+
+    for (i = 0; i < module_type->decl_count; i++) {
+        const WASMComponentCoreModuleDecl *decl = &module_type->declarations[i];
+
+        switch (decl->tag) {
+            case WASM_CORE_MODULEDECL_IMPORT:
+            {
+                int32 import_count = wasm_runtime_get_import_count(module);
+                int32 j;
+                bool matched = false;
+
+                for (j = 0; j < import_count; j++) {
+                    wasm_import_t actual_import;
+                    const char *expected_module_name;
+                    const char *expected_name;
+
+                    wasm_runtime_get_import_type(module, j, &actual_import);
+                    expected_module_name = decl->decl.import_decl.import->mod_name
+                                               ? decl->decl.import_decl.import
+                                                     ->mod_name->name
+                                               : NULL;
+                    expected_name = decl->decl.import_decl.import->nm
+                                        ? decl->decl.import_decl.import->nm->name
+                                        : NULL;
+
+                    if (!nullable_strings_equal(expected_module_name,
+                                                actual_import.module_name)
+                        || !nullable_strings_equal(expected_name,
+                                                   actual_import.name))
+                        continue;
+
+                    if (!validate_core_desc_against_runtime_type(
+                            module_type,
+                            decl->decl.import_decl.import->import_desc,
+                            expected_name ? expected_name : "<unnamed>", true,
+                            &actual_import, NULL, error_buf, error_buf_size))
+                        return false;
+
+                    matched = true;
+                    break;
+                }
+
+                if (!matched)
+                    return set_component_runtime_error_fmt(
+                        error_buf, error_buf_size,
+                        "component import \"%s\" expects core module import "
+                        "\"%s\".\"%s\"",
+                        import_name,
+                        decl->decl.import_decl.import->mod_name
+                                && decl->decl.import_decl.import->mod_name->name
+                            ? decl->decl.import_decl.import->mod_name->name
+                            : "",
+                        decl->decl.import_decl.import->nm
+                                && decl->decl.import_decl.import->nm->name
+                            ? decl->decl.import_decl.import->nm->name
+                            : "");
+                break;
+            }
+            case WASM_CORE_MODULEDECL_EXPORT:
+            {
+                int32 export_count = wasm_runtime_get_export_count(module);
+                int32 j;
+                bool matched = false;
+                const char *expected_name = decl->decl.export_decl.export_decl->name
+                                                ? decl->decl.export_decl.export_decl
+                                                      ->name->name
+                                                : NULL;
+
+                for (j = 0; j < export_count; j++) {
+                    wasm_export_t actual_export;
+
+                    wasm_runtime_get_export_type(module, j, &actual_export);
+                    if (!nullable_strings_equal(expected_name, actual_export.name))
+                        continue;
+
+                    if (!validate_core_desc_against_runtime_type(
+                            module_type,
+                            decl->decl.export_decl.export_decl->export_desc,
+                            expected_name ? expected_name : "<unnamed>", false,
+                            NULL, &actual_export, error_buf, error_buf_size))
+                        return false;
+
+                    matched = true;
+                    break;
+                }
+
+                if (!matched)
+                    return set_component_runtime_error_fmt(
+                        error_buf, error_buf_size,
+                        "component import \"%s\" expects core module export "
+                        "\"%s\"",
+                        import_name, expected_name ? expected_name : "");
+                break;
+            }
+            case WASM_CORE_MODULEDECL_TYPE:
+            case WASM_CORE_MODULEDECL_ALIAS:
+                break;
+            default:
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "component import \"%s\" uses an unsupported core module "
+                    "type declaration",
+                    import_name);
+        }
+    }
+
+    return true;
+}
+
+static bool
+validate_component_import_binding_type(const WASMComponent *component,
+                                       const WASMComponentImport *component_import,
                                        WASMComponentRuntimeRef ref,
                                        char *error_buf,
                                        uint32 error_buf_size)
@@ -7798,9 +8196,9 @@ validate_component_import_binding_type(const WASMComponentImport *component_impo
                        ? true
                        : set_component_runtime_error_fmt(
                               error_buf, error_buf_size,
-                               "component import \"%s\" bound to the wrong "
-                               "runtime sort",
-                               import_name);
+                              "component import \"%s\" bound to the wrong "
+                              "runtime sort",
+                              import_name);
         case WASM_COMP_EXTERN_VALUE:
             return ref.type == WASM_COMP_RUNTIME_REF_VALUE
                        ? true
@@ -7810,13 +8208,43 @@ validate_component_import_binding_type(const WASMComponentImport *component_impo
                              "runtime sort",
                              import_name);
         case WASM_COMP_EXTERN_CORE_MODULE:
-            return ref.type == WASM_COMP_RUNTIME_REF_CORE_MODULE
-                       ? true
-                       : set_component_runtime_error_fmt(
-                              error_buf, error_buf_size,
-                              "component import \"%s\" bound to the wrong "
-                              "runtime sort",
-                              import_name);
+            if (ref.type != WASM_COMP_RUNTIME_REF_CORE_MODULE)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "component import \"%s\" bound to the wrong runtime sort",
+                    import_name);
+
+            if (find_component_core_type_count(component) == 0)
+                return true;
+
+            {
+                uint32 type_idx =
+                    component_import->extern_desc->extern_desc.core_module.type_idx;
+                const WASMComponentCoreType *core_type =
+                    lookup_component_core_type(component, type_idx);
+                const WASMComponentCoreModuleType *module_type;
+
+                if (!core_type)
+                    return set_component_runtime_error_fmt(
+                        error_buf, error_buf_size,
+                        "component import \"%s\" uses unresolved core module "
+                        "type index %u",
+                        import_name, type_idx);
+
+                if (!core_type->deftype
+                    || core_type->deftype->tag != WASM_CORE_DEFTYPE_MODULETYPE
+                    || !(module_type = core_type->deftype->type.moduletype))
+                    return set_component_runtime_error_fmt(
+                        error_buf, error_buf_size,
+                        "component import \"%s\" core module type index %u is "
+                        "not a module type",
+                        import_name, type_idx);
+
+                return validate_core_module_against_type(ref.of.core_module,
+                                                         module_type, import_name,
+                                                         error_buf,
+                                                         error_buf_size);
+            }
         case WASM_COMP_EXTERN_INSTANCE:
             return ref.type == WASM_COMP_RUNTIME_REF_INSTANCE
                        ? true
@@ -7854,12 +8282,6 @@ count_component_imports(const WASMComponent *component, uint32 *import_count)
     }
     return true;
 }
-
-static bool
-validate_component_import_binding_type(const WASMComponentImport *component_import,
-                                       WASMComponentRuntimeRef ref,
-                                       char *error_buf,
-                                       uint32 error_buf_size);
 
 static const WASMComponentValueType *
 resolve_component_import_value_type(const WASMComponentInstance *inst,
@@ -8117,7 +8539,8 @@ resolve_top_level_component_imports(
                 else if (!component_import_binding_to_ref(binding, &ref, error_buf,
                                                           error_buf_size)
                          || !validate_component_import_binding_type(
-                             component_import, ref, error_buf, error_buf_size)
+                             &inst->module->component, component_import, ref,
+                             error_buf, error_buf_size)
                          || !append_top_level_component_import(
                              inst, ref, error_buf, error_buf_size))
                     return false;
@@ -8205,7 +8628,7 @@ resolve_component_import_bindings_from_top_level(
                                                 &resolved_imports[import_index],
                                                 error_buf, error_buf_size)
                     || !validate_component_import_binding_type(
-                        component_import, resolved_imports[import_index],
+                        component, component_import, resolved_imports[import_index],
                         error_buf, error_buf_size)) {
                     wasm_runtime_free(resolved_imports);
                     return false;
@@ -8282,7 +8705,7 @@ resolve_component_import_bindings_from_nested(
                         &resolved_imports[import_index], error_buf,
                         error_buf_size)
                     || !validate_component_import_binding_type(
-                        component_import, resolved_imports[import_index],
+                        component, component_import, resolved_imports[import_index],
                         error_buf, error_buf_size)) {
                     wasm_runtime_free(resolved_imports);
                     return false;
@@ -8637,7 +9060,8 @@ build_component_runtime_instance_from_component(
 
                     if (import_index >= resolved_import_count
                         || !validate_component_import_binding_type(
-                            component_import, resolved_imports[import_index],
+                            component, component_import,
+                            resolved_imports[import_index],
                             error_buf, error_buf_size)
                         || !append_nested_component_local_ref(
                             &bindings, resolved_imports[import_index],

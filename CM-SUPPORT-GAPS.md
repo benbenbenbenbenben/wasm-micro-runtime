@@ -106,6 +106,10 @@ Supported import binding kinds at the public boundary are:
 
 That is enough to support real top-level import wiring for already-existing runtime handles and public component values.
 
+When a component declares `core module` types, the runtime now also validates
+bound core-module handles against the currently supported module-type subset for
+import/export matching instead of treating those type indices as inert metadata.
+
 ### 1.5 Canonical ABI execution is partially implemented
 
 Canonical ABI is no longer metadata-only.
@@ -328,10 +332,13 @@ Nested components now support:
   re-exports
 - nested `core type` sections as tolerated structural metadata around those
   flows
+- typed nested `core module` imports that use those `core type` entries for
+  module import/export matching
 
 Nested components still reject:
 
-- operational use of nested `core type` entries
+- broader operational use of nested `core type` entries beyond the current
+  typed core-module import matching subset
 
 The runtime can now thread nested local core-module handles and construct nested
 local/synthetic core instances, but it still does **not** construct a full
