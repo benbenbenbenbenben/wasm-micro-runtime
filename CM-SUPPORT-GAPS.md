@@ -128,10 +128,12 @@ instance bindings, and currently covers:
 - exported nested `instance` members, including recursive validation
 
 Typed matching of exported component `func` / `value` / `component` members is
-still incomplete: nested/internal lifted function bindings still defer outside
-the scalar functype subset, typed value matching beyond the current scalar /
-UTF-8 string / variable-length `list<u8>` / tuple-record subset is still
-incomplete, and typed exported `component` members are still unsupported.
+still incomplete: typed function matching remains limited to the current scalar /
+UTF-8 string / variable-length `list<u8>` / tuple-record subset, typed value
+matching beyond that same subset is still incomplete, and typed exported
+`component` matching currently only covers zero-import component types plus the
+recursive typed-`component`-export subset when the actual exports carry explicit
+component type metadata.
 
 ### 1.5 Canonical ABI execution is partially implemented
 
@@ -284,8 +286,11 @@ Current limitations include:
   members for the current scalar / UTF-8 string / variable-length `list<u8>` /
   tuple-record leaf subset; typed `instance` import matching is otherwise
   limited to exported `core module`, scalar / variable-length `list<u8>` /
-  current tuple-record-subset `value`, and nested `instance` members, while
-  typed exported `component` members are still unsupported
+  current tuple-record-subset `value`, nested `instance` members, and the first
+  typed `component` subset: top-level component imports plus typed `instance`
+  component members whose expected component types have no imports and only
+  recurse through typed `component` exports with explicit component type
+  metadata; broader componenttype matching is still unsupported
 - host-import tuple/record values are still limited to the current scalar /
   UTF-8 string / nested `list<u8>` subset
 - there is still no public resource import/export contract comparable to the current function/value/instance/component/core-module surface
