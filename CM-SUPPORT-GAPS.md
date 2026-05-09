@@ -256,20 +256,25 @@ The executable Canonical ABI surface is currently limited to:
   subset:
   - scalar signatures
   - UTF-8 string signatures through the component value API
+  - `list<u8>` parameter signatures, including empty-list input
   - `list<u8>` results
+  - record-result signatures
   - tuple-result signatures through the component value API
+  - explicit rejection of lower-side canon options on this synthetic path
 - top-level host-defined component-function imports for the same supported subset
 
 Major Canonical ABI gaps remain:
 
 - no general executable `canon lower`; the only supported lowering path is the
-  synthetic scalar / UTF-8 string / `list<u8>`-result / tuple-result
+  synthetic scalar / UTF-8 string / `list<u8>`-parameter / `list<u8>`-result /
+  record-result / tuple-result
   `lift(lower(f))` subset above
 - no general adapter/lowering path for imported component functions beyond the supported host-callback subset
 - no executable lower path yet for memory-backed Canonical ABI shapes
-  beyond the tested `list<u8>` / tuple-result synthetic re-lifts above
-- no executable lower path yet for `list<u8>` parameters, record-result re-lifts,
-  or broader nested composite lowering shapes
+  beyond the tested `list<u8>`-parameter / `list<u8>`-result / record-result /
+  tuple-result synthetic re-lifts above
+- no executable lower path yet for broader nested composite lowering shapes beyond
+  the tested record/tuple-result witnesses
 - no list marshalling beyond UTF-8 strings, top-level `list<u8>`, and nested `list<u8>` leaves in exported tuple/record values and host-import tuple/record parameters
 - no variant / flags / enum / option / result marshalling
 - no non-string memory-backed leaves inside tuple/record Canonical ABI values beyond nested `list<u8>` leaves for exported canon-lift calls and host-import tuple/record parameters

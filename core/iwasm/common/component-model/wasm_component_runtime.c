@@ -2815,8 +2815,28 @@ component_canon_lift_uses_lowered_core_func(
 {
     return function && function->kind == WASM_COMP_RUNTIME_FUNC_LIFT
            && function->core_func_ref.type
-                  == WASM_COMP_CORE_RUNTIME_REF_LOWERED_FUNC
+                   == WASM_COMP_CORE_RUNTIME_REF_LOWERED_FUNC
            && function->core_func_ref.of.lowered_function;
+}
+
+static bool
+validate_synthetic_lowered_relift_opts(const WASMComponentRuntimeFunc *function,
+                                       char *error_buf,
+                                       uint32 error_buf_size)
+{
+    const WASMComponentRuntimeFunc *lowered_function;
+
+    if (!component_canon_lift_uses_lowered_core_func(function))
+        return true;
+
+    lowered_function = function->core_func_ref.of.lowered_function;
+    if (!lowered_function || !lowered_function->canon_opts
+        || lowered_function->canon_opts->canon_opts_count == 0)
+        return true;
+
+    return set_component_runtime_error_fmt(
+        error_buf, error_buf_size,
+        "synthetic lift(lower(f)) does not support lower-side canon options");
 }
 
 static bool
@@ -3099,7 +3119,8 @@ resolve_component_canon_lift_abi(WASMComponentInstance *inst,
 
 validate_required_opts:
     if (component_canon_lift_uses_lowered_core_func(function)) {
-        return true;
+        return validate_synthetic_lowered_relift_opts(function, error_buf,
+                                                      error_buf_size);
     }
 
     needs_memory_abi = function->has_string_params

@@ -1506,6 +1506,30 @@ find_first_canon_lift(WASMComponentModule *component_module)
     return nullptr;
 }
 
+static WASMComponentCanon *
+find_first_canon_lower(WASMComponentModule *component_module)
+{
+    WASMComponent *component = &component_module->component;
+
+    for (uint32_t section_idx = 0; section_idx < component->section_count;
+         section_idx++) {
+        auto *section = &component->sections[section_idx];
+        if (section->id != WASM_COMP_SECTION_CANONS
+            || !section->parsed.canon_section) {
+            continue;
+        }
+
+        for (uint32_t i = 0; i < section->parsed.canon_section->count; i++) {
+            if (section->parsed.canon_section->canons[i].tag
+                == WASM_COMP_CANON_LOWER) {
+                return &section->parsed.canon_section->canons[i];
+            }
+        }
+    }
+
+    return nullptr;
+}
+
 static WASMComponentFuncType *
 lookup_local_component_func_type(WASMComponentModule *component_module,
                                  uint32_t type_idx)
@@ -1638,13 +1662,11 @@ lookup_top_level_exported_canon_func_type_idx(WASMComponentModule *component_mod
 }
 
 static bool
-append_top_level_canon_lower_relift_export_sections(
-    WASMComponentModule *component_module, const char *top_export_name)
+append_top_level_canon_lower_relift_export_sections_for_func(
+    WASMComponentModule *component_module, uint32_t source_func_idx,
+    uint32_t lift_type_idx, const char *top_export_name)
 {
     WASMComponent *component = &component_module->component;
-    WASMComponentCanon *source_lift = find_first_canon_lift(component_module);
-    const int32_t lift_type_idx =
-        source_lift ? (int32_t)source_lift->canon_data.lift.type_idx : -1;
     const uint32_t new_core_func_idx = count_top_level_core_func_entries(component);
     const uint32_t new_func_idx =
         count_top_level_sort_entries(component, WASM_COMP_SORT_FUNC);
@@ -1652,7 +1674,7 @@ append_top_level_canon_lower_relift_export_sections(
     auto *new_sections = (WASMComponentSection *)wasm_runtime_malloc(
         sizeof(WASMComponentSection) * (old_count + 2));
 
-    if (!source_lift || lift_type_idx < 0 || !new_sections) {
+    if (!new_sections) {
         return false;
     }
 
@@ -1683,12 +1705,13 @@ append_top_level_canon_lower_relift_export_sections(
     memset(canon_section->parsed.canon_section->canons, 0,
            sizeof(WASMComponentCanon) * 2);
     canon_section->parsed.canon_section->canons[0].tag = WASM_COMP_CANON_LOWER;
-    canon_section->parsed.canon_section->canons[0].canon_data.lower.func_idx = 0;
+    canon_section->parsed.canon_section->canons[0].canon_data.lower.func_idx =
+        source_func_idx;
     canon_section->parsed.canon_section->canons[1].tag = WASM_COMP_CANON_LIFT;
     canon_section->parsed.canon_section->canons[1].canon_data.lift.core_func_idx =
         new_core_func_idx;
     canon_section->parsed.canon_section->canons[1].canon_data.lift.type_idx =
-        (uint32_t)lift_type_idx;
+        lift_type_idx;
 
     export_section->id = WASM_COMP_SECTION_EXPORTS;
     export_section->parsed.export_section =
@@ -1714,6 +1737,18 @@ append_top_level_canon_lower_relift_export_sections(
 
     return export_section->parsed.export_section->exports[0].export_name
            && export_section->parsed.export_section->exports[0].sort_idx;
+}
+
+static bool
+append_top_level_canon_lower_relift_export_sections(
+    WASMComponentModule *component_module, const char *top_export_name)
+{
+    WASMComponentCanon *source_lift = find_first_canon_lift(component_module);
+
+    return source_lift
+           && append_top_level_canon_lower_relift_export_sections_for_func(
+               component_module, 0, source_lift->canon_data.lift.type_idx,
+               top_export_name);
 }
 
 static WASMComponentValueType
@@ -2900,6 +2935,55 @@ ensure_canon_lift_memory_opt(WASMComponentCanon *canon, uint32_t mem_idx)
 }
 
 static bool
+ensure_canon_lower_memory_opt(WASMComponentCanon *canon, uint32_t mem_idx)
+{
+    if (!canon || canon->tag != WASM_COMP_CANON_LOWER) {
+        return false;
+    }
+
+    if (!canon->canon_data.lower.canon_opts) {
+        canon->canon_data.lower.canon_opts =
+            (WASMComponentCanonOpts *)wasm_runtime_malloc(
+                sizeof(WASMComponentCanonOpts));
+        if (!canon->canon_data.lower.canon_opts) {
+            return false;
+        }
+        memset(canon->canon_data.lower.canon_opts, 0,
+               sizeof(WASMComponentCanonOpts));
+    }
+
+    for (uint32_t i = 0; i < canon->canon_data.lower.canon_opts->canon_opts_count;
+         i++) {
+        if (canon->canon_data.lower.canon_opts->canon_opts[i].tag
+            == WASM_COMP_CANON_OPT_MEMORY) {
+            canon->canon_data.lower.canon_opts->canon_opts[i].payload.memory.mem_idx =
+                mem_idx;
+            return true;
+        }
+    }
+
+    const uint32_t old_count = canon->canon_data.lower.canon_opts->canon_opts_count;
+    auto *new_opts = (WASMComponentCanonOpt *)wasm_runtime_malloc(
+        sizeof(WASMComponentCanonOpt) * (old_count + 1));
+    if (!new_opts) {
+        return false;
+    }
+
+    memset(new_opts, 0, sizeof(WASMComponentCanonOpt) * (old_count + 1));
+    if (old_count > 0 && canon->canon_data.lower.canon_opts->canon_opts) {
+        memcpy(new_opts, canon->canon_data.lower.canon_opts->canon_opts,
+               sizeof(WASMComponentCanonOpt) * old_count);
+        wasm_runtime_free(canon->canon_data.lower.canon_opts->canon_opts);
+    }
+
+    new_opts[old_count].tag = WASM_COMP_CANON_OPT_MEMORY;
+    new_opts[old_count].payload.memory.mem_idx = mem_idx;
+    canon->canon_data.lower.canon_opts->canon_opts = new_opts;
+    canon->canon_data.lower.canon_opts->canon_opts_count = old_count + 1;
+    return true;
+}
+
+static bool
 ensure_canon_lift_string_utf8_opt(WASMComponentCanon *canon)
 {
     if (!canon || canon->tag != WASM_COMP_CANON_LIFT) {
@@ -3868,15 +3952,11 @@ append_nested_component_inline_instance_sections(
 }
 
 static bool
-append_nested_component_lower_relift_sections(
-    WASMComponentModule *component_module)
+append_nested_component_lower_relift_sections_for_func(
+    WASMComponentModule *component_module, uint32_t source_func_idx,
+    const WASMComponentFuncType *source_func_type)
 {
     WASMComponent *component = &component_module->component;
-    WASMComponentCanon *source_lift = find_first_canon_lift(component_module);
-    WASMComponentFuncType *source_func_type =
-        source_lift ? lookup_local_component_func_type(
-                          component_module, source_lift->canon_data.lift.type_idx)
-                    : nullptr;
     const uint32_t new_component_idx =
         count_top_level_sort_entries(component, WASM_COMP_SORT_COMPONENT);
     const uint32_t new_instance_idx =
@@ -3892,7 +3972,7 @@ append_nested_component_lower_relift_sections(
     WASMComponentFuncType *nested_func_type;
     uint32_t nested_type_idx;
 
-    if (!source_lift || !source_func_type || !new_sections) {
+    if (!source_func_type || !new_sections) {
         return false;
     }
 
@@ -4144,7 +4224,7 @@ append_nested_component_lower_relift_sections(
         .name = clone_core_name("source");
     instance_section->parsed.instance_section->instances[0]
         .expression.with_args.args[0]
-        .idx.sort_idx = create_sort_idx(WASM_COMP_SORT_FUNC, 0);
+        .idx.sort_idx = create_sort_idx(WASM_COMP_SORT_FUNC, source_func_idx);
     if (!instance_section->parsed.instance_section->instances[0]
              .expression.with_args.args[0]
              .name
@@ -4178,6 +4258,20 @@ append_nested_component_lower_relift_sections(
 
     return export_section->parsed.export_section->exports[0].export_name
            && export_section->parsed.export_section->exports[0].sort_idx;
+}
+
+static bool
+append_nested_component_lower_relift_sections(
+    WASMComponentModule *component_module)
+{
+    WASMComponentCanon *source_lift = find_first_canon_lift(component_module);
+    WASMComponentFuncType *source_func_type =
+        source_lift ? lookup_local_component_func_type(
+                          component_module, source_lift->canon_data.lift.type_idx)
+                    : nullptr;
+
+    return append_nested_component_lower_relift_sections_for_func(
+        component_module, 0, source_func_type);
 }
 
 static bool
@@ -11353,6 +11447,175 @@ TEST_F(BinaryParserTest,
     wasm_runtime_unload(module);
 }
 
+TEST_F(BinaryParserTest, TestPublicComponentCallInvokesLowerReliftedListU8Param)
+{
+    bool ret = helper->read_wasm_file("list_u8_post_return.component.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "public-component-call-lower-relift-list-u8-param";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    WASMComponentCanon *canon = find_first_canon_lift((WASMComponentModule *)module);
+    const int32_t list_u8_type_idx = append_component_list_type(
+        (WASMComponentModule *)module, WASM_COMP_PRIMVAL_U8, false, 0);
+    ASSERT_NE(canon, nullptr);
+    ASSERT_GE(list_u8_type_idx, 0);
+    ASSERT_TRUE(configure_canon_lift_param_type_idx(
+        (WASMComponentModule *)module, canon, 0, (uint32_t)list_u8_type_idx, true,
+        false));
+    ASSERT_TRUE(append_top_level_canon_lower_relift_export_sections(
+        (WASMComponentModule *)module, "lowered-echo-bytes-param"));
+
+    wasm_module_inst_t module_inst =
+        instantiate_component_with_default_wasi(module, helper.get());
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func = wasm_runtime_lookup_component_function(
+        module_inst, "lowered-echo-bytes-param");
+    ASSERT_NE(func, nullptr);
+
+    const char payload[] = "relay";
+    wasm_component_value_t arg =
+        make_component_list_u8_value(payload, sizeof(payload) - 1);
+    wasm_component_value_t result = {};
+    std::string result_string;
+
+    ASSERT_TRUE(
+        wasm_runtime_call_component_values(module_inst, func, 1, &result, 1, &arg))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(result.type.kind, WASM_COMPONENT_VALUE_TYPE_PRIMITIVE);
+    ASSERT_EQ(result.type.type.primitive_type,
+              WASM_COMPONENT_PRIMITIVE_VALUE_STRING);
+    ASSERT_TRUE(decode_component_string_arg(&result, &result_string));
+    ASSERT_EQ(result_string, payload);
+
+    wasm_component_value_destroy(&arg);
+    wasm_component_value_destroy(&result);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest, TestPublicComponentCallInvokesLowerReliftedEmptyListU8Param)
+{
+    bool ret = helper->read_wasm_file("list_u8_post_return.component.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "public-component-call-lower-relift-empty-list-u8-param";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    WASMComponentCanon *canon = find_first_canon_lift((WASMComponentModule *)module);
+    const int32_t list_u8_type_idx = append_component_list_type(
+        (WASMComponentModule *)module, WASM_COMP_PRIMVAL_U8, false, 0);
+    ASSERT_NE(canon, nullptr);
+    ASSERT_GE(list_u8_type_idx, 0);
+    ASSERT_TRUE(configure_canon_lift_param_type_idx(
+        (WASMComponentModule *)module, canon, 0, (uint32_t)list_u8_type_idx, true,
+        false));
+    ASSERT_TRUE(append_top_level_canon_lower_relift_export_sections(
+        (WASMComponentModule *)module, "lowered-echo-empty-bytes-param"));
+
+    wasm_module_inst_t module_inst =
+        instantiate_component_with_default_wasi(module, helper.get());
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func = wasm_runtime_lookup_component_function(
+        module_inst, "lowered-echo-empty-bytes-param");
+    ASSERT_NE(func, nullptr);
+
+    wasm_component_value_t arg = make_component_list_u8_value(nullptr, 0);
+    wasm_component_value_t result = {};
+    std::string result_string;
+
+    ASSERT_TRUE(
+        wasm_runtime_call_component_values(module_inst, func, 1, &result, 1, &arg))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(result.type.kind, WASM_COMPONENT_VALUE_TYPE_PRIMITIVE);
+    ASSERT_EQ(result.type.type.primitive_type,
+              WASM_COMPONENT_PRIMITIVE_VALUE_STRING);
+    ASSERT_TRUE(decode_component_string_arg(&result, &result_string));
+    ASSERT_TRUE(result_string.empty());
+
+    wasm_component_value_destroy(&arg);
+    wasm_component_value_destroy(&result);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestPublicComponentCallInvokesNestedLowerReliftedListU8Param)
+{
+    bool ret = helper->read_wasm_file("list_u8_post_return.component.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "public-component-call-nested-lower-relift-list-u8-param";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    WASMComponentCanon *canon = find_first_canon_lift((WASMComponentModule *)module);
+    const int32_t list_u8_type_idx = append_component_list_type(
+        (WASMComponentModule *)module, WASM_COMP_PRIMVAL_U8, false, 0);
+    ASSERT_NE(canon, nullptr);
+    ASSERT_GE(list_u8_type_idx, 0);
+    ASSERT_TRUE(configure_canon_lift_param_type_idx(
+        (WASMComponentModule *)module, canon, 0, (uint32_t)list_u8_type_idx, true,
+        false));
+    ASSERT_TRUE(append_nested_component_lower_relift_sections(
+        (WASMComponentModule *)module));
+
+    wasm_module_inst_t module_inst =
+        instantiate_component_with_default_wasi(module, helper.get());
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_instance_t nested_instance =
+        wasm_runtime_lookup_component_instance(module_inst, "nested-lowered-instance");
+    ASSERT_NE(nested_instance, nullptr);
+
+    wasm_component_instance_t wrapped_instance =
+        wasm_component_instance_lookup_instance(nested_instance, "wrapped-instance");
+    ASSERT_NE(wrapped_instance, nullptr);
+
+    wasm_component_func_t func =
+        wasm_component_instance_lookup_function(wrapped_instance, "wrapped");
+    ASSERT_NE(func, nullptr);
+
+    const char payload[] = "nested";
+    wasm_component_value_t arg =
+        make_component_list_u8_value(payload, sizeof(payload) - 1);
+    wasm_component_value_t result = {};
+    std::string result_string;
+
+    ASSERT_TRUE(
+        wasm_runtime_call_component_values(module_inst, func, 1, &result, 1, &arg))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(result.type.kind, WASM_COMPONENT_VALUE_TYPE_PRIMITIVE);
+    ASSERT_EQ(result.type.type.primitive_type,
+              WASM_COMPONENT_PRIMITIVE_VALUE_STRING);
+    ASSERT_TRUE(decode_component_string_arg(&result, &result_string));
+    ASSERT_EQ(result_string, payload);
+
+    wasm_component_value_destroy(&arg);
+    wasm_component_value_destroy(&result);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
 TEST_F(BinaryParserTest, TestPublicComponentCallInvokesLowerReliftedListU8Result)
 {
     bool ret = helper->read_wasm_file("list_u8_post_return.component.wasm");
@@ -11550,6 +11813,164 @@ TEST_F(BinaryParserTest,
 
     wasm_component_value_destroy(&result);
     wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest, TestPublicComponentCallInvokesLowerReliftedRecordHandle)
+{
+    bool ret = helper->read_wasm_file("multivalue_record_tuple.component.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "public-component-call-lower-relift-record";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    const int32_t source_func_idx = find_top_level_export_sort_index(
+        (WASMComponentModule *)module, "record-result", WASM_COMP_SORT_FUNC);
+    const int32_t record_func_type_idx = lookup_top_level_exported_canon_func_type_idx(
+        (WASMComponentModule *)module, "record-result");
+    WASMComponentFuncType *record_func_type = lookup_top_level_exported_canon_func_type(
+        (WASMComponentModule *)module, "record-result");
+    ASSERT_NE(record_func_type, nullptr);
+    ASSERT_NE(record_func_type->results, nullptr);
+    ASSERT_EQ(record_func_type->results->tag, WASM_COMP_RESULT_LIST_WITH_TYPE);
+    ASSERT_NE(record_func_type->results->results, nullptr);
+    ASSERT_EQ(record_func_type->results->results->type, WASM_COMP_VAL_TYPE_IDX);
+    ASSERT_GE(source_func_idx, 0);
+    ASSERT_GE(record_func_type_idx, 0);
+    ASSERT_TRUE(append_top_level_canon_lower_relift_export_sections_for_func(
+        (WASMComponentModule *)module, (uint32_t)source_func_idx,
+        (uint32_t)record_func_type_idx, "lowered-record-result"));
+
+    wasm_module_inst_t module_inst =
+        instantiate_component_with_default_wasi(module, helper.get());
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func = wasm_runtime_lookup_component_function(
+        module_inst, "lowered-record-result");
+    ASSERT_NE(func, nullptr);
+
+    std::vector<uint8_t> expected_payload;
+    wasm_component_value_t result = {};
+    append_component_s32_payload(&expected_payload, -17);
+    append_component_u64_payload(&expected_payload, UINT64_MAX);
+    append_component_f64_payload(&expected_payload, 6.25);
+
+    ASSERT_TRUE(
+        wasm_runtime_call_component_values(module_inst, func, 1, &result, 0, nullptr))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(result.type.kind, WASM_COMPONENT_VALUE_TYPE_DEFINED);
+    ASSERT_EQ(result.byte_size, expected_payload.size());
+    ASSERT_EQ(memcmp(wasm_component_value_get_data(&result), expected_payload.data(),
+                     expected_payload.size()),
+              0);
+
+    wasm_component_value_destroy(&result);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestPublicComponentCallInvokesNestedLowerReliftedRecordHandle)
+{
+    bool ret = helper->read_wasm_file("multivalue_record_tuple.component.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "public-component-call-nested-lower-relift-record";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    const int32_t source_func_idx = find_top_level_export_sort_index(
+        (WASMComponentModule *)module, "record-result", WASM_COMP_SORT_FUNC);
+    WASMComponentFuncType *record_func_type = lookup_top_level_exported_canon_func_type(
+        (WASMComponentModule *)module, "record-result");
+    ASSERT_NE(record_func_type, nullptr);
+    ASSERT_NE(record_func_type->results, nullptr);
+    ASSERT_EQ(record_func_type->results->tag, WASM_COMP_RESULT_LIST_WITH_TYPE);
+    ASSERT_NE(record_func_type->results->results, nullptr);
+    ASSERT_GE(source_func_idx, 0);
+    ASSERT_TRUE(append_nested_component_lower_relift_sections_for_func(
+        (WASMComponentModule *)module, (uint32_t)source_func_idx,
+        record_func_type));
+
+    wasm_module_inst_t module_inst =
+        instantiate_component_with_default_wasi(module, helper.get());
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_instance_t nested_instance =
+        wasm_runtime_lookup_component_instance(module_inst, "nested-lowered-instance");
+    ASSERT_NE(nested_instance, nullptr);
+
+    wasm_component_instance_t wrapped_instance =
+        wasm_component_instance_lookup_instance(nested_instance, "wrapped-instance");
+    ASSERT_NE(wrapped_instance, nullptr);
+
+    wasm_component_func_t func =
+        wasm_component_instance_lookup_function(wrapped_instance, "wrapped");
+    ASSERT_NE(func, nullptr);
+
+    std::vector<uint8_t> expected_payload;
+    wasm_component_value_t result = {};
+    append_component_s32_payload(&expected_payload, -17);
+    append_component_u64_payload(&expected_payload, UINT64_MAX);
+    append_component_f64_payload(&expected_payload, 6.25);
+
+    ASSERT_TRUE(
+        wasm_runtime_call_component_values(module_inst, func, 1, &result, 0, nullptr))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(result.type.kind, WASM_COMPONENT_VALUE_TYPE_DEFINED);
+    ASSERT_EQ(result.byte_size, expected_payload.size());
+    ASSERT_EQ(memcmp(wasm_component_value_get_data(&result), expected_payload.data(),
+                     expected_payload.size()),
+              0);
+
+    wasm_component_value_destroy(&result);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestPublicComponentCallRejectsLowerReliftWithLowerSideCanonOptions)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "public-component-call-lower-relift-lower-opts";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(
+        append_component_export_alias_sections((WASMComponentModule *)module));
+    ASSERT_TRUE(append_top_level_canon_lower_relift_export_sections(
+        (WASMComponentModule *)module, "lowered-add-with-lower-opts"));
+
+    WASMComponentCanon *lower_canon =
+        find_first_canon_lower((WASMComponentModule *)module);
+    ASSERT_NE(lower_canon, nullptr);
+    ASSERT_TRUE(ensure_canon_lower_memory_opt(lower_canon, 0));
+
+    wasm_module_inst_t module_inst =
+        instantiate_component_with_default_wasi(module, helper.get());
+    ASSERT_EQ(module_inst, nullptr);
+    ASSERT_NE(strstr(helper->error_buf,
+                     "synthetic lift(lower(f)) does not support lower-side canon "
+                     "options"),
+              nullptr);
+
     wasm_runtime_unload(module);
 }
 
