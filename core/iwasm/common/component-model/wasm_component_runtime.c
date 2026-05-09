@@ -8654,13 +8654,14 @@ validate_component_runtime_func_against_type(
             return true;
     }
 
-    if (runtime_func->kind == WASM_COMP_RUNTIME_FUNC_LIFT) {
+    if (runtime_func->kind == WASM_COMP_RUNTIME_FUNC_LIFT
+        && actual_component != expected_component) {
         bool expected_supported = false, actual_supported = false;
 
-        if (!component_func_type_uses_supported_scalar_matching(
+        if (!component_func_type_uses_supported_value_matching(
                 expected_component, expected_type, import_name, member_name,
                 &expected_supported, error_buf, error_buf_size)
-            || !component_func_type_uses_supported_scalar_matching(
+            || !component_func_type_uses_supported_value_matching(
                 actual_component, actual_type, import_name, member_name,
                 &actual_supported, error_buf, error_buf_size))
             return false;
