@@ -11353,6 +11353,206 @@ TEST_F(BinaryParserTest,
     wasm_runtime_unload(module);
 }
 
+TEST_F(BinaryParserTest, TestPublicComponentCallInvokesLowerReliftedListU8Result)
+{
+    bool ret = helper->read_wasm_file("list_u8_post_return.component.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "public-component-call-lower-relift-list-u8";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    ASSERT_TRUE(configure_component_func_list_result_type(
+        (WASMComponentModule *)module, 0, WASM_COMP_PRIMVAL_U8, false, 0));
+    ASSERT_TRUE(append_top_level_canon_lower_relift_export_sections(
+        (WASMComponentModule *)module, "lowered-echo-bytes"));
+
+    wasm_module_inst_t module_inst =
+        instantiate_component_with_default_wasi(module, helper.get());
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func =
+        wasm_runtime_lookup_component_function(module_inst, "lowered-echo-bytes");
+    ASSERT_NE(func, nullptr);
+
+    const char payload[] = "echo";
+    wasm_component_value_t arg = make_component_string_value(payload);
+    wasm_component_value_t result = {};
+    ASSERT_TRUE(
+        wasm_runtime_call_component_values(module_inst, func, 1, &result, 1, &arg))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(result.type.kind, WASM_COMPONENT_VALUE_TYPE_DEFINED);
+    ASSERT_EQ(result.storage_kind, WASM_COMPONENT_VALUE_STORAGE_OWNED);
+    ASSERT_EQ(result.byte_size, sizeof(payload) - 1);
+    ASSERT_EQ(memcmp(wasm_component_value_get_data(&result), payload,
+                     sizeof(payload) - 1),
+              0);
+
+    wasm_component_value_destroy(&arg);
+    wasm_component_value_destroy(&result);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestPublicComponentCallInvokesNestedLowerReliftedListU8Result)
+{
+    bool ret = helper->read_wasm_file("list_u8_post_return.component.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "public-component-call-nested-lower-relift-list-u8";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    ASSERT_TRUE(configure_component_func_list_result_type(
+        (WASMComponentModule *)module, 0, WASM_COMP_PRIMVAL_U8, false, 0));
+    ASSERT_TRUE(append_nested_component_lower_relift_sections(
+        (WASMComponentModule *)module));
+
+    wasm_module_inst_t module_inst =
+        instantiate_component_with_default_wasi(module, helper.get());
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_instance_t nested_instance =
+        wasm_runtime_lookup_component_instance(module_inst, "nested-lowered-instance");
+    ASSERT_NE(nested_instance, nullptr);
+
+    wasm_component_instance_t wrapped_instance =
+        wasm_component_instance_lookup_instance(nested_instance, "wrapped-instance");
+    ASSERT_NE(wrapped_instance, nullptr);
+
+    wasm_component_func_t func =
+        wasm_component_instance_lookup_function(wrapped_instance, "wrapped");
+    ASSERT_NE(func, nullptr);
+
+    const char payload[] = "bin";
+    wasm_component_value_t arg = make_component_string_value(payload);
+    wasm_component_value_t result = {};
+    ASSERT_TRUE(
+        wasm_runtime_call_component_values(module_inst, func, 1, &result, 1, &arg))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(result.type.kind, WASM_COMPONENT_VALUE_TYPE_DEFINED);
+    ASSERT_EQ(result.storage_kind, WASM_COMPONENT_VALUE_STORAGE_OWNED);
+    ASSERT_EQ(result.byte_size, sizeof(payload) - 1);
+    ASSERT_EQ(memcmp(wasm_component_value_get_data(&result), payload,
+                     sizeof(payload) - 1),
+              0);
+
+    wasm_component_value_destroy(&arg);
+    wasm_component_value_destroy(&result);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest, TestPublicComponentCallInvokesLowerReliftedTupleHandle)
+{
+    bool ret = helper->read_wasm_file("multivalue_record_tuple.component.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "public-component-call-lower-relift-tuple";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(append_top_level_canon_lower_relift_export_sections(
+        (WASMComponentModule *)module, "lowered-tuple-result"));
+
+    wasm_module_inst_t module_inst =
+        instantiate_component_with_default_wasi(module, helper.get());
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func =
+        wasm_runtime_lookup_component_function(module_inst, "lowered-tuple-result");
+    ASSERT_NE(func, nullptr);
+
+    std::vector<uint8_t> expected_payload;
+    wasm_component_value_t result = {};
+    append_component_s32_payload(&expected_payload, 42);
+    append_component_u64_payload(&expected_payload, 7);
+    append_component_f32_payload(&expected_payload, 1.5f);
+
+    ASSERT_TRUE(
+        wasm_runtime_call_component_values(module_inst, func, 1, &result, 0, nullptr))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(result.type.kind, WASM_COMPONENT_VALUE_TYPE_DEFINED);
+    ASSERT_EQ(result.storage_kind, WASM_COMPONENT_VALUE_STORAGE_INLINE);
+    ASSERT_EQ(result.byte_size, expected_payload.size());
+    ASSERT_EQ(memcmp(wasm_component_value_get_data(&result), expected_payload.data(),
+                     expected_payload.size()),
+              0);
+
+    wasm_component_value_destroy(&result);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestPublicComponentCallInvokesNestedLowerReliftedTupleHandle)
+{
+    bool ret = helper->read_wasm_file("multivalue_record_tuple.component.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "public-component-call-nested-lower-relift-tuple";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(append_nested_component_lower_relift_sections(
+        (WASMComponentModule *)module));
+
+    wasm_module_inst_t module_inst =
+        instantiate_component_with_default_wasi(module, helper.get());
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_instance_t nested_instance =
+        wasm_runtime_lookup_component_instance(module_inst, "nested-lowered-instance");
+    ASSERT_NE(nested_instance, nullptr);
+
+    wasm_component_instance_t wrapped_instance =
+        wasm_component_instance_lookup_instance(nested_instance, "wrapped-instance");
+    ASSERT_NE(wrapped_instance, nullptr);
+
+    wasm_component_func_t func =
+        wasm_component_instance_lookup_function(wrapped_instance, "wrapped");
+    ASSERT_NE(func, nullptr);
+
+    std::vector<uint8_t> expected_payload;
+    wasm_component_value_t result = {};
+    append_component_s32_payload(&expected_payload, 42);
+    append_component_u64_payload(&expected_payload, 7);
+    append_component_f32_payload(&expected_payload, 1.5f);
+
+    ASSERT_TRUE(
+        wasm_runtime_call_component_values(module_inst, func, 1, &result, 0, nullptr))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(result.type.kind, WASM_COMPONENT_VALUE_TYPE_DEFINED);
+    ASSERT_EQ(result.storage_kind, WASM_COMPONENT_VALUE_STORAGE_INLINE);
+    ASSERT_EQ(result.byte_size, expected_payload.size());
+    ASSERT_EQ(memcmp(wasm_component_value_get_data(&result), expected_payload.data(),
+                     expected_payload.size()),
+              0);
+
+    wasm_component_value_destroy(&result);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
 TEST_F(BinaryParserTest,
        TestPublicComponentCallRejectsNestedMemoryBackedCanonLiftInRawApi)
 {

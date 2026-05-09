@@ -2234,13 +2234,36 @@ lookup_component_canon_lift_value_type(const WASMComponent *component,
 }
 
 static bool
+get_component_func_owner_component(WASMComponentInstance *inst,
+                                   const WASMComponentRuntimeFunc *function,
+                                   const WASMComponent **out_component)
+{
+    const WASMComponent *component =
+        function && function->type_owner_component ? function->type_owner_component
+                                                   : &inst->module->component;
+
+    if (!component)
+        return set_component_call_error(inst,
+                                        "component function is missing type "
+                                        "metadata");
+
+    *out_component = component;
+    return true;
+}
+
+static bool
 resolve_component_func_type(WASMComponentInstance *inst,
                             const WASMComponentRuntimeFunc *function,
                             const char *function_name,
                             WASMComponentFuncType **out_component_type)
 {
-    const WASMComponentTypes *type_entry =
-        wasm_component_lookup_type(&inst->module->component, function->type_idx);
+    const WASMComponent *component;
+    const WASMComponentTypes *type_entry;
+
+    if (!get_component_func_owner_component(inst, function, &component))
+        return false;
+
+    type_entry = wasm_component_lookup_type(component, function->type_idx);
 
     if (!type_entry)
         return set_component_call_error_fmt(
@@ -2532,6 +2555,9 @@ validate_component_host_import_func_type(WASMComponentInstance *inst,
                                          char *error_buf,
                                          uint32 error_buf_size)
 {
+    const WASMComponent *component =
+        function && function->type_owner_component ? function->type_owner_component
+                                                   : &inst->module->component;
     const WASMComponentTypes *type_entry;
     WASMComponentFuncType *func_type;
     uint32 i;
@@ -2543,8 +2569,7 @@ validate_component_host_import_func_type(WASMComponentInstance *inst,
     function->has_list_u8_result = false;
     function->has_composite_result = false;
 
-    type_entry =
-        wasm_component_lookup_type(&inst->module->component, function->type_idx);
+    type_entry = wasm_component_lookup_type(component, function->type_idx);
     if (!type_entry)
         return set_component_runtime_error_fmt(
             error_buf, error_buf_size,
@@ -2565,7 +2590,7 @@ validate_component_host_import_func_type(WASMComponentInstance *inst,
             bool is_composite;
 
             if (!validate_component_host_import_value_type(
-                    &inst->module->component,
+                    component,
                     func_type->params->params[i].value_type, import_name,
                     "parameter", i, &is_string, &is_list_u8, &is_composite,
                     error_buf,
@@ -2590,7 +2615,7 @@ validate_component_host_import_func_type(WASMComponentInstance *inst,
                 "host component import \"%s\" result metadata is missing",
                 import_name);
         if (!validate_component_host_import_value_type(
-                &inst->module->component, func_type->results->results,
+                component, func_type->results->results,
                 import_name, "result", 0, &function->has_string_result,
                 &function->has_list_u8_result, &is_composite, error_buf,
                 error_buf_size))
@@ -2799,6 +2824,9 @@ resolve_component_canon_lift_abi(WASMComponentInstance *inst,
                                  WASMComponentRuntimeFunc *function,
                                  char *error_buf, uint32 error_buf_size)
 {
+    const WASMComponent *component =
+        function && function->type_owner_component ? function->type_owner_component
+                                                   : &inst->module->component;
     const WASMComponentTypes *type_entry;
     const WASMComponentFuncType *func_type;
     uint32 i;
@@ -2813,8 +2841,7 @@ resolve_component_canon_lift_abi(WASMComponentInstance *inst,
     function->has_string_params = false;
     function->has_list_u8_params = false;
 
-    type_entry =
-        wasm_component_lookup_type(&inst->module->component, function->type_idx);
+    type_entry = wasm_component_lookup_type(component, function->type_idx);
     if (!type_entry)
         return set_component_runtime_error_fmt(
             error_buf, error_buf_size,
@@ -2837,7 +2864,7 @@ resolve_component_canon_lift_abi(WASMComponentInstance *inst,
             uint8 param_prim_type = 0;
 
             if (!resolve_component_runtime_primitive_type(
-                    &inst->module->component, func_type->params->params[i].value_type,
+                    component, func_type->params->params[i].value_type,
                     &is_primitive_param, &param_prim_type, error_buf,
                     error_buf_size))
                 return false;
@@ -2849,7 +2876,7 @@ resolve_component_canon_lift_abi(WASMComponentInstance *inst,
                        == WASM_COMP_VAL_TYPE_IDX) {
                 const WASMComponentTypes *param_type_entry =
                     wasm_component_lookup_type(
-                        &inst->module->component,
+                        component,
                         func_type->params->params[i].value_type->type_specific
                             .type_idx);
 
@@ -2877,7 +2904,7 @@ resolve_component_canon_lift_abi(WASMComponentInstance *inst,
                            == WASM_COMP_DEF_VAL_TUPLE;
             }
             if (!resolve_component_lift_string_usage(
-                    &inst->module->component, func_type->params->params[i].value_type,
+                    component, func_type->params->params[i].value_type,
                     &is_string, error_buf, error_buf_size))
                 return false;
             if (is_composite_param) {
@@ -2885,7 +2912,7 @@ resolve_component_canon_lift_abi(WASMComponentInstance *inst,
                 bool composite_has_list_u8 = false;
 
                 if (!classify_component_runtime_composite_param(
-                        &inst->module->component,
+                        component,
                         func_type->params->params[i].value_type, i,
                         &composite_has_string, &composite_has_list_u8, error_buf,
                         error_buf_size))
@@ -2901,7 +2928,7 @@ resolve_component_canon_lift_abi(WASMComponentInstance *inst,
                 function->has_string_params = true;
             if (!is_string
                 && !resolve_component_lift_list_u8_usage(
-                    &inst->module->component,
+                    component,
                     func_type->params->params[i].value_type, &is_list_u8,
                     error_buf, error_buf_size))
                 return false;
@@ -2919,15 +2946,16 @@ resolve_component_canon_lift_abi(WASMComponentInstance *inst,
         uint8 result_prim_type = 0;
 
         if (!resolve_component_runtime_primitive_type(
-                &inst->module->component, func_type->results->results,
+                component, func_type->results->results,
                 &is_primitive_result, &result_prim_type, error_buf,
                 error_buf_size))
             return false;
 
         if (!is_primitive_result && func_type->results->results->type == WASM_COMP_VAL_TYPE_IDX) {
-            const WASMComponentTypes *result_type_entry = wasm_component_lookup_type(
-                &inst->module->component,
-                func_type->results->results->type_specific.type_idx);
+            const WASMComponentTypes *result_type_entry =
+                wasm_component_lookup_type(
+                    component,
+                    func_type->results->results->type_specific.type_idx);
 
             if (!result_type_entry)
                 return set_component_runtime_error_fmt(
@@ -2949,7 +2977,7 @@ resolve_component_canon_lift_abi(WASMComponentInstance *inst,
                 bool composite_has_list_u8 = false;
 
                 if (!classify_component_runtime_composite_result(
-                        &inst->module->component, func_type->results->results,
+                        component, func_type->results->results,
                         &composite_has_string, &composite_has_list_u8,
                         error_buf, error_buf_size))
                     return false;
@@ -2964,11 +2992,11 @@ resolve_component_canon_lift_abi(WASMComponentInstance *inst,
                         WASM_COMP_RUNTIME_CANON_LIFT_MEMORY_RESULT_COMPOSITE;
             }
             else if (!resolve_component_lift_string_usage(
-                         &inst->module->component, func_type->results->results,
+                         component, func_type->results->results,
                          &has_string_result, error_buf, error_buf_size)
                      || (!has_string_result
                          && !resolve_component_lift_list_u8_usage(
-                             &inst->module->component, func_type->results->results,
+                             component, func_type->results->results,
                              &has_list_u8_result, error_buf, error_buf_size)))
                 return false;
         }
@@ -2977,7 +3005,7 @@ resolve_component_canon_lift_abi(WASMComponentInstance *inst,
                                 && result_prim_type == WASM_COMP_PRIMVAL_STRING;
             if (!has_string_result
                 && !resolve_component_lift_list_u8_usage(
-                    &inst->module->component, func_type->results->results,
+                    component, func_type->results->results,
                     &has_list_u8_result, error_buf, error_buf_size))
                 return false;
         }
@@ -5815,6 +5843,9 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
                                     const wasm_component_value_t *args,
                                     bool require_top_level_export)
 {
+    const WASMComponent *component =
+        function && function->type_owner_component ? function->type_owner_component
+                                                   : &inst->module->component;
     WASMComponentFuncType *component_type = NULL;
     WASMFuncType *core_type = NULL;
     WASMExecEnv *exec_env;
@@ -5894,7 +5925,7 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
             WASMComponentCanonLiftValueInfo type_info;
 
             if (!resolve_component_canon_lift_value_shape(
-                    &inst->module->component,
+                    component,
                     component_type->params->params[i].value_type, "parameter", i,
                     &shape, inst))
                 return false;
@@ -5903,14 +5934,14 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
                 && (shape.def_type->tag == WASM_COMP_DEF_VAL_RECORD
                     || shape.def_type->tag == WASM_COMP_DEF_VAL_TUPLE)) {
                 if (!validate_component_public_composite_param_value(
-                        inst, &inst->module->component,
+                        inst, component,
                         component_type->params->params[i].value_type, &args[i], i))
                     return false;
                 continue;
             }
 
             if (!lookup_component_canon_lift_value_type(
-                    &inst->module->component,
+                    component,
                     component_type->params->params[i].value_type, "parameter", i,
                     true, true, false, &type_info, inst))
                 return false;
@@ -5953,7 +5984,7 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
         if (expected_result_count == 1) {
             if (function->has_composite_result) {
                 if (!validate_host_component_public_composite_result_value(
-                        inst, &inst->module->component,
+                        inst, component,
                         component_type->results->results, &callback_results[0],
                         0)) {
                     wasm_component_value_destroy(&callback_results[0]);
@@ -5962,7 +5993,7 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
             }
             else {
                 if (!lookup_component_canon_lift_value_type(
-                        &inst->module->component, component_type->results->results,
+                        component, component_type->results->results,
                         "result", 0, true, false, true, &result_info, inst)) {
                     wasm_component_value_destroy(&callback_results[0]);
                     return false;
@@ -6066,7 +6097,7 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
 
     if (expected_result_count == 1) {
         if (!resolve_component_canon_lift_value_shape(
-                &inst->module->component, component_type->results->results, "result",
+                component, component_type->results->results, "result",
                 0, &result_shape, inst))
             return false;
 
@@ -6079,7 +6110,7 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
             uint32 composite_result_size = 0, composite_result_align = 1;
 
             if (!compute_component_canon_abi_layout(
-                    inst, &inst->module->component, component_type->results->results,
+                    inst, component, component_type->results->results,
                     0, &composite_result_size, &composite_result_align,
                     &composite_result_has_string,
                     &composite_result_has_list_u8))
@@ -6112,7 +6143,7 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
                 }
 
                 if (!validate_component_composite_result_signature(
-                        inst, &inst->module->component,
+                        inst, component,
                         component_type->results->results, 0, core_type,
                         result_leaves, core_type->result_count,
                         &flat_result_count))
@@ -6121,7 +6152,7 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
         }
         else {
             if (!lookup_component_canon_lift_value_type(
-                    &inst->module->component, component_type->results->results,
+                    component, component_type->results->results,
                     "result", 0, true, false, true, &result_info, inst))
                 goto cleanup;
 
@@ -6215,7 +6246,7 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
 
     for (i = 0; i < component_type->params->count; i++) {
         if (!flatten_component_public_param_value(
-                inst, function, &inst->module->component,
+                inst, function, component,
                 component_type->params->params[i].value_type, &args[i], i,
                 core_type, core_args, &core_arg_index,
                 &param_allocation_tracker)) {
@@ -6274,7 +6305,7 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
                 memory_result_retptr = (uint32)core_results[0].of.i32;
                 have_memory_result_ptr = true;
                 if (!init_component_public_memory_composite_result(
-                        inst, function, &inst->module->component,
+                        inst, function, component,
                         component_type->results->results, 0, memory_result_retptr,
                         &results[0])) {
                     call_succeeded = false;
@@ -6433,6 +6464,9 @@ wasm_component_call_internal(WASMComponentInstance *inst,
                              uint32 num_args, wasm_val_t *args,
                              bool require_top_level_export)
 {
+    const WASMComponent *component =
+        function && function->type_owner_component ? function->type_owner_component
+                                                   : &inst->module->component;
     WASMComponentFuncType *component_type = NULL;
     WASMFuncType *core_type = NULL;
     WASMExecEnv *exec_env;
@@ -6514,7 +6548,7 @@ wasm_component_call_internal(WASMComponentInstance *inst,
             WASMComponentCanonLiftValueInfo type_info;
 
             if (!lookup_component_canon_lift_value_type(
-                    &inst->module->component,
+                    component,
                     component_type->params->params[i].value_type, "parameter", i,
                     false, false, false, &type_info, inst)
                 || !validate_component_scalar_value(inst, &args[i],
@@ -6552,7 +6586,7 @@ wasm_component_call_internal(WASMComponentInstance *inst,
             WASMComponentCanonLiftValueInfo result_info_local;
 
             if (!lookup_component_canon_lift_value_type(
-                    &inst->module->component, component_type->results->results,
+                    component, component_type->results->results,
                     "result", 0, false, false, false, &result_info_local, inst)
                 || !decode_component_public_scalar_value(
                     inst, &public_result, &result_info_local, "result", 0,
@@ -6654,7 +6688,7 @@ wasm_component_call_internal(WASMComponentInstance *inst,
         wasm_valkind_t expected_kind;
 
         if (!lookup_component_scalar_type(
-                &inst->module->component, component_type->params->params[i].value_type,
+                component, component_type->params->params[i].value_type,
                 "parameter", i, &prim_type, &expected_core_type, &expected_kind,
                 inst))
             return false;
@@ -6674,7 +6708,7 @@ wasm_component_call_internal(WASMComponentInstance *inst,
         uint8 prim_type, expected_core_type;
         wasm_valkind_t expected_kind;
 
-        if (!lookup_component_scalar_type(&inst->module->component,
+        if (!lookup_component_scalar_type(component,
                                           component_type->results->results, "result",
                                           0, &prim_type, &expected_core_type,
                                           &expected_kind, inst))
@@ -6712,7 +6746,7 @@ wasm_component_call_internal(WASMComponentInstance *inst,
         uint8 prim_type, ignored_core_type;
         wasm_valkind_t expected_kind;
 
-        if (!lookup_component_scalar_type(&inst->module->component,
+        if (!lookup_component_scalar_type(component,
                                           component_type->results->results, "result",
                                           0, &prim_type, &ignored_core_type,
                                           &expected_kind, inst))
@@ -6857,6 +6891,9 @@ execute_component_start_section_with_public_values(
     uint32 error_buf_size, const char *error_prefix, uint32 num_args,
     wasm_component_value_t *public_args)
 {
+    const WASMComponent *component =
+        function && function->type_owner_component ? function->type_owner_component
+                                                   : &inst->module->component;
     WASMComponentFuncType *component_type = NULL;
     wasm_component_value_t public_result = { 0 };
 
@@ -6889,7 +6926,7 @@ execute_component_start_section_with_public_values(
 
         wasm_component_runtime_value_clear(result_value);
         if (!wasm_component_runtime_value_init_public(
-                result_value, &inst->module->component,
+                result_value, component,
                 component_type->results->results, &public_result, error_buf,
                 error_buf_size)) {
             wasm_component_runtime_value_clear(result_value);
@@ -7576,6 +7613,7 @@ append_component_canon_function(WASMComponentInstance *inst,
         memset(func, 0, sizeof(*func));
         func->canon_tag = canon->tag;
         func->owner_instance = inst;
+        func->type_owner_component = &inst->module->component;
         if (canon->canon_data.lift.core_func_idx >= inst->core_func_count)
             return set_component_runtime_error_fmt(
                 error_buf, error_buf_size,
@@ -7624,6 +7662,7 @@ append_component_canon_function(WASMComponentInstance *inst,
         func->kind = WASM_COMP_RUNTIME_FUNC_LOWER;
         func->canon_tag = canon->tag;
         func->owner_instance = inst;
+        func->type_owner_component = &inst->module->component;
         func->canon_opts = canon->canon_data.lower.canon_opts;
         func->lowered_target = target_ref.of.function;
 
@@ -7653,6 +7692,7 @@ append_component_canon_function(WASMComponentInstance *inst,
         memset(func, 0, sizeof(*func));
         func->canon_tag = canon->tag;
         func->owner_instance = inst;
+        func->type_owner_component = &inst->module->component;
         func->kind = WASM_COMP_RUNTIME_FUNC_UNSUPPORTED_CANON;
     }
 
@@ -7662,7 +7702,8 @@ append_component_canon_function(WASMComponentInstance *inst,
 static bool
 append_nested_component_canon(
     WASMComponentInstance *inst, WASMComponentRuntimeInstance *runtime_inst,
-    WASMNestedComponentLocalBindings *bindings, const WASMComponentCanon *canon,
+    WASMNestedComponentLocalBindings *bindings, const WASMComponent *component,
+    const WASMComponentCanon *canon,
     char *error_buf, uint32 error_buf_size)
 {
     WASMComponentRuntimeFunc *func;
@@ -7686,6 +7727,7 @@ append_nested_component_canon(
             memset(func, 0, sizeof(*func));
             func->canon_tag = canon->tag;
             func->owner_instance = inst;
+            func->type_owner_component = component;
             func->kind = WASM_COMP_RUNTIME_FUNC_LIFT;
             func->type_idx = canon->canon_data.lift.type_idx;
             func->canon_opts = canon->canon_data.lift.canon_opts;
@@ -7716,6 +7758,7 @@ append_nested_component_canon(
             func->kind = WASM_COMP_RUNTIME_FUNC_LOWER;
             func->canon_tag = canon->tag;
             func->owner_instance = inst;
+            func->type_owner_component = component;
             func->canon_opts = canon->canon_data.lower.canon_opts;
             func->lowered_target = bindings->funcs[canon->canon_data.lower.func_idx]
                                        .of.function;
@@ -7743,6 +7786,7 @@ append_nested_component_canon(
             memset(func, 0, sizeof(*func));
             func->canon_tag = canon->tag;
             func->owner_instance = inst;
+            func->type_owner_component = component;
             func->kind = WASM_COMP_RUNTIME_FUNC_UNSUPPORTED_CANON;
             memset(&component_ref, 0, sizeof(component_ref));
             component_ref.type = WASM_COMP_RUNTIME_REF_FUNC;
@@ -10295,6 +10339,7 @@ append_top_level_component_host_import(
     function->kind = WASM_COMP_RUNTIME_FUNC_HOST_IMPORT;
     function->type_idx = component_import->extern_desc->extern_desc.func.type_idx;
     function->owner_instance = inst;
+    function->type_owner_component = &inst->module->component;
     function->host_callback = binding->callback;
     function->host_user_data = binding->user_data;
 
@@ -10869,7 +10914,7 @@ build_component_runtime_instance_from_component(
 
                 for (j = 0; j < canon_section->count; j++) {
                     if (!append_nested_component_canon(
-                            inst, runtime_inst, &bindings,
+                            inst, runtime_inst, &bindings, component,
                             &canon_section->canons[j], error_buf,
                             error_buf_size))
                         goto fail;
