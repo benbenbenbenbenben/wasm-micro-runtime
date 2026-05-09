@@ -324,15 +324,16 @@ Nested components now support:
 - nested local `core module` sections
 - export/re-export of those nested core modules through nested component instances
 - nested local `core instance` sections in instantiate/`with_args` form
+- nested inline/`without_args` `core instance` expressions for core-module
+  re-exports
 
 Nested components still reject:
 
-- nested inline/`without_args` `core instance` expressions
 - nested `core type` sections
 
 The runtime can now thread nested local core-module handles and construct nested
-local core instances, but it still does **not** construct a full nested core
-runtime.
+local/synthetic core instances, but it still does **not** construct a full
+nested core runtime.
 
 ## 9. Remaining spec limitations still apply
 

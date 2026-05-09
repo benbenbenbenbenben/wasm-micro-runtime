@@ -717,6 +717,51 @@ resolve_nested_component_local_sort_idx(
 }
 
 static bool
+resolve_nested_component_local_core_sort_idx(
+    const WASMNestedComponentLocalBindings *bindings,
+    const WASMComponentSortIdx *sort_idx, WASMComponentCoreRuntimeRef *out_ref,
+    char *error_buf, uint32 error_buf_size)
+{
+    if (!sort_idx || !sort_idx->sort)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size, "missing nested core sort index");
+
+    if (sort_idx->sort->sort != WASM_COMP_SORT_CORE_SORT)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "non-core sort references are not supported in nested core "
+            "instance exports");
+
+    switch (sort_idx->sort->core_sort) {
+        case WASM_COMP_CORE_SORT_MODULE:
+            if (sort_idx->idx >= bindings->core_module_count)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "nested component core module index %u is out of bounds",
+                    sort_idx->idx);
+            memset(out_ref, 0, sizeof(*out_ref));
+            out_ref->type = WASM_COMP_CORE_RUNTIME_REF_MODULE;
+            out_ref->of.module = bindings->core_modules[sort_idx->idx];
+            return true;
+        case WASM_COMP_CORE_SORT_INSTANCE:
+            if (sort_idx->idx >= bindings->core_instance_count)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "nested component core instance index %u is out of bounds",
+                    sort_idx->idx);
+            memset(out_ref, 0, sizeof(*out_ref));
+            out_ref->type = WASM_COMP_CORE_RUNTIME_REF_INSTANCE;
+            out_ref->of.instance = bindings->core_instances[sort_idx->idx];
+            return true;
+        default:
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                "nested core instance exports only support core module and "
+                "core instance sorts");
+    }
+}
+
+static bool
 resolve_nested_component_local_component_idx(
     const WASMNestedComponentLocalBindings *bindings, uint32 component_idx,
     WASMComponentRuntimeComponent **out_component, char *error_buf,
@@ -7195,27 +7240,50 @@ instantiate_nested_component_core_instance(
 
     memset(child_inst, 0, sizeof(*child_inst));
 
-    if (core_inst->instance_expression_tag
-        != WASM_COMP_INSTANCE_EXPRESSION_WITH_ARGS)
-        return set_component_runtime_error_fmt(
-            error_buf, error_buf_size,
-            "nested component core instance expressions other than instantiate "
-            "are not supported yet");
-
-    if (core_inst->expression.with_args.idx >= bindings->core_module_count)
-        return set_component_runtime_error_fmt(
-            error_buf, error_buf_size,
-            "nested component core module index %u is out of bounds",
-            core_inst->expression.with_args.idx);
-
-    module = bindings->core_modules[core_inst->expression.with_args.idx];
     runtime_inst->owned_core_instance_count++;
-    wasm_runtime_instantiation_args_set_defaults(&args);
-    child_inst->module_inst = wasm_runtime_instantiate_internal(
-        (WASMModuleCommon *)module, NULL, NULL, &args, error_buf,
-        error_buf_size);
-    if (!child_inst->module_inst)
+    if (core_inst->instance_expression_tag
+        == WASM_COMP_INSTANCE_EXPRESSION_WITH_ARGS) {
+        if (core_inst->expression.with_args.idx >= bindings->core_module_count)
+            goto fail_oob;
+
+        module = bindings->core_modules[core_inst->expression.with_args.idx];
+        wasm_runtime_instantiation_args_set_defaults(&args);
+        child_inst->module_inst = wasm_runtime_instantiate_internal(
+            (WASMModuleCommon *)module, NULL, NULL, &args, error_buf,
+            error_buf_size);
+        if (!child_inst->module_inst)
+            goto fail;
+    }
+    else if (core_inst->instance_expression_tag
+             == WASM_COMP_INSTANCE_EXPRESSION_WITHOUT_ARGS) {
+        uint32 i;
+        uint32 export_count = core_inst->expression.without_args.inline_expr_len;
+
+        if (!alloc_component_runtime_array((void **)&child_inst->exports,
+                                           export_count,
+                                           sizeof(*child_inst->exports), error_buf,
+                                           error_buf_size))
+            goto fail;
+
+        child_inst->export_count = export_count;
+        for (i = 0; i < export_count; i++) {
+            const WASMComponentInlineExport *inline_export =
+                &core_inst->expression.without_args.inline_expr[i];
+
+            child_inst->exports[i].name = inline_export->name->name;
+            if (!resolve_nested_component_local_core_sort_idx(
+                    bindings, inline_export->sort_idx, &child_inst->exports[i].ref,
+                    error_buf, error_buf_size))
+                goto fail;
+        }
+    }
+    else {
+        set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "unsupported nested core instance expression tag 0x%02x",
+            (unsigned)core_inst->instance_expression_tag);
         goto fail;
+    }
 
     if (!append_nested_component_local_core_instance(bindings, child_inst, error_buf,
                                                      error_buf_size))
@@ -7227,6 +7295,13 @@ fail:
     destroy_component_core_instance(child_inst);
     runtime_inst->owned_core_instance_count--;
     return false;
+
+fail_oob:
+    set_component_runtime_error_fmt(
+        error_buf, error_buf_size,
+        "nested component core module index %u is out of bounds",
+        core_inst->expression.with_args.idx);
+    goto fail;
 }
 
 static bool
