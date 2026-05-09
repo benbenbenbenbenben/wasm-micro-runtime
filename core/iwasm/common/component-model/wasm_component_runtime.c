@@ -8304,6 +8304,114 @@ resolve_component_scalar_primitive_type(
 }
 
 static bool
+is_supported_value_match_primitive(WASMComponentPrimValType primitive_type);
+
+static bool
+validate_component_value_types_equal(
+    const WASMComponent *expected_component,
+    const WASMComponentValueType *expected_value_type,
+    const WASMComponent *actual_component,
+    const WASMComponentValueType *actual_value_type, const char *import_name,
+    const char *member_name, char *error_buf, uint32 error_buf_size);
+
+static bool
+component_value_type_is_u8_primitive(const WASMComponent *component,
+                                     const WASMComponentValueType *value_type)
+{
+    const WASMComponentTypes *type_entry;
+    const WASMComponentDefValType *def_type;
+
+    if (!component || !value_type)
+        return false;
+
+    if (value_type->type == WASM_COMP_VAL_TYPE_PRIMVAL)
+        return value_type->type_specific.primval_type == WASM_COMP_PRIMVAL_U8;
+
+    type_entry =
+        wasm_component_lookup_type(component, value_type->type_specific.type_idx);
+    if (!type_entry || type_entry->tag != WASM_COMP_DEF_TYPE
+        || !(def_type = type_entry->type.def_val_type))
+        return false;
+
+    return def_type->tag == WASM_COMP_DEF_VAL_PRIMVAL
+           && def_type->def_val.primval == WASM_COMP_PRIMVAL_U8;
+}
+
+static bool
+component_value_type_uses_supported_matching_subset(
+    const WASMComponent *component, const WASMComponentValueType *value_type)
+{
+    const WASMComponentTypes *type_entry;
+    const WASMComponentDefValType *def_type;
+
+    if (!component || !value_type)
+        return false;
+
+    if (value_type->type == WASM_COMP_VAL_TYPE_PRIMVAL)
+        return is_supported_value_match_primitive(
+            value_type->type_specific.primval_type);
+
+    type_entry =
+        wasm_component_lookup_type(component, value_type->type_specific.type_idx);
+    if (!type_entry || type_entry->tag != WASM_COMP_DEF_TYPE
+        || !(def_type = type_entry->type.def_val_type))
+        return false;
+
+    switch (def_type->tag) {
+        case WASM_COMP_DEF_VAL_PRIMVAL:
+            return is_supported_value_match_primitive(def_type->def_val.primval);
+        case WASM_COMP_DEF_VAL_LIST:
+            return def_type->def_val.list && def_type->def_val.list->element_type
+                   && component_value_type_is_u8_primitive(
+                       component, def_type->def_val.list->element_type);
+        case WASM_COMP_DEF_VAL_RECORD:
+            if (!def_type->def_val.record)
+                return false;
+            for (uint32 i = 0; i < def_type->def_val.record->count; i++) {
+                if (!component_value_type_uses_supported_matching_subset(
+                        component,
+                        def_type->def_val.record->fields[i].value_type))
+                    return false;
+            }
+            return true;
+        case WASM_COMP_DEF_VAL_TUPLE:
+            if (!def_type->def_val.tuple)
+                return false;
+            for (uint32 i = 0; i < def_type->def_val.tuple->count; i++) {
+                if (!component_value_type_uses_supported_matching_subset(
+                        component,
+                        &def_type->def_val.tuple->element_types[i]))
+                    return false;
+            }
+            return true;
+        default:
+            return false;
+    }
+}
+
+static bool
+component_contains_nested_component(const WASMComponent *component,
+                                    const WASMComponent *candidate)
+{
+    if (!component || !candidate)
+        return false;
+
+    for (uint32 i = 0; i < component->section_count; i++) {
+        const WASMComponentSection *section = &component->sections[i];
+
+        if (section->id != WASM_COMP_SECTION_COMPONENT || !section->parsed.component)
+            continue;
+
+        if (section->parsed.component == candidate
+            || component_contains_nested_component(section->parsed.component,
+                                                   candidate))
+            return true;
+    }
+
+    return false;
+}
+
+static bool
 component_func_type_uses_supported_scalar_matching(
     const WASMComponent *component, const WASMComponentFuncType *func_type,
     const char *import_name, const char *member_name, bool *supported,
@@ -8358,6 +8466,49 @@ component_func_type_uses_supported_scalar_matching(
 }
 
 static bool
+component_func_type_uses_supported_value_matching(
+    const WASMComponent *component, const WASMComponentFuncType *func_type,
+    const char *import_name, const char *member_name, bool *supported,
+    char *error_buf, uint32 error_buf_size)
+{
+    uint32 param_count;
+    uint32 result_count;
+
+    if (supported)
+        *supported = false;
+
+    if (!component || !func_type || !supported)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            member_name ? "component import \"%s\" instance export \"%s\" is "
+                          "missing function type metadata"
+                        : "component import \"%s\" is missing function type "
+                          "metadata",
+            import_name ? import_name : "<unnamed>",
+            member_name ? member_name : "");
+
+    param_count = func_type->params ? func_type->params->count : 0;
+    result_count = get_component_func_result_count(func_type);
+
+    if (result_count > 1)
+        return true;
+
+    for (uint32 i = 0; i < param_count; i++) {
+        if (!component_value_type_uses_supported_matching_subset(
+                component, func_type->params->params[i].value_type))
+            return true;
+    }
+
+    if (result_count == 1
+        && !component_value_type_uses_supported_matching_subset(
+            component, func_type->results->results))
+        return true;
+
+    *supported = true;
+    return true;
+}
+
+static bool
 validate_component_func_types_equal(
     const WASMComponent *expected_component,
     const WASMComponentFuncType *expected_type,
@@ -8379,10 +8530,10 @@ validate_component_func_types_equal(
             import_name ? import_name : "<unnamed>",
             member_name ? member_name : "");
 
-    if (!component_func_type_uses_supported_scalar_matching(
+    if (!component_func_type_uses_supported_value_matching(
             expected_component, expected_type, import_name, member_name,
             &expected_supported, error_buf, error_buf_size)
-        || !component_func_type_uses_supported_scalar_matching(
+        || !component_func_type_uses_supported_value_matching(
             actual_component, actual_type, import_name, member_name,
             &actual_supported, error_buf, error_buf_size))
         return false;
@@ -8407,24 +8558,22 @@ validate_component_func_types_equal(
             member_name ? member_name : "");
 
     for (uint32 i = 0; i < expected_param_count; i++) {
-        WASMComponentPrimValType expected_primitive_type, actual_primitive_type;
-        bool param_expected_supported = false, param_actual_supported = false;
+        const char *expected_label =
+            expected_type->params->params[i].label
+                ? expected_type->params->params[i].label->name
+                : NULL;
+        const char *actual_label =
+            actual_type->params->params[i].label
+                ? actual_type->params->params[i].label->name
+                : NULL;
 
-        if (!resolve_component_scalar_primitive_type(
+        if (((expected_label || actual_label)
+             && (!expected_label || !actual_label
+                 || strcmp(expected_label, actual_label) != 0))
+            || !validate_component_value_types_equal(
                 expected_component, expected_type->params->params[i].value_type,
-                import_name, member_name, "parameter", i,
-                &expected_primitive_type, &param_expected_supported, error_buf,
-                error_buf_size)
-            || !resolve_component_scalar_primitive_type(
                 actual_component, actual_type->params->params[i].value_type,
-                import_name, member_name, "parameter", i, &actual_primitive_type,
-                &param_actual_supported, error_buf, error_buf_size))
-            return false;
-
-        if (!param_expected_supported || !param_actual_supported)
-            return true;
-
-        if (expected_primitive_type != actual_primitive_type)
+                import_name, member_name, error_buf, error_buf_size))
             return set_component_runtime_error_fmt(
                 error_buf, error_buf_size,
                 member_name ? "component import \"%s\" instance export \"%s\" "
@@ -8435,23 +8584,10 @@ validate_component_func_types_equal(
     }
 
     if (expected_result_count == 1) {
-        WASMComponentPrimValType expected_primitive_type, actual_primitive_type;
-        bool result_expected_supported = false, result_actual_supported = false;
-
-        if (!resolve_component_scalar_primitive_type(
-                expected_component, expected_type->results->results, import_name,
-                member_name, "result", 0, &expected_primitive_type,
-                &result_expected_supported, error_buf, error_buf_size)
-            || !resolve_component_scalar_primitive_type(
+        if (!validate_component_value_types_equal(
+                expected_component, expected_type->results->results,
                 actual_component, actual_type->results->results, import_name,
-                member_name, "result", 0, &actual_primitive_type,
-                &result_actual_supported, error_buf, error_buf_size))
-            return false;
-
-        if (!result_expected_supported || !result_actual_supported)
-            return true;
-
-        if (expected_primitive_type != actual_primitive_type)
+                member_name, error_buf, error_buf_size))
             return set_component_runtime_error_fmt(
                 error_buf, error_buf_size,
                 member_name ? "component import \"%s\" instance export \"%s\" "
@@ -8473,6 +8609,7 @@ validate_component_runtime_func_against_type(
 {
     const WASMComponentFuncType *expected_type, *actual_type;
     const WASMComponent *actual_component;
+    bool internal_same_module_scope;
 
     if (!runtime_func || !runtime_func->owner_instance)
         return set_component_runtime_error_fmt(
@@ -8493,9 +8630,44 @@ validate_component_runtime_func_against_type(
         || !resolve_component_declared_func_type(actual_component,
                                                  runtime_func->type_idx,
                                                  import_name, member_name,
-                                                 "actual", &actual_type, error_buf,
-                                                 error_buf_size))
+                                                  "actual", &actual_type, error_buf,
+                                                  error_buf_size))
         return false;
+
+    internal_same_module_scope =
+        actual_component == expected_component
+        || component_contains_nested_component(actual_component, expected_component)
+        || component_contains_nested_component(expected_component, actual_component);
+
+    if (internal_same_module_scope) {
+        bool expected_scalar_supported = false, actual_scalar_supported = false;
+
+        if (!component_func_type_uses_supported_scalar_matching(
+                expected_component, expected_type, import_name, member_name,
+                &expected_scalar_supported, error_buf, error_buf_size)
+            || !component_func_type_uses_supported_scalar_matching(
+                actual_component, actual_type, import_name, member_name,
+                &actual_scalar_supported, error_buf, error_buf_size))
+            return false;
+
+        if (!expected_scalar_supported || !actual_scalar_supported)
+            return true;
+    }
+
+    if (runtime_func->kind == WASM_COMP_RUNTIME_FUNC_LIFT) {
+        bool expected_supported = false, actual_supported = false;
+
+        if (!component_func_type_uses_supported_scalar_matching(
+                expected_component, expected_type, import_name, member_name,
+                &expected_supported, error_buf, error_buf_size)
+            || !component_func_type_uses_supported_scalar_matching(
+                actual_component, actual_type, import_name, member_name,
+                &actual_supported, error_buf, error_buf_size))
+            return false;
+
+        if (!expected_supported || !actual_supported)
+            return true;
+    }
 
     return validate_component_func_types_equal(
         expected_component, expected_type, actual_component, actual_type,

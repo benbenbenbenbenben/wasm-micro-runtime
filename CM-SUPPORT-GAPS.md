@@ -116,6 +116,9 @@ That support works for both top-level public imports and nested `with_args`
 instance bindings, and currently covers:
 
 - exported scalar `func` members
+- exported top-level public `func` members whose signatures stay within the
+  current scalar / UTF-8 string / variable-length `list<u8>` / tuple-record
+  leaf subset, with at most one result
 - exported `core module` members
 - exported scalar `value` members
 - exported variable-length `list<u8>` `value` members
@@ -124,10 +127,10 @@ instance bindings, and currently covers:
 - exported nested `instance` members, including recursive validation
 
 Typed matching of exported component `func` / `value` / `component` members is
-still incomplete: non-scalar functions are not yet structurally checked,
-typed value matching beyond the current scalar / UTF-8 string / variable-length
-`list<u8>` / tuple-record subset is still incomplete, and typed exported
-`component` members are still unsupported.
+still incomplete: nested/internal lifted function bindings still defer outside
+the scalar functype subset, typed value matching beyond the current scalar /
+UTF-8 string / variable-length `list<u8>` / tuple-record subset is still
+incomplete, and typed exported `component` members are still unsupported.
 
 ### 1.5 Canonical ABI execution is partially implemented
 
@@ -272,11 +275,13 @@ Current limitations include:
 - `wasm_runtime_call_component(...)` remains scalar-only even for nested handles
 - `wasm_runtime_call_component_values(...)` still only supports the current string / `list<u8>` / limited tuple-record subset
 - top-level import binding is limited to existing runtime handles / public values and the current supported host callback subset, not arbitrary host-native lowered adapters
-- typed function import matching is currently limited to scalar functype
-  equivalence, and typed `instance` import matching is currently limited to
-  exported scalar `func`, `core module`, scalar / variable-length `list<u8>` /
-  current tuple-record-subset `value`, and nested `instance` members;
-  non-scalar function matching is not enforced yet, and typed exported
+- typed function import matching now covers direct top-level bindings and
+  top-level typed `instance` import `func` members for the current scalar /
+  UTF-8 string / variable-length `list<u8>` / tuple-record leaf subset, but
+  nested/internal lifted bindings still defer outside the scalar functype
+  subset; typed `instance` import matching is otherwise limited to exported
+  `core module`, scalar / variable-length `list<u8>` / current tuple-record-
+  subset `value`, and nested `instance` members, while typed exported
   `component` members are still unsupported
 - host-import tuple/record values are still limited to the current scalar /
   UTF-8 string / nested `list<u8>` subset
