@@ -8216,6 +8216,124 @@ resolve_component_instance_type(const WASMComponent *component, uint32 type_idx,
 }
 
 static bool
+resolve_component_runtime_value_primitive_type(
+    const WASMComponentRuntimeValue *runtime_value,
+    WASMComponentPrimValType *out_primitive_type)
+{
+    if (!runtime_value || !out_primitive_type)
+        return false;
+
+    if (runtime_value->type.kind == WASM_COMP_RUNTIME_VALUE_TYPE_PRIMITIVE) {
+        *out_primitive_type = runtime_value->type.type.primitive_type;
+        return true;
+    }
+
+    if (runtime_value->type.kind == WASM_COMP_RUNTIME_VALUE_TYPE_DEFINED
+        && runtime_value->type.type.defined_type
+        && runtime_value->type.type.defined_type->tag == WASM_COMP_DEF_VAL_PRIMVAL) {
+        *out_primitive_type = runtime_value->type.type.defined_type->def_val.primval;
+        return true;
+    }
+
+    return false;
+}
+
+static bool
+resolve_component_value_bound_primitive_type(
+    const WASMComponent *component, const WASMComponentValueBound *value_bound,
+    const char *import_name, const char *member_name,
+    WASMComponentPrimValType *out_primitive_type, char *error_buf,
+    uint32 error_buf_size)
+{
+    WASMComponentRuntimeValueType resolved_type;
+
+    if (!component || !value_bound || !out_primitive_type)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            member_name ? "component import \"%s\" instance export \"%s\" is "
+                          "missing value type metadata"
+                        : "component import \"%s\" is missing value type metadata",
+            import_name ? import_name : "<unnamed>",
+            member_name ? member_name : "");
+
+    if (value_bound->tag != WASM_COMP_VALUEBOUND_TYPE
+        || !value_bound->bound.value_type)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            member_name ? "component import \"%s\" instance export \"%s\" uses "
+                          "unsupported typed value matching"
+                        : "component import \"%s\" uses unsupported typed value "
+                          "matching",
+            import_name ? import_name : "<unnamed>",
+            member_name ? member_name : "");
+
+    memset(&resolved_type, 0, sizeof(resolved_type));
+    if (!wasm_component_runtime_value_resolve_type(
+            component, value_bound->bound.value_type, &resolved_type, error_buf,
+            error_buf_size))
+        return false;
+
+    if (resolved_type.kind == WASM_COMP_RUNTIME_VALUE_TYPE_PRIMITIVE) {
+        *out_primitive_type = resolved_type.type.primitive_type;
+        return true;
+    }
+
+    if (resolved_type.kind == WASM_COMP_RUNTIME_VALUE_TYPE_DEFINED
+        && resolved_type.type.defined_type
+        && resolved_type.type.defined_type->tag == WASM_COMP_DEF_VAL_PRIMVAL) {
+        *out_primitive_type = resolved_type.type.defined_type->def_val.primval;
+        return true;
+    }
+
+    return set_component_runtime_error_fmt(
+        error_buf, error_buf_size,
+        member_name ? "component import \"%s\" instance export \"%s\" uses "
+                      "unsupported typed value matching"
+                    : "component import \"%s\" uses unsupported typed value "
+                      "matching",
+        import_name ? import_name : "<unnamed>",
+        member_name ? member_name : "");
+}
+
+static bool
+validate_component_runtime_value_against_bound(
+    const WASMComponent *component, const WASMComponentRuntimeValue *runtime_value,
+    const WASMComponentValueBound *value_bound, const char *import_name,
+    const char *member_name, char *error_buf, uint32 error_buf_size)
+{
+    WASMComponentPrimValType actual_type, expected_type;
+
+    if (!resolve_component_runtime_value_primitive_type(runtime_value, &actual_type))
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            member_name ? "component import \"%s\" instance export \"%s\" uses "
+                          "unsupported typed value matching"
+                        : "component import \"%s\" uses unsupported typed value "
+                          "matching",
+            import_name ? import_name : "<unnamed>",
+            member_name ? member_name : "");
+
+    if (!resolve_component_value_bound_primitive_type(
+            component, value_bound, import_name, member_name, &expected_type,
+            error_buf, error_buf_size))
+        return false;
+
+    if (actual_type != expected_type)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            member_name ? "component import \"%s\" instance export \"%s\" value "
+                          "type mismatch: expected %s but received %s"
+                        : "component import \"%s\" value type mismatch: expected "
+                          "%s but received %s",
+            import_name ? import_name : "<unnamed>",
+            member_name ? member_name : "",
+            component_prim_type_name(expected_type),
+            component_prim_type_name(actual_type));
+
+    return true;
+}
+
+static bool
 validate_component_instance_against_type(
     const WASMComponent *component,
     const WASMComponentRuntimeInstance *component_inst,
@@ -8321,8 +8439,20 @@ validate_component_instance_against_type(
                             return false;
                         break;
                     }
-                    case WASM_COMP_EXTERN_FUNC:
                     case WASM_COMP_EXTERN_VALUE:
+                        if (!lookup_component_instance_export(
+                                component_inst, member_name,
+                                WASM_COMP_RUNTIME_REF_VALUE, &ref, error_buf,
+                                error_buf_size))
+                            return false;
+                        if (!validate_component_runtime_value_against_bound(
+                                component, ref.of.value,
+                                export_decl->extern_desc->extern_desc.value.value_bound,
+                                import_name, member_name, error_buf,
+                                error_buf_size))
+                            return false;
+                        break;
+                    case WASM_COMP_EXTERN_FUNC:
                     case WASM_COMP_EXTERN_COMPONENT:
                         return set_component_runtime_error_fmt(
                             error_buf, error_buf_size,
@@ -8376,13 +8506,15 @@ validate_component_import_binding_type(const WASMComponent *component,
                               "runtime sort",
                               import_name);
         case WASM_COMP_EXTERN_VALUE:
-            return ref.type == WASM_COMP_RUNTIME_REF_VALUE
-                       ? true
-                       : set_component_runtime_error_fmt(
-                             error_buf, error_buf_size,
-                             "component import \"%s\" bound to the wrong "
-                             "runtime sort",
-                             import_name);
+            if (ref.type != WASM_COMP_RUNTIME_REF_VALUE)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "component import \"%s\" bound to the wrong runtime sort",
+                    import_name);
+            return validate_component_runtime_value_against_bound(
+                component, ref.of.value,
+                component_import->extern_desc->extern_desc.value.value_bound,
+                import_name, NULL, error_buf, error_buf_size);
         case WASM_COMP_EXTERN_CORE_MODULE:
             if (ref.type != WASM_COMP_RUNTIME_REF_CORE_MODULE)
                 return set_component_runtime_error_fmt(
