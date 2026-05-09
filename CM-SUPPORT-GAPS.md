@@ -110,6 +110,17 @@ When a component declares `core module` types, the runtime now also validates
 bound core-module handles against the currently supported module-type subset for
 import/export matching instead of treating those type indices as inert metadata.
 
+When a component declares `instance` types, the runtime now also validates
+bound instance handles against the current supported `instancetype` subset.
+That support works for both top-level public imports and nested `with_args`
+instance bindings, and currently covers:
+
+- exported `core module` members
+- exported nested `instance` members, including recursive validation
+
+Typed matching of exported component `func` / `value` / `component` members is
+still rejected.
+
 ### 1.5 Canonical ABI execution is partially implemented
 
 Canonical ABI is no longer metadata-only.
@@ -199,6 +210,8 @@ This is a real runtime substrate, but not yet full resource semantics.
 - public `list<u8>` component calls
 - public tuple/record component calls
 - top-level component import binding
+- typed top-level and nested component-instance import binding for the current
+  exported core-module / nested-instance subset
 - public value import/export flows
 - top-level and nested value sections
 - top-level and nested start execution for the current supported public-value
@@ -251,6 +264,9 @@ Current limitations include:
 - `wasm_runtime_call_component(...)` remains scalar-only even for nested handles
 - `wasm_runtime_call_component_values(...)` still only supports the current string / `list<u8>` / limited tuple-record subset
 - top-level import binding is limited to existing runtime handles / public values and the current supported host callback subset, not arbitrary host-native lowered adapters
+- typed `instance` import matching is currently limited to exported `core
+  module` and nested `instance` members; typed matching for exported component
+  `func` / `value` / `component` members is still unsupported
 - host-import tuple/record values are still limited to the current scalar /
   UTF-8 string / nested `list<u8>` subset
 - there is still no public resource import/export contract comparable to the current function/value/instance/component/core-module surface

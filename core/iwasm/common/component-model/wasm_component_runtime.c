@@ -7794,6 +7794,21 @@ find_component_core_type_count(const WASMComponent *component)
     return core_type_count;
 }
 
+static uint32
+find_component_type_count(const WASMComponent *component)
+{
+    uint32 i, type_count = 0;
+
+    for (i = 0; i < component->section_count; i++) {
+        const WASMComponentSection *section = &component->sections[i];
+
+        if (section->id == WASM_COMP_SECTION_TYPE && section->parsed.type_section)
+            type_count += section->parsed.type_section->count;
+    }
+
+    return type_count;
+}
+
 static bool
 nullable_strings_equal(const char *lhs, const char *rhs)
 {
@@ -8175,6 +8190,167 @@ validate_core_module_against_type(const wasm_module_t module,
 }
 
 static bool
+resolve_component_instance_type(const WASMComponent *component, uint32 type_idx,
+                                const char *import_name,
+                                const WASMComponentInstType **out_type,
+                                char *error_buf, uint32 error_buf_size)
+{
+    const WASMComponentTypes *type_entry =
+        wasm_component_lookup_type(component, type_idx);
+
+    if (!type_entry)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "component import \"%s\" uses unresolved instance type index %u",
+            import_name, type_idx);
+
+    if (type_entry->tag != WASM_COMP_INSTANCE_TYPE || !type_entry->type.instance_type)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "component import \"%s\" instance type index %u is not an "
+            "instance type",
+            import_name, type_idx);
+
+    *out_type = type_entry->type.instance_type;
+    return true;
+}
+
+static bool
+validate_component_instance_against_type(
+    const WASMComponent *component,
+    const WASMComponentRuntimeInstance *component_inst,
+    const WASMComponentInstType *instance_type, const char *import_name,
+    uint32 remaining_depth, char *error_buf, uint32 error_buf_size)
+{
+    uint32 i;
+
+    if (!component || !component_inst || !instance_type)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "component import \"%s\" is missing instance type metadata",
+            import_name ? import_name : "<unnamed>");
+
+    if (remaining_depth == 0)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "component import \"%s\" instance type recursion is unsupported",
+            import_name ? import_name : "<unnamed>");
+
+    for (i = 0; i < instance_type->count; i++) {
+        const WASMComponentInstDecl *decl = &instance_type->instance_decls[i];
+
+        switch (decl->tag) {
+            case WASM_COMP_COMPONENT_DECL_INSTANCE_CORE_TYPE:
+            case WASM_COMP_COMPONENT_DECL_INSTANCE_TYPE:
+            case WASM_COMP_COMPONENT_DECL_INSTANCE_ALIAS:
+                break;
+            case WASM_COMP_COMPONENT_DECL_INSTANCE_EXPORTDECL:
+            {
+                const WASMComponentComponentDeclExport *export_decl =
+                    decl->decl.export_decl;
+                const char *member_name =
+                    export_decl && export_decl->export_name
+                        ? export_decl->export_name->exported.simple.name->name
+                        : NULL;
+                WASMComponentRuntimeRef ref;
+
+                if (!export_decl || !export_decl->extern_desc || !member_name)
+                    return set_component_runtime_error_fmt(
+                        error_buf, error_buf_size,
+                        "component import \"%s\" has an invalid instance "
+                        "export declaration",
+                        import_name ? import_name : "<unnamed>");
+
+                switch (export_decl->extern_desc->type) {
+                    case WASM_COMP_EXTERN_CORE_MODULE:
+                    {
+                        uint32 core_type_idx =
+                            export_decl->extern_desc->extern_desc.core_module
+                                .type_idx;
+                        const WASMComponentCoreType *core_type =
+                            lookup_component_core_type(component, core_type_idx);
+                        const WASMComponentCoreModuleType *module_type;
+
+                        if (!lookup_component_instance_export(
+                                component_inst, member_name,
+                                WASM_COMP_RUNTIME_REF_CORE_MODULE, &ref, error_buf,
+                                error_buf_size))
+                            return false;
+
+                        if (!core_type)
+                            return set_component_runtime_error_fmt(
+                                error_buf, error_buf_size,
+                                "component import \"%s\" instance export \"%s\" "
+                                "uses unresolved core module type index %u",
+                                import_name, member_name, core_type_idx);
+
+                        if (!core_type->deftype
+                            || core_type->deftype->tag
+                                   != WASM_CORE_DEFTYPE_MODULETYPE
+                            || !(module_type = core_type->deftype->type.moduletype))
+                            return set_component_runtime_error_fmt(
+                                error_buf, error_buf_size,
+                                "component import \"%s\" instance export \"%s\" "
+                                "core module type index %u is not a module type",
+                                import_name, member_name, core_type_idx);
+
+                        if (!validate_core_module_against_type(
+                                ref.of.core_module, module_type, import_name,
+                                error_buf, error_buf_size))
+                            return false;
+                        break;
+                    }
+                    case WASM_COMP_EXTERN_INSTANCE:
+                    {
+                        const WASMComponentInstType *nested_instance_type;
+
+                        if (!lookup_component_instance_export(
+                                component_inst, member_name,
+                                WASM_COMP_RUNTIME_REF_INSTANCE, &ref, error_buf,
+                                error_buf_size)
+                            || !resolve_component_instance_type(
+                                component,
+                                export_decl->extern_desc->extern_desc.instance
+                                    .type_idx,
+                                import_name, &nested_instance_type, error_buf,
+                                error_buf_size)
+                            || !validate_component_instance_against_type(
+                                component, ref.of.instance, nested_instance_type,
+                                import_name, remaining_depth - 1, error_buf,
+                                error_buf_size))
+                            return false;
+                        break;
+                    }
+                    case WASM_COMP_EXTERN_FUNC:
+                    case WASM_COMP_EXTERN_VALUE:
+                    case WASM_COMP_EXTERN_COMPONENT:
+                        return set_component_runtime_error_fmt(
+                            error_buf, error_buf_size,
+                            "component import \"%s\" instance export \"%s\" "
+                            "uses unsupported typed member matching",
+                            import_name, member_name);
+                    default:
+                        return set_component_runtime_error_fmt(
+                            error_buf, error_buf_size,
+                            "component import \"%s\" instance export \"%s\" "
+                            "uses an unsupported extern desc",
+                            import_name, member_name);
+                }
+                break;
+            }
+            default:
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "component import \"%s\" uses an unsupported instance "
+                    "type declaration",
+                    import_name ? import_name : "<unnamed>");
+        }
+    }
+
+    return true;
+}
+
+static bool
 validate_component_import_binding_type(const WASMComponent *component,
                                        const WASMComponentImport *component_import,
                                        WASMComponentRuntimeRef ref,
@@ -8246,13 +8422,30 @@ validate_component_import_binding_type(const WASMComponent *component,
                                                          error_buf_size);
             }
         case WASM_COMP_EXTERN_INSTANCE:
-            return ref.type == WASM_COMP_RUNTIME_REF_INSTANCE
-                       ? true
-                       : set_component_runtime_error_fmt(
-                              error_buf, error_buf_size,
-                              "component import \"%s\" bound to the wrong "
-                              "runtime sort",
-                              import_name);
+            if (ref.type != WASM_COMP_RUNTIME_REF_INSTANCE)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "component import \"%s\" bound to the wrong runtime sort",
+                    import_name);
+
+            if (find_component_type_count(component) == 0)
+                return true;
+
+            {
+                const WASMComponentInstType *instance_type;
+                uint32 type_idx =
+                    component_import->extern_desc->extern_desc.instance.type_idx;
+
+                if (!resolve_component_instance_type(component, type_idx,
+                                                     import_name, &instance_type,
+                                                     error_buf, error_buf_size))
+                    return false;
+
+                return validate_component_instance_against_type(
+                    component, ref.of.instance, instance_type,
+                    import_name, find_component_type_count(component) + 1,
+                    error_buf, error_buf_size);
+            }
         case WASM_COMP_EXTERN_COMPONENT:
             return ref.type == WASM_COMP_RUNTIME_REF_COMPONENT
                        ? true
