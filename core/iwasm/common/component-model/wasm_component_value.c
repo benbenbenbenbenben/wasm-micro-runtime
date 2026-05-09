@@ -136,6 +136,7 @@ init_component_runtime_value(WASMComponentRuntimeValue *runtime_value,
 
     wasm_component_runtime_value_clear(runtime_value);
     runtime_value->type = resolved_type;
+    runtime_value->owner_component = component;
     return true;
 }
 
@@ -224,6 +225,7 @@ wasm_component_runtime_value_clone_borrowed(
 
     wasm_component_runtime_value_clear(dst);
     dst->type = src->type;
+    dst->owner_component = src->owner_component;
     dst->byte_size = src->byte_size;
 
     switch (src->storage_kind) {
@@ -351,6 +353,7 @@ wasm_component_runtime_value_init_public(
     if (public_value->byte_size == 0) {
         wasm_component_runtime_value_clear(runtime_value);
         runtime_value->type = resolved_type;
+        runtime_value->owner_component = component;
         return true;
     }
 

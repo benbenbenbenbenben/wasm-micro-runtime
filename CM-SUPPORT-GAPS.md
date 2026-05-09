@@ -118,12 +118,13 @@ instance bindings, and currently covers:
 - exported scalar `func` members
 - exported `core module` members
 - exported scalar `value` members
+- exported variable-length `list<u8>` `value` members
 - exported nested `instance` members, including recursive validation
 
 Typed matching of exported component `func` / `value` / `component` members is
 still incomplete: non-scalar functions are not yet structurally checked,
-non-scalar values are still rejected, and typed exported `component` members
-are still unsupported.
+typed value matching beyond scalar and variable-length `list<u8>` values is
+still incomplete, and typed exported `component` members are still unsupported.
 
 ### 1.5 Canonical ABI execution is partially implemented
 
@@ -270,9 +271,9 @@ Current limitations include:
 - top-level import binding is limited to existing runtime handles / public values and the current supported host callback subset, not arbitrary host-native lowered adapters
 - typed function import matching is currently limited to scalar functype
   equivalence, and typed `instance` import matching is currently limited to
-  exported scalar `func`, `core module`, scalar `value`, and nested `instance`
-  members; non-scalar function matching is not enforced yet, and typed exported
-  `component` members are still unsupported
+  exported scalar `func`, `core module`, scalar or variable-length `list<u8>`
+  `value`, and nested `instance` members; non-scalar function matching is not
+  enforced yet, and typed exported `component` members are still unsupported
 - host-import tuple/record values are still limited to the current scalar /
   UTF-8 string / nested `list<u8>` subset
 - there is still no public resource import/export contract comparable to the current function/value/instance/component/core-module surface

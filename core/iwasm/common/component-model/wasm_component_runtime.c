@@ -8526,15 +8526,26 @@ resolve_component_runtime_value_primitive_type(
 }
 
 static bool
-resolve_component_value_bound_primitive_type(
-    const WASMComponent *component, const WASMComponentValueBound *value_bound,
-    const char *import_name, const char *member_name,
-    WASMComponentPrimValType *out_primitive_type, char *error_buf,
-    uint32 error_buf_size)
+is_supported_value_match_primitive(WASMComponentPrimValType primitive_type)
 {
-    WASMComponentRuntimeValueType resolved_type;
+    uint8 ignored_core_type = 0;
+    wasm_valkind_t ignored_public_kind = WASM_I32;
 
-    if (!component || !value_bound || !out_primitive_type)
+    return component_scalar_prim_to_core(primitive_type, &ignored_core_type,
+                                         &ignored_public_kind)
+           || primitive_type == WASM_COMP_PRIMVAL_STRING;
+}
+
+static bool
+resolve_component_value_bound_type(
+    const WASMComponentValueBound *value_bound,
+    const WASMComponentValueType **out_value_type, const char *import_name,
+    const char *member_name, char *error_buf, uint32 error_buf_size)
+{
+    if (out_value_type)
+        *out_value_type = NULL;
+
+    if (!value_bound || !out_value_type)
         return set_component_runtime_error_fmt(
             error_buf, error_buf_size,
             member_name ? "component import \"%s\" instance export \"%s\" is "
@@ -8554,22 +8565,236 @@ resolve_component_value_bound_primitive_type(
             import_name ? import_name : "<unnamed>",
             member_name ? member_name : "");
 
-    memset(&resolved_type, 0, sizeof(resolved_type));
+    *out_value_type = value_bound->bound.value_type;
+    return true;
+}
+
+static bool
+resolve_component_value_match_primitive(
+    const WASMComponentRuntimeValueType *resolved_type,
+    WASMComponentPrimValType *out_primitive_type)
+{
+    WASMComponentPrimValType primitive_type;
+
+    if (!resolved_type || !out_primitive_type)
+        return false;
+
+    if (resolved_type->kind == WASM_COMP_RUNTIME_VALUE_TYPE_PRIMITIVE)
+        primitive_type = resolved_type->type.primitive_type;
+    else if (resolved_type->kind == WASM_COMP_RUNTIME_VALUE_TYPE_DEFINED
+             && resolved_type->type.defined_type
+             && resolved_type->type.defined_type->tag == WASM_COMP_DEF_VAL_PRIMVAL)
+        primitive_type = resolved_type->type.defined_type->def_val.primval;
+    else
+        return false;
+
+    if (!is_supported_value_match_primitive(primitive_type))
+        return false;
+
+    *out_primitive_type = primitive_type;
+    return true;
+}
+
+static bool
+validate_component_value_types_equal(
+    const WASMComponent *expected_component,
+    const WASMComponentValueType *expected_value_type,
+    const WASMComponent *actual_component,
+    const WASMComponentValueType *actual_value_type, const char *import_name,
+    const char *member_name, char *error_buf, uint32 error_buf_size)
+{
+    WASMComponentRuntimeValueType expected_resolved_type, actual_resolved_type;
+    WASMComponentPrimValType expected_primitive_type, actual_primitive_type;
+
+    if (!expected_component || !expected_value_type || !actual_component
+        || !actual_value_type)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            member_name ? "component import \"%s\" instance export \"%s\" is "
+                          "missing value type metadata"
+                        : "component import \"%s\" is missing value type metadata",
+            import_name ? import_name : "<unnamed>",
+            member_name ? member_name : "");
+
+    memset(&expected_resolved_type, 0, sizeof(expected_resolved_type));
+    memset(&actual_resolved_type, 0, sizeof(actual_resolved_type));
+
     if (!wasm_component_runtime_value_resolve_type(
-            component, value_bound->bound.value_type, &resolved_type, error_buf,
+            expected_component, expected_value_type, &expected_resolved_type,
+            error_buf, error_buf_size)
+        || !wasm_component_runtime_value_resolve_type(
+            actual_component, actual_value_type, &actual_resolved_type, error_buf,
             error_buf_size))
         return false;
 
-    if (resolved_type.kind == WASM_COMP_RUNTIME_VALUE_TYPE_PRIMITIVE) {
-        *out_primitive_type = resolved_type.type.primitive_type;
+    if (resolve_component_value_match_primitive(&expected_resolved_type,
+                                                &expected_primitive_type)
+        || resolve_component_value_match_primitive(&actual_resolved_type,
+                                                   &actual_primitive_type)) {
+        if (!resolve_component_value_match_primitive(&expected_resolved_type,
+                                                     &expected_primitive_type)
+            || !resolve_component_value_match_primitive(&actual_resolved_type,
+                                                        &actual_primitive_type))
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                member_name ? "component import \"%s\" instance export \"%s\" "
+                              "value type mismatch"
+                            : "component import \"%s\" value type mismatch",
+                import_name ? import_name : "<unnamed>",
+                member_name ? member_name : "");
+
+        if (expected_primitive_type != actual_primitive_type)
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                member_name ? "component import \"%s\" instance export \"%s\" "
+                              "value type mismatch: expected %s but received %s"
+                            : "component import \"%s\" value type mismatch: "
+                              "expected %s but received %s",
+                import_name ? import_name : "<unnamed>",
+                member_name ? member_name : "",
+                component_prim_type_name(expected_primitive_type),
+                component_prim_type_name(actual_primitive_type));
+
         return true;
     }
 
-    if (resolved_type.kind == WASM_COMP_RUNTIME_VALUE_TYPE_DEFINED
-        && resolved_type.type.defined_type
-        && resolved_type.type.defined_type->tag == WASM_COMP_DEF_VAL_PRIMVAL) {
-        *out_primitive_type = resolved_type.type.defined_type->def_val.primval;
-        return true;
+    if (expected_resolved_type.kind != WASM_COMP_RUNTIME_VALUE_TYPE_DEFINED
+        || actual_resolved_type.kind != WASM_COMP_RUNTIME_VALUE_TYPE_DEFINED
+        || !expected_resolved_type.type.defined_type
+        || !actual_resolved_type.type.defined_type)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            member_name ? "component import \"%s\" instance export \"%s\" uses "
+                          "unsupported typed value matching"
+                        : "component import \"%s\" uses unsupported typed value "
+                          "matching",
+            import_name ? import_name : "<unnamed>",
+            member_name ? member_name : "");
+
+    if (expected_resolved_type.type.defined_type->tag
+        != actual_resolved_type.type.defined_type->tag)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            member_name ? "component import \"%s\" instance export \"%s\" value "
+                          "type mismatch"
+                        : "component import \"%s\" value type mismatch",
+            import_name ? import_name : "<unnamed>",
+            member_name ? member_name : "");
+
+    switch (expected_resolved_type.type.defined_type->tag) {
+        case WASM_COMP_DEF_VAL_LIST:
+        {
+            const WASMComponentValueType *expected_element_type;
+            const WASMComponentValueType *actual_element_type;
+            WASMComponentRuntimeValueType expected_element_resolved,
+                actual_element_resolved;
+
+            if (!expected_resolved_type.type.defined_type->def_val.list
+                || !actual_resolved_type.type.defined_type->def_val.list)
+                break;
+
+            expected_element_type =
+                expected_resolved_type.type.defined_type->def_val.list->element_type;
+            actual_element_type =
+                actual_resolved_type.type.defined_type->def_val.list->element_type;
+            if (!expected_element_type || !actual_element_type)
+                break;
+
+            memset(&expected_element_resolved, 0, sizeof(expected_element_resolved));
+            memset(&actual_element_resolved, 0, sizeof(actual_element_resolved));
+            if (!wasm_component_runtime_value_resolve_type(
+                    expected_component, expected_element_type,
+                    &expected_element_resolved, error_buf, error_buf_size)
+                || !wasm_component_runtime_value_resolve_type(
+                    actual_component, actual_element_type, &actual_element_resolved,
+                    error_buf, error_buf_size))
+                return false;
+
+            if (!resolve_component_value_match_primitive(&expected_element_resolved,
+                                                         &expected_primitive_type)
+                || !resolve_component_value_match_primitive(&actual_element_resolved,
+                                                            &actual_primitive_type)
+                || expected_primitive_type != WASM_COMP_PRIMVAL_U8
+                || actual_primitive_type != WASM_COMP_PRIMVAL_U8)
+                break;
+
+            return true;
+        }
+        case WASM_COMP_DEF_VAL_RECORD:
+        {
+            const WASMComponentRecordType *expected_record =
+                expected_resolved_type.type.defined_type->def_val.record;
+            const WASMComponentRecordType *actual_record =
+                actual_resolved_type.type.defined_type->def_val.record;
+
+            if (!expected_record || !actual_record
+                || expected_record->count != actual_record->count)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    member_name ? "component import \"%s\" instance export \"%s\" "
+                                  "value type mismatch"
+                                : "component import \"%s\" value type mismatch",
+                    import_name ? import_name : "<unnamed>",
+                    member_name ? member_name : "");
+
+            for (uint32 i = 0; i < expected_record->count; i++) {
+                const char *expected_name =
+                    expected_record->fields[i].label
+                    && expected_record->fields[i].label->name
+                        ? expected_record->fields[i].label->name
+                        : NULL;
+                const char *actual_name =
+                    actual_record->fields[i].label
+                    && actual_record->fields[i].label->name
+                        ? actual_record->fields[i].label->name
+                        : NULL;
+
+                if (!expected_name || !actual_name
+                    || strcmp(expected_name, actual_name) != 0)
+                    return set_component_runtime_error_fmt(
+                        error_buf, error_buf_size,
+                        member_name ? "component import \"%s\" instance export "
+                                      "\"%s\" value type mismatch"
+                                    : "component import \"%s\" value type mismatch",
+                        import_name ? import_name : "<unnamed>",
+                        member_name ? member_name : "");
+
+                if (!validate_component_value_types_equal(
+                        expected_component, expected_record->fields[i].value_type,
+                        actual_component, actual_record->fields[i].value_type,
+                        import_name, member_name, error_buf, error_buf_size))
+                    return false;
+            }
+            return true;
+        }
+        case WASM_COMP_DEF_VAL_TUPLE:
+        {
+            const WASMComponentTupleType *expected_tuple =
+                expected_resolved_type.type.defined_type->def_val.tuple;
+            const WASMComponentTupleType *actual_tuple =
+                actual_resolved_type.type.defined_type->def_val.tuple;
+
+            if (!expected_tuple || !actual_tuple
+                || expected_tuple->count != actual_tuple->count)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    member_name ? "component import \"%s\" instance export \"%s\" "
+                                  "value type mismatch"
+                                : "component import \"%s\" value type mismatch",
+                    import_name ? import_name : "<unnamed>",
+                    member_name ? member_name : "");
+
+            for (uint32 i = 0; i < expected_tuple->count; i++) {
+                if (!validate_component_value_types_equal(
+                        expected_component, &expected_tuple->element_types[i],
+                        actual_component, &actual_tuple->element_types[i],
+                        import_name, member_name, error_buf, error_buf_size))
+                    return false;
+            }
+            return true;
+        }
+        default:
+            break;
     }
 
     return set_component_runtime_error_fmt(
@@ -8588,36 +8813,27 @@ validate_component_runtime_value_against_bound(
     const WASMComponentValueBound *value_bound, const char *import_name,
     const char *member_name, char *error_buf, uint32 error_buf_size)
 {
-    WASMComponentPrimValType actual_type, expected_type;
+    const WASMComponentValueType *expected_value_type;
 
-    if (!resolve_component_runtime_value_primitive_type(runtime_value, &actual_type))
+    if (!runtime_value || !runtime_value->owner_component
+        || !runtime_value->type.declared_type)
         return set_component_runtime_error_fmt(
             error_buf, error_buf_size,
-            member_name ? "component import \"%s\" instance export \"%s\" uses "
-                          "unsupported typed value matching"
-                        : "component import \"%s\" uses unsupported typed value "
-                          "matching",
+            member_name ? "component import \"%s\" instance export \"%s\" is "
+                          "missing value type metadata"
+                        : "component import \"%s\" is missing value type metadata",
             import_name ? import_name : "<unnamed>",
             member_name ? member_name : "");
 
-    if (!resolve_component_value_bound_primitive_type(
-            component, value_bound, import_name, member_name, &expected_type,
-            error_buf, error_buf_size))
+    if (!resolve_component_value_bound_type(value_bound, &expected_value_type,
+                                            import_name, member_name, error_buf,
+                                            error_buf_size))
         return false;
 
-    if (actual_type != expected_type)
-        return set_component_runtime_error_fmt(
-            error_buf, error_buf_size,
-            member_name ? "component import \"%s\" instance export \"%s\" value "
-                          "type mismatch: expected %s but received %s"
-                        : "component import \"%s\" value type mismatch: expected "
-                          "%s but received %s",
-            import_name ? import_name : "<unnamed>",
-            member_name ? member_name : "",
-            component_prim_type_name(expected_type),
-            component_prim_type_name(actual_type));
-
-    return true;
+    return validate_component_value_types_equal(
+        component, expected_value_type, runtime_value->owner_component,
+        runtime_value->type.declared_type, import_name, member_name, error_buf,
+        error_buf_size);
 }
 
 static bool

@@ -149,7 +149,19 @@ create_extern_desc(WASMComponentExternDescType type)
 }
 
 static WASMComponentExternDesc *
+create_value_extern_desc(const WASMComponentValueType &value_type);
+
+static WASMComponentExternDesc *
 create_primitive_value_extern_desc(WASMComponentPrimValType primitive_type)
+{
+    WASMComponentValueType value_type = {};
+    value_type.type = WASM_COMP_VAL_TYPE_PRIMVAL;
+    value_type.type_specific.primval_type = primitive_type;
+    return create_value_extern_desc(value_type);
+}
+
+static WASMComponentExternDesc *
+create_value_extern_desc(const WASMComponentValueType &value_type)
 {
     auto *extern_desc = create_extern_desc(WASM_COMP_EXTERN_VALUE);
     if (!extern_desc) {
@@ -176,10 +188,7 @@ create_primitive_value_extern_desc(WASMComponentPrimValType primitive_type)
     }
     memset(extern_desc->extern_desc.value.value_bound->bound.value_type, 0,
            sizeof(WASMComponentValueType));
-    extern_desc->extern_desc.value.value_bound->bound.value_type->type =
-        WASM_COMP_VAL_TYPE_PRIMVAL;
-    extern_desc->extern_desc.value.value_bound->bound.value_type->type_specific
-        .primval_type = primitive_type;
+    *extern_desc->extern_desc.value.value_bound->bound.value_type = value_type;
     return extern_desc;
 }
 
@@ -5897,7 +5906,10 @@ configure_component_func_result_type_idx(WASMComponentModule *component_module,
 }
 
 static bool
-append_top_level_value_alias_sections(WASMComponentModule *component_module)
+append_top_level_value_alias_sections_with_type_and_bytes(
+    WASMComponentModule *component_module,
+    const WASMComponentValueType &value_type, const uint8_t *bytes,
+    uint32_t byte_len)
 {
     WASMComponent *component = &component_module->component;
     const uint32_t value_idx =
@@ -5936,7 +5948,8 @@ append_top_level_value_alias_sections(WASMComponentModule *component_module)
         return false;
     }
     memset(value_section->parsed.value_section, 0, sizeof(WASMComponentValueSection));
-    if (!init_scalar_value_section(value_section->parsed.value_section)) {
+    if (!init_value_section_with_type_and_bytes(value_section->parsed.value_section,
+                                                value_type, bytes, byte_len)) {
         return false;
     }
 
@@ -5978,7 +5991,7 @@ append_top_level_value_alias_sections(WASMComponentModule *component_module)
         create_import_name("source");
     component_section->parsed.component->sections[0]
         .parsed.import_section->imports[0].extern_desc =
-        create_primitive_value_extern_desc(WASM_COMP_PRIMVAL_S32);
+        create_value_extern_desc(value_type);
     if (!component_section->parsed.component->sections[0]
              .parsed.import_section->imports[0].import_name
         || !component_section->parsed.component->sections[0]
@@ -6123,6 +6136,17 @@ append_top_level_value_alias_sections(WASMComponentModule *component_module)
            && export_section->parsed.export_section->exports[0].sort_idx
            && export_section->parsed.export_section->exports[1].export_name
            && export_section->parsed.export_section->exports[1].sort_idx;
+}
+
+static bool
+append_top_level_value_alias_sections(WASMComponentModule *component_module)
+{
+    WASMComponentValueType value_type = {};
+    value_type.type = WASM_COMP_VAL_TYPE_PRIMVAL;
+    value_type.type_specific.primval_type = WASM_COMP_PRIMVAL_S32;
+    return append_top_level_value_alias_sections_with_type_and_bytes(
+        component_module, value_type, runtime_value_section_i32_bytes,
+        (uint32_t)sizeof(runtime_value_section_i32_bytes));
 }
 
 static bool
@@ -6398,9 +6422,9 @@ append_top_level_public_value_import_sections(
 }
 
 static bool
-append_top_level_typed_value_instance_import_sections(
+append_top_level_typed_value_instance_import_sections_with_value_type(
     WASMComponentModule *component_module,
-    WASMComponentPrimValType primitive_type)
+    const WASMComponentValueType &value_type)
 {
     WASMComponent *component = &component_module->component;
     const uint32_t imported_instance_idx =
@@ -6434,7 +6458,7 @@ append_top_level_typed_value_instance_import_sections(
     }
     if (!init_single_instance_type_section(
             type_section->parsed.type_section, "forwarded-value",
-            create_primitive_value_extern_desc(primitive_type))) {
+            create_value_extern_desc(value_type))) {
         return false;
     }
 
@@ -6487,6 +6511,18 @@ append_top_level_typed_value_instance_import_sections(
         create_sort_idx(WASM_COMP_SORT_INSTANCE, imported_instance_idx);
     return export_section->parsed.export_section->exports[0].export_name
            && export_section->parsed.export_section->exports[0].sort_idx;
+}
+
+static bool
+append_top_level_typed_value_instance_import_sections(
+    WASMComponentModule *component_module,
+    WASMComponentPrimValType primitive_type)
+{
+    WASMComponentValueType value_type = {};
+    value_type.type = WASM_COMP_VAL_TYPE_PRIMVAL;
+    value_type.type_specific.primval_type = primitive_type;
+    return append_top_level_typed_value_instance_import_sections_with_value_type(
+        component_module, value_type);
 }
 
 static bool
@@ -7998,9 +8034,9 @@ append_nested_local_core_module_export_sections(
 }
 
 static bool
-append_nested_typed_value_instance_reexport_sections(
+append_nested_typed_value_instance_reexport_sections_with_value_type(
     WASMComponentModule *component_module,
-    WASMComponentPrimValType primitive_type)
+    const WASMComponentValueType &value_type)
 {
     WASMComponent *component = &component_module->component;
     const uint32_t component_idx =
@@ -8051,8 +8087,7 @@ append_nested_typed_value_instance_reexport_sections(
     }
     if (!init_single_instance_type_section(
             component_section->parsed.component->sections[0].parsed.type_section,
-            "forwarded-value",
-            create_primitive_value_extern_desc(primitive_type))) {
+            "forwarded-value", create_value_extern_desc(value_type))) {
         return false;
     }
 
@@ -8228,6 +8263,18 @@ append_nested_typed_value_instance_reexport_sections(
         create_sort_idx(WASM_COMP_SORT_INSTANCE, instance_idx);
     return export_section->parsed.export_section->exports[0].export_name
            && export_section->parsed.export_section->exports[0].sort_idx;
+}
+
+static bool
+append_nested_typed_value_instance_reexport_sections(
+    WASMComponentModule *component_module,
+    WASMComponentPrimValType primitive_type)
+{
+    WASMComponentValueType value_type = {};
+    value_type.type = WASM_COMP_VAL_TYPE_PRIMVAL;
+    value_type.type_specific.primval_type = primitive_type;
+    return append_nested_typed_value_instance_reexport_sections_with_value_type(
+        component_module, value_type);
 }
 
 static bool
@@ -12115,6 +12162,188 @@ TEST_F(BinaryParserTest,
     wasm_runtime_unload(target_module);
     BH_FREE(target_component_raw);
     wasm_runtime_deinstantiate(source_inst);
+    wasm_runtime_unload(source_module);
+}
+
+TEST_F(BinaryParserTest,
+       TestPublicComponentInstantiationBindsTypedTopLevelListValueInstanceImports)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    std::vector<uint8_t> list_payload;
+    append_component_list_u8_payload(&list_payload, "abc", 3);
+
+    LoadArgs source_load_args = {};
+    char source_module_name[] = "typed-list-value-instance-import-source";
+    source_load_args.name = source_module_name;
+    wasm_module_t source_module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &source_load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(source_module, nullptr) << helper->error_buf;
+
+    const int32_t source_list_type_idx = append_component_list_type(
+        (WASMComponentModule *)source_module, WASM_COMP_PRIMVAL_U8, false, 0);
+    ASSERT_GE(source_list_type_idx, 0);
+    const WASMComponentValueType source_list_type =
+        make_component_type_index_value_type((uint32_t)source_list_type_idx);
+    WASMComponentRuntimeValue imported_value = {};
+    ASSERT_TRUE(wasm_component_runtime_value_init_borrowed(
+        &imported_value, &((WASMComponentModule *)source_module)->component,
+        &source_list_type, list_payload.data(), (uint32_t)list_payload.size(),
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf)));
+    WASMComponentNamedExport imported_export = {};
+    imported_export.name = "forwarded-value";
+    imported_export.ref.type = WASM_COMP_RUNTIME_REF_VALUE;
+    imported_export.ref.of.value = &imported_value;
+    WASMComponentRuntimeInstance imported_instance = {};
+    imported_instance.export_count = 1;
+    imported_instance.exports = &imported_export;
+
+    uint32_t target_wasm_file_size = 0;
+    auto *target_component_raw =
+        (unsigned char *)bh_read_file_to_buffer("add.wasm", &target_wasm_file_size);
+    ASSERT_NE(target_component_raw, nullptr);
+
+    LoadArgs target_load_args = {};
+    char target_module_name[] = "typed-list-value-instance-import-target";
+    target_load_args.name = target_module_name;
+    wasm_module_t target_module = wasm_runtime_load_ex(
+        target_component_raw, target_wasm_file_size, &target_load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(target_module, nullptr) << helper->error_buf;
+
+    const int32_t target_list_type_idx = append_component_list_type(
+        (WASMComponentModule *)target_module, WASM_COMP_PRIMVAL_U8, false, 0);
+    ASSERT_GE(target_list_type_idx, 0);
+    const WASMComponentValueType target_list_type =
+        make_component_type_index_value_type((uint32_t)target_list_type_idx);
+    ASSERT_TRUE(append_top_level_typed_value_instance_import_sections_with_value_type(
+        (WASMComponentModule *)target_module, target_list_type));
+
+    struct InstantiationArgs2 *inst_args = nullptr;
+    ASSERT_TRUE(wasm_runtime_instantiation_args_create(&inst_args));
+    wasm_runtime_instantiation_args_set_default_stack_size(inst_args,
+                                                           helper->stack_size);
+    wasm_runtime_instantiation_args_set_host_managed_heap_size(
+        inst_args, helper->heap_size);
+
+    wasm_component_import_binding_t import_binding = {};
+    import_binding.name = "source";
+    import_binding.kind = WASM_COMPONENT_EXTERN_KIND_INSTANCE;
+    import_binding.value.instance = &imported_instance;
+    wasm_runtime_instantiation_args_set_component_imports(inst_args,
+                                                          &import_binding, 1);
+
+    wasm_module_inst_t target_inst =
+        wasm_runtime_instantiate_ex2(target_module, inst_args, helper->error_buf,
+                                     (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(target_inst, nullptr) << helper->error_buf;
+
+    wasm_component_instance_t forwarded_instance =
+        wasm_runtime_lookup_component_instance(target_inst, "forwarded-source");
+    ASSERT_NE(forwarded_instance, nullptr);
+    ASSERT_EQ(forwarded_instance->export_count, 1u);
+    ASSERT_EQ(forwarded_instance->exports[0].ref.type, WASM_COMP_RUNTIME_REF_VALUE);
+    ASSERT_EQ(forwarded_instance->exports[0].ref.of.value->type.kind,
+              WASM_COMP_RUNTIME_VALUE_TYPE_DEFINED);
+    ASSERT_EQ(forwarded_instance->exports[0].ref.of.value->type.type.defined_type->tag,
+              WASM_COMP_DEF_VAL_LIST);
+    ASSERT_EQ(memcmp(wasm_component_runtime_value_get_data(
+                         forwarded_instance->exports[0].ref.of.value),
+                     list_payload.data(), list_payload.size()),
+              0);
+
+    wasm_runtime_instantiation_args_destroy(inst_args);
+    wasm_runtime_deinstantiate(target_inst);
+    wasm_runtime_unload(target_module);
+    BH_FREE(target_component_raw);
+    wasm_component_runtime_value_clear(&imported_value);
+    wasm_runtime_unload(source_module);
+}
+
+TEST_F(
+    BinaryParserTest,
+    TestPublicComponentInstantiationRejectsMismatchedTypedTopLevelListValueInstanceImports)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    std::vector<uint8_t> list_payload;
+    append_component_list_u8_payload(&list_payload, "abc", 3);
+
+    LoadArgs source_load_args = {};
+    char source_module_name[] = "typed-list-value-instance-import-source-mismatch";
+    source_load_args.name = source_module_name;
+    wasm_module_t source_module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &source_load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(source_module, nullptr) << helper->error_buf;
+
+    const int32_t source_list_type_idx = append_component_list_type(
+        (WASMComponentModule *)source_module, WASM_COMP_PRIMVAL_U8, false, 0);
+    ASSERT_GE(source_list_type_idx, 0);
+    const WASMComponentValueType source_list_type =
+        make_component_type_index_value_type((uint32_t)source_list_type_idx);
+    WASMComponentRuntimeValue imported_value = {};
+    ASSERT_TRUE(wasm_component_runtime_value_init_borrowed(
+        &imported_value, &((WASMComponentModule *)source_module)->component,
+        &source_list_type, list_payload.data(), (uint32_t)list_payload.size(),
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf)));
+    WASMComponentNamedExport imported_export = {};
+    imported_export.name = "forwarded-value";
+    imported_export.ref.type = WASM_COMP_RUNTIME_REF_VALUE;
+    imported_export.ref.of.value = &imported_value;
+    WASMComponentRuntimeInstance imported_instance = {};
+    imported_instance.export_count = 1;
+    imported_instance.exports = &imported_export;
+
+    uint32_t target_wasm_file_size = 0;
+    auto *target_component_raw =
+        (unsigned char *)bh_read_file_to_buffer("add.wasm", &target_wasm_file_size);
+    ASSERT_NE(target_component_raw, nullptr);
+
+    LoadArgs target_load_args = {};
+    char target_module_name[] = "typed-list-value-instance-import-target-mismatch";
+    target_load_args.name = target_module_name;
+    wasm_module_t target_module = wasm_runtime_load_ex(
+        target_component_raw, target_wasm_file_size, &target_load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(target_module, nullptr) << helper->error_buf;
+
+    const int32_t target_list_type_idx = append_component_list_type(
+        (WASMComponentModule *)target_module, WASM_COMP_PRIMVAL_U8, true, 3);
+    ASSERT_GE(target_list_type_idx, 0);
+    const WASMComponentValueType target_list_type =
+        make_component_type_index_value_type((uint32_t)target_list_type_idx);
+    ASSERT_TRUE(append_top_level_typed_value_instance_import_sections_with_value_type(
+        (WASMComponentModule *)target_module, target_list_type));
+
+    struct InstantiationArgs2 *inst_args = nullptr;
+    ASSERT_TRUE(wasm_runtime_instantiation_args_create(&inst_args));
+    wasm_runtime_instantiation_args_set_default_stack_size(inst_args,
+                                                           helper->stack_size);
+    wasm_runtime_instantiation_args_set_host_managed_heap_size(
+        inst_args, helper->heap_size);
+
+    wasm_component_import_binding_t import_binding = {};
+    import_binding.name = "source";
+    import_binding.kind = WASM_COMPONENT_EXTERN_KIND_INSTANCE;
+    import_binding.value.instance = &imported_instance;
+    wasm_runtime_instantiation_args_set_component_imports(inst_args,
+                                                          &import_binding, 1);
+
+    wasm_module_inst_t target_inst =
+        wasm_runtime_instantiate_ex2(target_module, inst_args, helper->error_buf,
+                                     (uint32_t)sizeof(helper->error_buf));
+    ASSERT_EQ(target_inst, nullptr);
+    ASSERT_NE(strstr(helper->error_buf, "value type mismatch"), nullptr);
+    ASSERT_NE(strstr(helper->error_buf, "forwarded-value"), nullptr);
+
+    wasm_runtime_instantiation_args_destroy(inst_args);
+    wasm_runtime_unload(target_module);
+    BH_FREE(target_component_raw);
+    wasm_component_runtime_value_clear(&imported_value);
     wasm_runtime_unload(source_module);
 }
 

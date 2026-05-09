@@ -39,6 +39,7 @@ typedef void (*WASMComponentRuntimeValueFinalizer)(void *data, void *ctx);
 
 typedef struct WASMComponentRuntimeValue {
     WASMComponentRuntimeValueType type;
+    const WASMComponent *owner_component;
     WASMComponentRuntimeValueStorageKind storage_kind;
     uint32 byte_size;
     union {
