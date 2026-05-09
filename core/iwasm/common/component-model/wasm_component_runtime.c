@@ -8640,17 +8640,17 @@ validate_component_runtime_func_against_type(
         || component_contains_nested_component(expected_component, actual_component);
 
     if (internal_same_module_scope) {
-        bool expected_scalar_supported = false, actual_scalar_supported = false;
+        bool expected_supported = false, actual_supported = false;
 
-        if (!component_func_type_uses_supported_scalar_matching(
+        if (!component_func_type_uses_supported_value_matching(
                 expected_component, expected_type, import_name, member_name,
-                &expected_scalar_supported, error_buf, error_buf_size)
-            || !component_func_type_uses_supported_scalar_matching(
+                &expected_supported, error_buf, error_buf_size)
+            || !component_func_type_uses_supported_value_matching(
                 actual_component, actual_type, import_name, member_name,
-                &actual_scalar_supported, error_buf, error_buf_size))
+                &actual_supported, error_buf, error_buf_size))
             return false;
 
-        if (!expected_scalar_supported || !actual_scalar_supported)
+        if (!expected_supported || !actual_supported)
             return true;
     }
 

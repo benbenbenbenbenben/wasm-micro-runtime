@@ -1872,6 +1872,112 @@ append_top_level_function_export_alias(WASMComponentModule *component_module,
 }
 
 static bool
+rewrite_component_func_type_from_source(WASMComponent *target_component,
+                                         const WASMComponent *source_component,
+                                         const WASMComponentFuncType *source_func_type,
+                                         WASMComponentFuncType *target_func_type)
+{
+    const uint32_t source_param_count =
+        source_func_type && source_func_type->params
+            ? source_func_type->params->count
+            : 0;
+
+    if (!target_component || !source_component || !source_func_type
+        || !target_func_type || (source_param_count > 0 && !target_func_type->params)
+        || (source_param_count > 0
+            && source_param_count > target_func_type->params->count)
+        || !target_func_type->results || !source_func_type->results) {
+        return false;
+    }
+
+    if (target_func_type->params) {
+        target_func_type->params->count = source_param_count;
+    }
+    for (uint32_t i = 0; i < source_param_count; i++) {
+        if (!target_func_type->params->params[i].value_type
+            || !clone_supported_value_type_into_component(
+                target_component, source_component,
+                source_func_type->params->params[i].value_type,
+                target_func_type->params->params[i].value_type)) {
+            return false;
+        }
+    }
+
+    target_func_type->results->tag = source_func_type->results->tag;
+    if (source_func_type->results->tag == WASM_COMP_RESULT_LIST_WITH_TYPE) {
+        if (!target_func_type->results->results
+            || !clone_supported_value_type_into_component(
+                target_component, source_component,
+                source_func_type->results->results,
+                target_func_type->results->results)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static bool
+rewrite_existing_nested_component_func_types(WASMComponent *component,
+                                             const WASMComponent *source_component,
+                                             const WASMComponentFuncType *source_func_type)
+{
+    if (!component || !source_component || !source_func_type) {
+        return false;
+    }
+
+    for (uint32_t i = 0; i < component->section_count; i++) {
+        WASMComponentSection *section = &component->sections[i];
+
+        if (section->id == WASM_COMP_SECTION_TYPE && section->parsed.type_section) {
+            for (uint32_t type_idx = 0; type_idx < section->parsed.type_section->count;
+                 type_idx++) {
+                WASMComponentTypes *type_entry =
+                    &section->parsed.type_section->types[type_idx];
+                if (type_entry->tag == WASM_COMP_FUNC_TYPE
+                    && !rewrite_component_func_type_from_source(
+                        component, source_component, source_func_type,
+                        type_entry->type.func_type)) {
+                    return false;
+                }
+            }
+        }
+        else if (section->id == WASM_COMP_SECTION_COMPONENT
+                 && section->parsed.component
+                 && !rewrite_existing_nested_component_func_types(
+                     section->parsed.component, source_component,
+                     source_func_type)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static bool
+propagate_first_canon_lift_signature_to_existing_nested_components(
+    WASMComponentModule *component_module,
+    const WASMComponentFuncType *mutated_func_type)
+{
+    WASMComponent *component = component_module ? &component_module->component : nullptr;
+
+    if (!component || !mutated_func_type) {
+        return false;
+    }
+
+    for (uint32_t i = 0; i < component->section_count; i++) {
+        WASMComponentSection *section = &component->sections[i];
+        if (section->id == WASM_COMP_SECTION_COMPONENT && section->parsed.component
+            && !rewrite_existing_nested_component_func_types(
+                section->parsed.component, component, mutated_func_type)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static bool
 configure_first_canon_lift_for_utf8_string(WASMComponentModule *component_module,
                                            bool string_result)
 {
@@ -1923,7 +2029,8 @@ configure_first_canon_lift_for_utf8_string(WASMComponentModule *component_module
         WASM_COMP_CANON_OPT_REALLOC;
     canon->canon_data.lift.canon_opts->canon_opts[2].payload.realloc_opt.func_idx =
         2;
-    return true;
+    return propagate_first_canon_lift_signature_to_existing_nested_components(
+        component_module, func_type);
 }
 
 static int32_t
@@ -2210,7 +2317,9 @@ configure_first_canon_lift_for_defined_param(WASMComponentModule *component_modu
 
     func_type->params->count = 1;
     return configure_canon_lift_param_type_idx(component_module, canon, 0,
-                                               param_type_idx, false, false);
+                                               param_type_idx, false, false)
+           && propagate_first_canon_lift_signature_to_existing_nested_components(
+               component_module, func_type);
 }
 
 static void
@@ -2653,7 +2762,9 @@ configure_canon_lift_param_type_idx(WASMComponentModule *component_module,
         param_type_idx;
 
     return (!ensure_memory_opt || ensure_canon_lift_memory_opt(canon, 0))
-           && (!ensure_realloc_opt || ensure_canon_lift_realloc_opt(canon, 2));
+           && (!ensure_realloc_opt || ensure_canon_lift_realloc_opt(canon, 2))
+           && propagate_first_canon_lift_signature_to_existing_nested_components(
+               component_module, func_type);
 }
 
 static bool
@@ -2677,7 +2788,9 @@ configure_canon_lift_result_type_idx(WASMComponentModule *component_module,
     func_type->results->results->type = WASM_COMP_VAL_TYPE_IDX;
     func_type->results->results->type_specific.type_idx = result_type_idx;
 
-    return !ensure_memory_opt || ensure_canon_lift_memory_opt(canon, 0);
+    return (!ensure_memory_opt || ensure_canon_lift_memory_opt(canon, 0))
+           && propagate_first_canon_lift_signature_to_existing_nested_components(
+               component_module, func_type);
 }
 
 static bool
@@ -2697,7 +2810,9 @@ configure_first_canon_lift_for_list_u8_param(WASMComponentModule *component_modu
 
     func_type->params->count = 1;
     return configure_canon_lift_param_type_idx(component_module, canon, 0,
-                                               param_type_idx, true, true);
+                                               param_type_idx, true, true)
+           && propagate_first_canon_lift_signature_to_existing_nested_components(
+               component_module, func_type);
 }
 
 static bool
@@ -6161,8 +6276,11 @@ configure_component_func_param_type_idx(WASMComponentModule *component_module,
                                         uint32_t param_type_idx,
                                         bool truncate_to_one)
 {
+    WASMComponentCanon *canon = find_first_canon_lift(component_module);
     WASMComponentFuncType *func_type =
         lookup_local_component_func_type(component_module, func_type_idx);
+    const bool propagate_nested =
+        canon && canon->canon_data.lift.type_idx == func_type_idx;
 
     if (!func_type || !func_type->params || param_idx >= func_type->params->count
         || !func_type->params->params[param_idx].value_type) {
@@ -6175,7 +6293,9 @@ configure_component_func_param_type_idx(WASMComponentModule *component_module,
     func_type->params->params[param_idx].value_type->type = WASM_COMP_VAL_TYPE_IDX;
     func_type->params->params[param_idx].value_type->type_specific.type_idx =
         param_type_idx;
-    return true;
+    return !propagate_nested
+           || propagate_first_canon_lift_signature_to_existing_nested_components(
+               component_module, func_type);
 }
 
 static bool
@@ -6205,26 +6325,25 @@ configure_component_func_list_param_type(WASMComponentModule *component_module,
 }
 
 static bool
+configure_component_func_result_type_idx(WASMComponentModule *component_module,
+                                         uint32_t func_type_idx,
+                                         uint32_t result_type_idx);
+
+static bool
 configure_component_func_list_result_type(WASMComponentModule *component_module,
                                           uint32_t func_type_idx,
                                           WASMComponentPrimValType element_prim_type,
                                           bool fixed_length, uint32_t fixed_len)
 {
-    WASMComponentFuncType *func_type =
-        lookup_local_component_func_type(component_module, func_type_idx);
     const int32_t list_type_idx = append_component_list_type(
         component_module, element_prim_type, fixed_length, fixed_len);
 
-    if (!func_type || !func_type->results
-        || func_type->results->tag != WASM_COMP_RESULT_LIST_WITH_TYPE
-        || !func_type->results->results || list_type_idx < 0) {
+    if (list_type_idx < 0) {
         return false;
     }
 
-    func_type->results->results->type = WASM_COMP_VAL_TYPE_IDX;
-    func_type->results->results->type_specific.type_idx =
-        (uint32_t)list_type_idx;
-    return true;
+    return configure_component_func_result_type_idx(
+        component_module, func_type_idx, (uint32_t)list_type_idx);
 }
 
 static bool
@@ -6232,8 +6351,11 @@ configure_component_func_result_type_idx(WASMComponentModule *component_module,
                                          uint32_t func_type_idx,
                                          uint32_t result_type_idx)
 {
+    WASMComponentCanon *canon = find_first_canon_lift(component_module);
     WASMComponentFuncType *func_type =
         lookup_local_component_func_type(component_module, func_type_idx);
+    const bool propagate_nested =
+        canon && canon->canon_data.lift.type_idx == func_type_idx;
 
     if (!func_type || !func_type->results
         || func_type->results->tag != WASM_COMP_RESULT_LIST_WITH_TYPE
@@ -6243,7 +6365,9 @@ configure_component_func_result_type_idx(WASMComponentModule *component_module,
 
     func_type->results->results->type = WASM_COMP_VAL_TYPE_IDX;
     func_type->results->results->type_specific.type_idx = result_type_idx;
-    return true;
+    return !propagate_nested
+           || propagate_first_canon_lift_signature_to_existing_nested_components(
+               component_module, func_type);
 }
 
 static bool
@@ -16768,6 +16892,71 @@ TEST_F(BinaryParserTest, TestRuntimeBindsTypedNestedFuncInstanceImports)
 }
 
 TEST_F(BinaryParserTest,
+       TestRuntimeBindsTypedNestedUtf8StringFuncInstanceImports)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "runtime-typed-nested-string-func-instance-imports";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(configure_first_canon_lift_for_utf8_string(
+        (WASMComponentModule *)module, true));
+    const WASMComponentCanon *canon =
+        find_first_canon_lift((WASMComponentModule *)module);
+    ASSERT_NE(canon, nullptr);
+    ASSERT_TRUE(append_nested_component_alias_export_sections(
+        (WASMComponentModule *)module));
+    ASSERT_TRUE(append_nested_typed_func_instance_reexport_sections(
+        (WASMComponentModule *)module, "forwarded-add",
+        canon->canon_data.lift.type_idx));
+
+    wasm_module_inst_t module_inst =
+        instantiate_component_with_default_wasi(module, helper.get());
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_instance_t forwarded_instance = wasm_runtime_lookup_component_instance(
+        module_inst, "typed-forwarded-func-instance");
+    ASSERT_NE(forwarded_instance, nullptr);
+    wasm_component_func_t forwarded_func =
+        wasm_component_instance_lookup_function(forwarded_instance, "forwarded-add");
+    ASSERT_NE(forwarded_func, nullptr);
+
+    uint8_t *memory = forwarded_func->canon_memory_ref.of.memory->memory_data;
+    uint32_t payload_ptr = 64;
+    uint32_t payload_len = 5;
+    memcpy(memory, &payload_ptr, sizeof(payload_ptr));
+    memcpy(memory + sizeof(payload_ptr), &payload_len, sizeof(payload_len));
+    memcpy(memory + payload_ptr, "hello", payload_len);
+
+    wasm_component_value_t args[1] = { make_component_string_value("") };
+    wasm_component_value_t results[1] = {};
+    const char expected_bytes[] = { 0x05, 'h', 'e', 'l', 'l', 'o' };
+
+    ASSERT_TRUE(wasm_runtime_call_component_values(module_inst, forwarded_func, 1,
+                                                   results, 1, args))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(results[0].type.kind, WASM_COMPONENT_VALUE_TYPE_PRIMITIVE);
+    ASSERT_EQ(results[0].type.type.primitive_type,
+              WASM_COMPONENT_PRIMITIVE_VALUE_STRING);
+    ASSERT_EQ(results[0].storage_kind, WASM_COMPONENT_VALUE_STORAGE_OWNED);
+    ASSERT_EQ(results[0].byte_size, sizeof(expected_bytes));
+    ASSERT_EQ(memcmp(wasm_component_value_get_data(&results[0]), expected_bytes,
+                     sizeof(expected_bytes)),
+              0);
+
+    wasm_component_value_destroy(&results[0]);
+    wasm_component_value_destroy(&args[0]);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
        TestRuntimeBindsTypedNestedCompositeFuncInstanceImports)
 {
     bool ret = helper->read_wasm_file("add.wasm");
@@ -16895,6 +17084,40 @@ TEST_F(BinaryParserTest,
         wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
                                  helper->error_buf,
                                  (uint32_t)sizeof(helper->error_buf));
+    ASSERT_EQ(module_inst, nullptr);
+    ASSERT_NE(strstr(helper->error_buf, "function type mismatch"), nullptr);
+
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestRuntimeRejectsMismatchedTypedNestedUtf8StringFuncInstanceImports)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "runtime-typed-nested-string-func-instance-mismatch";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(configure_first_canon_lift_for_utf8_string(
+        (WASMComponentModule *)module, true));
+    ASSERT_TRUE(append_nested_component_alias_export_sections(
+        (WASMComponentModule *)module));
+    const int32_t mismatch_type_idx = append_component_scalar_func_type(
+        (WASMComponentModule *)module, { WASM_COMP_PRIMVAL_S32 },
+        WASM_COMP_PRIMVAL_S32);
+    ASSERT_GE(mismatch_type_idx, 0);
+    ASSERT_TRUE(append_nested_typed_func_instance_reexport_sections(
+        (WASMComponentModule *)module, "forwarded-add",
+        (uint32_t)mismatch_type_idx));
+
+    wasm_module_inst_t module_inst =
+        instantiate_component_with_default_wasi(module, helper.get());
     ASSERT_EQ(module_inst, nullptr);
     ASSERT_NE(strstr(helper->error_buf, "function type mismatch"), nullptr);
 
