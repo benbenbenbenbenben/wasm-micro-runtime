@@ -7636,9 +7636,7 @@ count_nested_component_local_bindings(const WASMComponent *nested_component,
                     section->parsed.core_instance_section->count;
                 break;
             case WASM_COMP_SECTION_CORE_TYPE:
-                return set_component_runtime_error_fmt(
-                    error_buf, error_buf_size,
-                    "nested component core type sections are not supported yet");
+                break;
             case WASM_COMP_SECTION_ALIASES:
             {
                 uint32 j;
@@ -8594,6 +8592,7 @@ build_component_runtime_instance_from_component(
         switch (section->id) {
             case WASM_COMP_SECTION_CORE_CUSTOM:
             case WASM_COMP_SECTION_TYPE:
+            case WASM_COMP_SECTION_CORE_TYPE:
                 break;
             case WASM_COMP_SECTION_CORE_MODULE:
                 if (!section->parsed.core_module

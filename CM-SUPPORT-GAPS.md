@@ -326,10 +326,12 @@ Nested components now support:
 - nested local `core instance` sections in instantiate/`with_args` form
 - nested inline/`without_args` `core instance` expressions for core-module
   re-exports
+- nested `core type` sections as tolerated structural metadata around those
+  flows
 
 Nested components still reject:
 
-- nested `core type` sections
+- operational use of nested `core type` entries
 
 The runtime can now thread nested local core-module handles and construct nested
 local/synthetic core instances, but it still does **not** construct a full
