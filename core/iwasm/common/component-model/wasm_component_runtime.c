@@ -3071,16 +3071,6 @@ resolve_component_canon_lift_abi(WASMComponentInstance *inst,
 
 validate_required_opts:
     if (component_canon_lift_uses_lowered_core_func(function)) {
-        if (function->has_string_params || function->has_list_u8_params
-            || function->has_composite_params || function->has_string_result
-            || function->has_list_u8_result || function->has_composite_result
-            || function->memory_result_kind
-                   != WASM_COMP_RUNTIME_CANON_LIFT_MEMORY_RESULT_NONE)
-            return set_component_runtime_error_fmt(
-                error_buf, error_buf_size,
-                "component canon lift over lowered core functions currently "
-                "supports only scalar signatures");
-
         return true;
     }
 

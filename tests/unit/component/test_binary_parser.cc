@@ -11260,38 +11260,96 @@ TEST_F(BinaryParserTest, TestPublicComponentCallInvokesNestedLowerReliftedScalar
     wasm_runtime_unload(module);
 }
 
-TEST_F(BinaryParserTest, TestRuntimeInstantiateRejectsNonScalarLowerRelift)
+TEST_F(BinaryParserTest, TestPublicComponentCallInvokesLowerReliftedUtf8Handle)
 {
-    bool ret = helper->read_wasm_file("add.wasm");
+    bool ret = helper->read_wasm_file("list_u8_post_return.component.wasm");
     ASSERT_TRUE(ret);
 
     LoadArgs load_args = {};
-    char module_name[] = "runtime-lower-relift-nonscalar";
+    char module_name[] = "public-component-call-lower-relift-utf8";
     load_args.name = module_name;
 
     wasm_module_t module = wasm_runtime_load_ex(
         helper->component_raw, helper->wasm_file_size, &load_args,
         helper->error_buf, (uint32_t)sizeof(helper->error_buf));
     ASSERT_NE(module, nullptr) << helper->error_buf;
-    ASSERT_TRUE(append_component_export_alias_sections(
-        (WASMComponentModule *)module));
-
-    const int32_t list_u8_type_idx = append_component_list_type(
-        (WASMComponentModule *)module, WASM_COMP_PRIMVAL_U8, false, 0);
-    ASSERT_GE(list_u8_type_idx, 0);
-    ASSERT_TRUE(configure_first_canon_lift_for_list_u8_param(
-        (WASMComponentModule *)module, (uint32_t)list_u8_type_idx));
     ASSERT_TRUE(append_top_level_canon_lower_relift_export_sections(
-        (WASMComponentModule *)module, "lowered-add"));
+        (WASMComponentModule *)module, "lowered-echo"));
 
     wasm_module_inst_t module_inst =
         instantiate_component_with_default_wasi(module, helper.get());
-    ASSERT_EQ(module_inst, nullptr);
-    ASSERT_STREQ(
-        helper->error_buf,
-        "WASM component instantiate failed: component canon lift over lowered "
-        "core functions currently supports only scalar signatures");
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
 
+    wasm_component_func_t func =
+        wasm_runtime_lookup_component_function(module_inst, "lowered-echo");
+    ASSERT_NE(func, nullptr);
+
+    wasm_component_value_t arg[1] = { make_component_string_value("hello") };
+    wasm_component_value_t result = {};
+    std::string result_string;
+    ASSERT_TRUE(
+        wasm_runtime_call_component_values(module_inst, func, 1, &result, 1, arg))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(result.type.kind, WASM_COMPONENT_VALUE_TYPE_PRIMITIVE);
+    ASSERT_EQ(result.type.type.primitive_type,
+              WASM_COMPONENT_PRIMITIVE_VALUE_STRING);
+    ASSERT_TRUE(decode_component_string_arg(&result, &result_string));
+    ASSERT_EQ(result_string, "hello");
+
+    wasm_component_value_destroy(&arg[0]);
+    wasm_component_value_destroy(&result);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestPublicComponentCallInvokesNestedLowerReliftedUtf8Handle)
+{
+    bool ret = helper->read_wasm_file("list_u8_post_return.component.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "public-component-call-nested-lower-relift-utf8";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(append_nested_component_lower_relift_sections(
+        (WASMComponentModule *)module));
+
+    wasm_module_inst_t module_inst =
+        instantiate_component_with_default_wasi(module, helper.get());
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_instance_t nested_instance =
+        wasm_runtime_lookup_component_instance(module_inst, "nested-lowered-instance");
+    ASSERT_NE(nested_instance, nullptr);
+
+    wasm_component_instance_t wrapped_instance =
+        wasm_component_instance_lookup_instance(nested_instance, "wrapped-instance");
+    ASSERT_NE(wrapped_instance, nullptr);
+
+    wasm_component_func_t func =
+        wasm_component_instance_lookup_function(wrapped_instance, "wrapped");
+    ASSERT_NE(func, nullptr);
+
+    wasm_component_value_t arg[1] = { make_component_string_value("world") };
+    wasm_component_value_t result = {};
+    std::string result_string;
+    ASSERT_TRUE(
+        wasm_runtime_call_component_values(module_inst, func, 1, &result, 1, arg))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(result.type.kind, WASM_COMPONENT_VALUE_TYPE_PRIMITIVE);
+    ASSERT_EQ(result.type.type.primitive_type,
+              WASM_COMPONENT_PRIMITIVE_VALUE_STRING);
+    ASSERT_TRUE(decode_component_string_arg(&result, &result_string));
+    ASSERT_EQ(result_string, "world");
+
+    wasm_component_value_destroy(&arg[0]);
+    wasm_component_value_destroy(&result);
+    wasm_runtime_deinstantiate(module_inst);
     wasm_runtime_unload(module);
 }
 

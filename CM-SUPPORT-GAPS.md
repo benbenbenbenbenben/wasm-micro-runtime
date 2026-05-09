@@ -251,17 +251,18 @@ The executable Canonical ABI surface is currently limited to:
 - top-level tuple/record parameters with scalar, nested UTF-8 string, and nested `list<u8>` leaves
 - top-level exported tuple/record results with scalar, UTF-8 string, and nested `list<u8>` leaves
 - top-level exported `canon lift`
-- top-level and nested scalar `lift(lower(f))` round-trips when `lower` targets
-  an existing runtime `canon lift` handle
+- top-level and nested synthetic `lift(lower(f))` round-trips for scalar and
+  UTF-8 string signatures when `lower` targets an existing runtime `canon lift`
+  handle
 - top-level host-defined component-function imports for the same supported subset
 
 Major Canonical ABI gaps remain:
 
 - no general executable `canon lower`; the only supported lowering path is the
-  synthetic scalar `lift(lower(f))` subset above
+  synthetic scalar / UTF-8 string `lift(lower(f))` subset above
 - no general adapter/lowering path for imported component functions beyond the supported host-callback subset
 - no executable lower path yet for memory-backed Canonical ABI shapes
-  (`string`, `list<u8>`, tuple/record leaves) even when the target function is a
+  (`list<u8>`, tuple/record leaves) even when the target function is a
   lift-backed runtime handle
 - no list marshalling beyond UTF-8 strings, top-level `list<u8>`, and nested `list<u8>` leaves in exported tuple/record values and host-import tuple/record parameters
 - no variant / flags / enum / option / result marshalling
