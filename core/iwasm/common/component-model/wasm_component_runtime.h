@@ -15,6 +15,7 @@ struct InstantiationArgs2;
 
 typedef enum WASMComponentCoreRuntimeRefType {
     WASM_COMP_CORE_RUNTIME_REF_FUNC = 0,
+    WASM_COMP_CORE_RUNTIME_REF_LOWERED_FUNC,
     WASM_COMP_CORE_RUNTIME_REF_TABLE,
     WASM_COMP_CORE_RUNTIME_REF_MEMORY,
     WASM_COMP_CORE_RUNTIME_REF_GLOBAL,
@@ -23,12 +24,14 @@ typedef enum WASMComponentCoreRuntimeRefType {
 } WASMComponentCoreRuntimeRefType;
 
 struct WASMComponentCoreRuntimeInstance;
+struct WASMComponentRuntimeFunc;
 
 typedef struct WASMComponentCoreRuntimeRef {
     WASMComponentCoreRuntimeRefType type;
     struct WASMComponentCoreRuntimeInstance *owner_instance;
     union {
         wasm_function_inst_t function;
+        struct WASMComponentRuntimeFunc *lowered_function;
         wasm_table_inst_t table;
         wasm_memory_inst_t memory;
         wasm_global_inst_t global;
@@ -56,6 +59,7 @@ typedef struct WASMComponentResolvedAlias {
 typedef enum WASMComponentRuntimeFuncKind {
     WASM_COMP_RUNTIME_FUNC_LIFT = 0,
     WASM_COMP_RUNTIME_FUNC_HOST_IMPORT,
+    WASM_COMP_RUNTIME_FUNC_LOWER,
     WASM_COMP_RUNTIME_FUNC_UNSUPPORTED_CANON
 } WASMComponentRuntimeFuncKind;
 
@@ -78,6 +82,7 @@ typedef struct WASMComponentRuntimeFunc {
     WASMComponentCanonType canon_tag;
     uint32 type_idx;
     struct WASMComponentInstance *owner_instance;
+    struct WASMComponentRuntimeFunc *lowered_target;
     WASMComponentCanonOpts *canon_opts;
     WASMComponentCoreRuntimeRef core_func_ref;
     WASMComponentCoreRuntimeRef canon_memory_ref;
@@ -136,10 +141,14 @@ typedef struct WASMComponentRuntimeInstance {
     uint32 export_count;
     WASMComponentNamedExport *exports;
     WASMComponentRuntimeResourceState *resource_state;
+    uint32 owned_func_count;
+    struct WASMComponentRuntimeFunc *owned_funcs;
     uint32 owned_value_count;
     WASMComponentRuntimeValue *owned_values;
     uint32 owned_core_instance_count;
     WASMComponentCoreRuntimeInstance *owned_core_instances;
+    uint32 owned_lowered_func_count;
+    struct WASMComponentRuntimeFunc *owned_lowered_funcs;
     uint32 owned_instance_count;
     struct WASMComponentRuntimeInstance *owned_instances;
     uint32 owned_component_count;
@@ -164,6 +173,8 @@ struct WASMComponentInstance {
     WASMComponentCoreRuntimeInstance *core_instances;
     uint32 core_func_count;
     WASMComponentCoreRuntimeRef *core_funcs;
+    uint32 lowered_func_count;
+    WASMComponentRuntimeFunc *lowered_funcs;
     uint32 core_table_count;
     WASMComponentCoreRuntimeRef *core_tables;
     uint32 core_memory_count;

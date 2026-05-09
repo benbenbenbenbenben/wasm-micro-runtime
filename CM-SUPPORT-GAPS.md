@@ -251,12 +251,19 @@ The executable Canonical ABI surface is currently limited to:
 - top-level tuple/record parameters with scalar, nested UTF-8 string, and nested `list<u8>` leaves
 - top-level exported tuple/record results with scalar, UTF-8 string, and nested `list<u8>` leaves
 - top-level exported `canon lift`
+- top-level scalar `lift(lower(f))` round-trips when `lower` targets an existing
+  runtime `canon lift` handle
 - top-level host-defined component-function imports for the same supported subset
 
 Major Canonical ABI gaps remain:
 
-- no executable `canon lower`
+- no general executable `canon lower`; the only supported lowering path is the
+  synthetic top-level scalar `lift(lower(f))` subset above
 - no general adapter/lowering path for imported component functions beyond the supported host-callback subset
+- no executable lower path yet for memory-backed Canonical ABI shapes
+  (`string`, `list<u8>`, tuple/record leaves) even when the target function is a
+  lift-backed runtime handle
+- no executable lower path yet for nested component-local lowered handles
 - no list marshalling beyond UTF-8 strings, top-level `list<u8>`, and nested `list<u8>` leaves in exported tuple/record values and host-import tuple/record parameters
 - no variant / flags / enum / option / result marshalling
 - no non-string memory-backed leaves inside tuple/record Canonical ABI values beyond nested `list<u8>` leaves for exported canon-lift calls and host-import tuple/record parameters
@@ -279,6 +286,9 @@ Current limitations include:
 - generic `wasm_runtime_create_exec_env(...)` still rejects component instances
 - `wasm_runtime_call_component(...)` remains scalar-only even for nested handles
 - `wasm_runtime_call_component_values(...)` still only supports the current string / `list<u8>` / limited tuple-record subset
+- lowered core-function execution is still only exposed indirectly through
+  synthetic re-lifted component exports; there is no general public API for
+  invoking or binding lowered core functions
 - top-level import binding is limited to existing runtime handles / public values and the current supported host callback subset, not arbitrary host-native lowered adapters
 - typed function import matching now covers direct top-level bindings plus
   top-level, explicit cross-component `canon lift` runtime handles, and

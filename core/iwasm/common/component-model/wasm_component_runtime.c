@@ -17,10 +17,12 @@
 typedef struct WASMComponentRuntimeAllocCounts {
     uint32 core_module_count;
     uint32 core_instance_count;
+    uint32 core_func_count;
     uint32 alias_count;
     uint32 component_count;
     uint32 component_instance_count;
     uint32 component_func_count;
+    uint32 lowered_func_count;
     uint32 component_value_count;
     uint32 component_export_count;
 } WASMComponentRuntimeAllocCounts;
@@ -38,6 +40,9 @@ typedef struct WASMNestedComponentLocalBindings {
     uint32 core_instance_count;
     uint32 core_instance_capacity;
     WASMComponentCoreRuntimeInstance **core_instances;
+    uint32 core_func_count;
+    uint32 core_func_capacity;
+    WASMComponentCoreRuntimeRef *core_funcs;
     uint32 func_count;
     uint32 func_capacity;
     WASMComponentRuntimeRef *funcs;
@@ -202,6 +207,12 @@ collect_component_runtime_alloc_counts(const WASMComponent *component,
                     const WASMComponentAliasDefinition *alias =
                         &alias_section->aliases[j];
 
+                    if (alias->alias_target_type == WASM_COMP_ALIAS_TARGET_CORE_EXPORT
+                        && alias->sort
+                        && alias->sort->sort == WASM_COMP_SORT_CORE_SORT
+                        && alias->sort->core_sort == WASM_COMP_CORE_SORT_FUNC)
+                        counts->core_func_count++;
+
                     if (alias->alias_target_type != WASM_COMP_ALIAS_TARGET_EXPORT
                         || !alias->sort
                         || alias->sort->sort == WASM_COMP_SORT_CORE_SORT)
@@ -226,9 +237,32 @@ collect_component_runtime_alloc_counts(const WASMComponent *component,
                     section->parsed.instance_section->count;
                 break;
             case WASM_COMP_SECTION_CANONS:
-                counts->component_func_count +=
-                    section->parsed.canon_section->count;
+            {
+                uint32 j;
+                const WASMComponentCanonSection *canon_section =
+                    section->parsed.canon_section;
+
+                for (j = 0; j < canon_section->count; j++) {
+                    switch (canon_section->canons[j].tag) {
+                        case WASM_COMP_CANON_LIFT:
+                            counts->component_func_count++;
+                            break;
+                        case WASM_COMP_CANON_LOWER:
+                            counts->core_func_count++;
+                            counts->lowered_func_count++;
+                            break;
+                        case WASM_COMP_CANON_RESOURCE_NEW:
+                        case WASM_COMP_CANON_RESOURCE_DROP:
+                        case WASM_COMP_CANON_RESOURCE_DROP_ASYNC:
+                        case WASM_COMP_CANON_RESOURCE_REP:
+                            counts->core_func_count++;
+                            break;
+                        default:
+                            break;
+                    }
+                }
                 break;
+            }
             case WASM_COMP_SECTION_VALUES:
                 counts->component_value_count +=
                     section->parsed.value_section->count;
@@ -273,6 +307,11 @@ destroy_component_runtime_instance(WASMComponentRuntimeInstance *component_inst)
         component_inst->resource_state = NULL;
     }
 
+    if (component_inst->owned_funcs) {
+        wasm_runtime_free(component_inst->owned_funcs);
+        component_inst->owned_funcs = NULL;
+    }
+
     if (component_inst->owned_values) {
         for (i = 0; i < component_inst->owned_value_count; i++)
             wasm_component_runtime_value_clear(&component_inst->owned_values[i]);
@@ -286,6 +325,11 @@ destroy_component_runtime_instance(WASMComponentRuntimeInstance *component_inst)
                 &component_inst->owned_core_instances[i]);
         wasm_runtime_free(component_inst->owned_core_instances);
         component_inst->owned_core_instances = NULL;
+    }
+
+    if (component_inst->owned_lowered_funcs) {
+        wasm_runtime_free(component_inst->owned_lowered_funcs);
+        component_inst->owned_lowered_funcs = NULL;
     }
 
     if (component_inst->owned_instances) {
@@ -314,7 +358,9 @@ destroy_component_runtime_instance(WASMComponentRuntimeInstance *component_inst)
     }
     component_inst->owned_component_count = 0;
     component_inst->owned_core_instance_count = 0;
+    component_inst->owned_lowered_func_count = 0;
     component_inst->owned_instance_count = 0;
+    component_inst->owned_func_count = 0;
     component_inst->owned_value_count = 0;
     component_inst->owns_exports = false;
     component_inst->owns_resource_state = false;
@@ -343,6 +389,10 @@ destroy_component_instance_graph(WASMComponentInstance *inst)
     if (inst->core_funcs) {
         wasm_runtime_free(inst->core_funcs);
         inst->core_funcs = NULL;
+    }
+    if (inst->lowered_funcs) {
+        wasm_runtime_free(inst->lowered_funcs);
+        inst->lowered_funcs = NULL;
     }
     if (inst->core_tables) {
         wasm_runtime_free(inst->core_tables);
@@ -400,6 +450,7 @@ destroy_component_instance_graph(WASMComponentInstance *inst)
     inst->core_module_count = 0;
     inst->core_instance_count = 0;
     inst->core_func_count = 0;
+    inst->lowered_func_count = 0;
     inst->core_table_count = 0;
     inst->core_memory_count = 0;
     inst->core_global_count = 0;
@@ -431,9 +482,9 @@ alloc_component_runtime_array(void **buffer, uint32 count, uint32 elem_size,
 static bool
 alloc_nested_component_local_bindings(
     WASMNestedComponentLocalBindings *bindings, uint32 core_module_capacity,
-    uint32 core_instance_capacity, uint32 func_capacity, uint32 value_capacity,
-    uint32 instance_capacity, uint32 component_capacity, char *error_buf,
-    uint32 error_buf_size)
+    uint32 core_instance_capacity, uint32 core_func_capacity,
+    uint32 func_capacity, uint32 value_capacity, uint32 instance_capacity,
+    uint32 component_capacity, char *error_buf, uint32 error_buf_size)
 {
     memset(bindings, 0, sizeof(*bindings));
 
@@ -444,6 +495,10 @@ alloc_nested_component_local_bindings(
         || !alloc_component_runtime_array((void **)&bindings->core_instances,
                                           core_instance_capacity,
                                           sizeof(*bindings->core_instances),
+                                          error_buf, error_buf_size)
+        || !alloc_component_runtime_array((void **)&bindings->core_funcs,
+                                          core_func_capacity,
+                                          sizeof(*bindings->core_funcs),
                                           error_buf, error_buf_size)
         || !alloc_component_runtime_array((void **)&bindings->funcs, func_capacity,
                                           sizeof(*bindings->funcs), error_buf,
@@ -472,6 +527,10 @@ alloc_nested_component_local_bindings(
             wasm_runtime_free(bindings->funcs);
             bindings->funcs = NULL;
         }
+        if (bindings->core_funcs) {
+            wasm_runtime_free(bindings->core_funcs);
+            bindings->core_funcs = NULL;
+        }
         if (bindings->values) {
             wasm_runtime_free(bindings->values);
             bindings->values = NULL;
@@ -489,6 +548,7 @@ alloc_nested_component_local_bindings(
 
     bindings->core_module_capacity = core_module_capacity;
     bindings->core_instance_capacity = core_instance_capacity;
+    bindings->core_func_capacity = core_func_capacity;
     bindings->func_capacity = func_capacity;
     bindings->value_capacity = value_capacity;
     bindings->instance_capacity = instance_capacity;
@@ -506,6 +566,10 @@ free_nested_component_local_bindings(WASMNestedComponentLocalBindings *bindings)
     if (bindings->core_instances) {
         wasm_runtime_free(bindings->core_instances);
         bindings->core_instances = NULL;
+    }
+    if (bindings->core_funcs) {
+        wasm_runtime_free(bindings->core_funcs);
+        bindings->core_funcs = NULL;
     }
     if (bindings->funcs) {
         wasm_runtime_free(bindings->funcs);
@@ -528,6 +592,8 @@ free_nested_component_local_bindings(WASMNestedComponentLocalBindings *bindings)
     bindings->core_module_capacity = 0;
     bindings->core_instance_count = 0;
     bindings->core_instance_capacity = 0;
+    bindings->core_func_count = 0;
+    bindings->core_func_capacity = 0;
     bindings->func_count = 0;
     bindings->func_capacity = 0;
     bindings->value_count = 0;
@@ -564,6 +630,20 @@ append_nested_component_local_core_instance(
             "nested component local core instance space overflow");
 
     bindings->core_instances[bindings->core_instance_count++] = core_instance;
+    return true;
+}
+
+static bool
+append_nested_component_local_core_func(
+    WASMNestedComponentLocalBindings *bindings, WASMComponentCoreRuntimeRef ref,
+    char *error_buf, uint32 error_buf_size)
+{
+    if (bindings->core_func_count >= bindings->core_func_capacity)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "nested component local core func space overflow");
+
+    bindings->core_funcs[bindings->core_func_count++] = ref;
     return true;
 }
 
@@ -734,6 +814,14 @@ resolve_nested_component_local_core_sort_idx(
             "instance exports");
 
     switch (sort_idx->sort->core_sort) {
+        case WASM_COMP_CORE_SORT_FUNC:
+            if (sort_idx->idx >= bindings->core_func_count)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "nested component core func index %u is out of bounds",
+                    sort_idx->idx);
+            *out_ref = bindings->core_funcs[sort_idx->idx];
+            return true;
         case WASM_COMP_CORE_SORT_MODULE:
             if (sort_idx->idx >= bindings->core_module_count)
                 return set_component_runtime_error_fmt(
@@ -883,8 +971,12 @@ alloc_component_instance_graph(WASMComponentInstance *inst,
                                           sizeof(*inst->core_instances),
                                           error_buf, error_buf_size)
         || !alloc_component_runtime_array((void **)&inst->core_funcs,
-                                          counts->alias_count,
+                                          counts->core_func_count,
                                           sizeof(*inst->core_funcs), error_buf,
+                                          error_buf_size)
+        || !alloc_component_runtime_array((void **)&inst->lowered_funcs,
+                                          counts->lowered_func_count,
+                                          sizeof(*inst->lowered_funcs), error_buf,
                                           error_buf_size)
         || !alloc_component_runtime_array((void **)&inst->core_tables,
                                           counts->alias_count,
@@ -2693,6 +2785,16 @@ validate_canon_helper_signature(const WASMComponentCoreRuntimeRef *ref,
 }
 
 static bool
+component_canon_lift_uses_lowered_core_func(
+    const WASMComponentRuntimeFunc *function)
+{
+    return function && function->kind == WASM_COMP_RUNTIME_FUNC_LIFT
+           && function->core_func_ref.type
+                  == WASM_COMP_CORE_RUNTIME_REF_LOWERED_FUNC
+           && function->core_func_ref.of.lowered_function;
+}
+
+static bool
 resolve_component_canon_lift_abi(WASMComponentInstance *inst,
                                  WASMComponentRuntimeFunc *function,
                                  char *error_buf, uint32 error_buf_size)
@@ -2968,6 +3070,20 @@ resolve_component_canon_lift_abi(WASMComponentInstance *inst,
     }
 
 validate_required_opts:
+    if (component_canon_lift_uses_lowered_core_func(function)) {
+        if (function->has_string_params || function->has_list_u8_params
+            || function->has_composite_params || function->has_string_result
+            || function->has_list_u8_result || function->has_composite_result
+            || function->memory_result_kind
+                   != WASM_COMP_RUNTIME_CANON_LIFT_MEMORY_RESULT_NONE)
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                "component canon lift over lowered core functions currently "
+                "supports only scalar signatures");
+
+        return true;
+    }
+
     needs_memory_abi = function->has_string_params
                        || function->has_list_u8_params
                        || function->memory_result_kind
@@ -3077,6 +3193,11 @@ resolve_component_canon_lift_type(WASMComponentInstance *inst,
     if (!resolve_component_func_type(inst, function, "component canon lift function",
                                      out_component_type))
         return false;
+
+    if (component_canon_lift_uses_lowered_core_func(function)) {
+        *out_core_type = NULL;
+        return true;
+    }
 
     if (!function->core_func_ref.owner_instance
         || !function->core_func_ref.owner_instance->module_inst)
@@ -5903,6 +6024,16 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
             inst, "component call only supports top-level exported canon lift "
                   "functions");
 
+    if (component_canon_lift_uses_lowered_core_func(function)) {
+        if (function->core_func_ref.of.lowered_function->lowered_target == function)
+            return set_component_call_error(
+                inst, "component canon lift function forms an unsupported "
+                      "lowered recursion cycle");
+        return wasm_component_call_values_internal(
+            inst, function->core_func_ref.of.lowered_function->lowered_target,
+            num_results, results, num_args, args, false);
+    }
+
     if (function->core_func_ref.type != WASM_COMP_CORE_RUNTIME_REF_FUNC
         || !function->core_func_ref.of.function)
         return set_component_call_error(
@@ -6453,6 +6584,16 @@ wasm_component_call_internal(WASMComponentInstance *inst,
         return set_component_call_error(
             inst, "component call only supports top-level exported canon lift "
                   "functions");
+
+    if (component_canon_lift_uses_lowered_core_func(function)) {
+        if (function->core_func_ref.of.lowered_function->lowered_target == function)
+            return set_component_call_error(
+                inst, "component canon lift function forms an unsupported "
+                      "lowered recursion cycle");
+        return wasm_component_call_internal(
+            inst, function->core_func_ref.of.lowered_function->lowered_target,
+            num_results, results, num_args, args, false);
+    }
 
     if (function->core_func_ref.type != WASM_COMP_CORE_RUNTIME_REF_FUNC
         || !function->core_func_ref.of.function)
@@ -7047,7 +7188,10 @@ lookup_core_instance_export(const WASMComponentCoreRuntimeInstance *core_instanc
         const WASMComponentCoreNamedExport *export_item =
             &core_instance->exports[i];
         if (!strcmp(export_item->name, name)) {
-            if (export_item->ref.type != expected_type)
+            if (export_item->ref.type != expected_type
+                && !(expected_type == WASM_COMP_CORE_RUNTIME_REF_FUNC
+                     && export_item->ref.type
+                            == WASM_COMP_CORE_RUNTIME_REF_LOWERED_FUNC))
                 return set_component_runtime_error_fmt(
                     error_buf, error_buf_size,
                     "core export \"%s\" resolved to an unexpected type", name);
@@ -7433,16 +7577,15 @@ append_component_canon_function(WASMComponentInstance *inst,
 {
     WASMComponentRuntimeFunc *func;
 
-    if (inst->component_func_count >= UINT32_MAX)
-        return set_component_runtime_error_fmt(
-            error_buf, error_buf_size, "too many component functions");
-
-    func = &inst->component_funcs[inst->component_func_count++];
-    memset(func, 0, sizeof(*func));
-    func->canon_tag = canon->tag;
-    func->owner_instance = inst;
-
     if (canon->tag == WASM_COMP_CANON_LIFT) {
+        if (inst->component_func_count >= UINT32_MAX)
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size, "too many component functions");
+
+        func = &inst->component_funcs[inst->component_func_count++];
+        memset(func, 0, sizeof(*func));
+        func->canon_tag = canon->tag;
+        func->owner_instance = inst;
         if (canon->canon_data.lift.core_func_idx >= inst->core_func_count)
             return set_component_runtime_error_fmt(
                 error_buf, error_buf_size,
@@ -7458,7 +7601,9 @@ append_component_canon_function(WASMComponentInstance *inst,
         func->canon_opts = canon->canon_data.lift.canon_opts;
         func->core_func_ref = inst->core_funcs[canon->canon_data.lift.core_func_idx];
 
-        if (func->core_func_ref.type != WASM_COMP_CORE_RUNTIME_REF_FUNC)
+        if (func->core_func_ref.type != WASM_COMP_CORE_RUNTIME_REF_FUNC
+            && func->core_func_ref.type
+                   != WASM_COMP_CORE_RUNTIME_REF_LOWERED_FUNC)
             return set_component_runtime_error_fmt(
                 error_buf, error_buf_size,
                 "canon lift core func index %u does not resolve to a function",
@@ -7468,11 +7613,153 @@ append_component_canon_function(WASMComponentInstance *inst,
                                               error_buf_size))
             return false;
     }
+    else if (canon->tag == WASM_COMP_CANON_LOWER) {
+        WASMComponentRuntimeRef target_ref;
+
+        if (canon->canon_data.lower.func_idx >= inst->component_func_count)
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                "canon lower func index %u is out of bounds",
+                canon->canon_data.lower.func_idx);
+        if (inst->lowered_func_count >= UINT32_MAX
+            || inst->core_func_count >= UINT32_MAX)
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size, "too many canon lower functions");
+
+        target_ref.type = WASM_COMP_RUNTIME_REF_FUNC;
+        target_ref.of.function =
+            &inst->component_funcs[canon->canon_data.lower.func_idx];
+        func = &inst->lowered_funcs[inst->lowered_func_count++];
+        memset(func, 0, sizeof(*func));
+        func->kind = WASM_COMP_RUNTIME_FUNC_LOWER;
+        func->canon_tag = canon->tag;
+        func->owner_instance = inst;
+        func->canon_opts = canon->canon_data.lower.canon_opts;
+        func->lowered_target = target_ref.of.function;
+
+        memset(&inst->core_funcs[inst->core_func_count], 0,
+               sizeof(inst->core_funcs[inst->core_func_count]));
+        inst->core_funcs[inst->core_func_count].type =
+            WASM_COMP_CORE_RUNTIME_REF_LOWERED_FUNC;
+        inst->core_funcs[inst->core_func_count].of.lowered_function = func;
+        inst->core_func_count++;
+    }
+    else if (canon->tag == WASM_COMP_CANON_RESOURCE_NEW
+             || canon->tag == WASM_COMP_CANON_RESOURCE_DROP
+             || canon->tag == WASM_COMP_CANON_RESOURCE_DROP_ASYNC
+             || canon->tag == WASM_COMP_CANON_RESOURCE_REP) {
+        memset(&inst->core_funcs[inst->core_func_count], 0,
+               sizeof(inst->core_funcs[inst->core_func_count]));
+        inst->core_funcs[inst->core_func_count].type =
+            WASM_COMP_CORE_RUNTIME_REF_FUNC;
+        inst->core_func_count++;
+    }
     else {
+        if (inst->component_func_count >= UINT32_MAX)
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size, "too many component functions");
+
+        func = &inst->component_funcs[inst->component_func_count++];
+        memset(func, 0, sizeof(*func));
+        func->canon_tag = canon->tag;
+        func->owner_instance = inst;
         func->kind = WASM_COMP_RUNTIME_FUNC_UNSUPPORTED_CANON;
     }
 
     return true;
+}
+
+static bool
+append_nested_component_canon(
+    WASMComponentInstance *inst, WASMComponentRuntimeInstance *runtime_inst,
+    WASMNestedComponentLocalBindings *bindings, const WASMComponentCanon *canon,
+    char *error_buf, uint32 error_buf_size)
+{
+    WASMComponentRuntimeFunc *func;
+    WASMComponentRuntimeRef component_ref;
+    WASMComponentCoreRuntimeRef core_ref;
+
+    switch (canon->tag) {
+        case WASM_COMP_CANON_LIFT:
+            if (canon->canon_data.lift.core_func_idx >= bindings->core_func_count)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "nested canon lift core func index %u is out of bounds",
+                    canon->canon_data.lift.core_func_idx);
+
+            if (runtime_inst->owned_func_count >= UINT32_MAX)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "too many nested canon lift functions");
+
+            func = &runtime_inst->owned_funcs[runtime_inst->owned_func_count++];
+            memset(func, 0, sizeof(*func));
+            func->canon_tag = canon->tag;
+            func->owner_instance = inst;
+            func->kind = WASM_COMP_RUNTIME_FUNC_LIFT;
+            func->type_idx = canon->canon_data.lift.type_idx;
+            func->canon_opts = canon->canon_data.lift.canon_opts;
+            func->core_func_ref = bindings->core_funcs[canon->canon_data.lift.core_func_idx];
+            if (!resolve_component_canon_lift_abi(inst, func, error_buf,
+                                                  error_buf_size))
+                return false;
+
+            memset(&component_ref, 0, sizeof(component_ref));
+            component_ref.type = WASM_COMP_RUNTIME_REF_FUNC;
+            component_ref.of.function = func;
+            return append_nested_component_local_ref(bindings, component_ref, error_buf,
+                                                     error_buf_size);
+        case WASM_COMP_CANON_LOWER:
+            if (canon->canon_data.lower.func_idx >= bindings->func_count)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "nested canon lower func index %u is out of bounds",
+                    canon->canon_data.lower.func_idx);
+            if (runtime_inst->owned_lowered_func_count >= UINT32_MAX)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "too many nested canon lower functions");
+
+            func =
+                &runtime_inst->owned_lowered_funcs[runtime_inst->owned_lowered_func_count++];
+            memset(func, 0, sizeof(*func));
+            func->kind = WASM_COMP_RUNTIME_FUNC_LOWER;
+            func->canon_tag = canon->tag;
+            func->owner_instance = inst;
+            func->canon_opts = canon->canon_data.lower.canon_opts;
+            func->lowered_target = bindings->funcs[canon->canon_data.lower.func_idx]
+                                       .of.function;
+
+            memset(&core_ref, 0, sizeof(core_ref));
+            core_ref.type = WASM_COMP_CORE_RUNTIME_REF_LOWERED_FUNC;
+            core_ref.of.lowered_function = func;
+            return append_nested_component_local_core_func(bindings, core_ref, error_buf,
+                                                           error_buf_size);
+        case WASM_COMP_CANON_RESOURCE_NEW:
+        case WASM_COMP_CANON_RESOURCE_DROP:
+        case WASM_COMP_CANON_RESOURCE_DROP_ASYNC:
+        case WASM_COMP_CANON_RESOURCE_REP:
+            memset(&core_ref, 0, sizeof(core_ref));
+            core_ref.type = WASM_COMP_CORE_RUNTIME_REF_FUNC;
+            return append_nested_component_local_core_func(bindings, core_ref, error_buf,
+                                                           error_buf_size);
+        default:
+            if (runtime_inst->owned_func_count >= UINT32_MAX)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "too many nested component canon functions");
+
+            func = &runtime_inst->owned_funcs[runtime_inst->owned_func_count++];
+            memset(func, 0, sizeof(*func));
+            func->canon_tag = canon->tag;
+            func->owner_instance = inst;
+            func->kind = WASM_COMP_RUNTIME_FUNC_UNSUPPORTED_CANON;
+            memset(&component_ref, 0, sizeof(component_ref));
+            component_ref.type = WASM_COMP_RUNTIME_REF_FUNC;
+            component_ref.of.function = func;
+            return append_nested_component_local_ref(bindings, component_ref, error_buf,
+                                                     error_buf_size);
+    }
 }
 
 static bool
@@ -7556,23 +7843,27 @@ count_nested_component_local_bindings(const WASMComponent *nested_component,
                                       uint32 *import_count,
                                       uint32 *core_module_count,
                                       uint32 *core_instance_count,
+                                      uint32 *core_func_count,
                                       uint32 *func_count,
                                       uint32 *value_count,
                                       uint32 *instance_count,
                                       uint32 *component_count,
+                                      uint32 *owned_func_count,
                                       uint32 *owned_value_count,
                                       uint32 *owned_component_count,
                                       uint32 *owned_core_instance_count,
+                                      uint32 *owned_lowered_func_count,
                                       uint32 *owned_instance_count,
                                       uint32 *export_count, char *error_buf,
                                       uint32 error_buf_size)
 {
     uint32 i;
 
-    *import_count = *core_module_count = *core_instance_count = *func_count
-        = *value_count = *instance_count = *component_count
-        = *owned_value_count = *owned_component_count
-        = *owned_core_instance_count = *owned_instance_count = *export_count = 0;
+    *import_count = *core_module_count = *core_instance_count = *core_func_count
+        = *func_count = *value_count = *instance_count = *component_count
+        = *owned_func_count = *owned_value_count = *owned_component_count
+        = *owned_core_instance_count = *owned_lowered_func_count
+        = *owned_instance_count = *export_count = 0;
 
     for (i = 0; i < nested_component->section_count; i++) {
         const WASMComponentSection *section = &nested_component->sections[i];
@@ -7637,6 +7928,36 @@ count_nested_component_local_bindings(const WASMComponent *nested_component,
                 (*owned_core_instance_count) +=
                     section->parsed.core_instance_section->count;
                 break;
+            case WASM_COMP_SECTION_CANONS:
+            {
+                uint32 j;
+                const WASMComponentCanonSection *canon_section =
+                    section->parsed.canon_section;
+
+                for (j = 0; j < canon_section->count; j++) {
+                    switch (canon_section->canons[j].tag) {
+                        case WASM_COMP_CANON_LIFT:
+                            (*func_count)++;
+                            (*owned_func_count)++;
+                            break;
+                        case WASM_COMP_CANON_LOWER:
+                            (*core_func_count)++;
+                            (*owned_lowered_func_count)++;
+                            break;
+                        case WASM_COMP_CANON_RESOURCE_NEW:
+                        case WASM_COMP_CANON_RESOURCE_DROP:
+                        case WASM_COMP_CANON_RESOURCE_DROP_ASYNC:
+                        case WASM_COMP_CANON_RESOURCE_REP:
+                            (*core_func_count)++;
+                            break;
+                        default:
+                            (*func_count)++;
+                            (*owned_func_count)++;
+                            break;
+                    }
+                }
+                break;
+            }
             case WASM_COMP_SECTION_CORE_TYPE:
                 break;
             case WASM_COMP_SECTION_ALIASES:
@@ -10453,8 +10774,10 @@ build_component_runtime_instance_from_component(
 {
     WASMNestedComponentLocalBindings bindings;
     uint32 i, import_index = 0, import_count = 0, owned_component_count = 0,
-              owned_value_count = 0, owned_core_instance_count = 0,
-              owned_instance_count = 0, export_count = 0;
+              owned_func_count = 0, owned_value_count = 0,
+              owned_core_instance_count = 0,
+              owned_lowered_func_count = 0, owned_instance_count = 0,
+              export_count = 0;
 
     memset(&bindings, 0, sizeof(bindings));
     runtime_inst->resource_state = wasm_component_resource_state_create(
@@ -10465,11 +10788,12 @@ build_component_runtime_instance_from_component(
 
     if (!count_nested_component_local_bindings(
             component, &import_count, &bindings.core_module_capacity,
-            &bindings.core_instance_capacity,
+            &bindings.core_instance_capacity, &bindings.core_func_capacity,
             &bindings.func_capacity, &bindings.value_capacity,
             &bindings.instance_capacity, &bindings.component_capacity,
-            &owned_value_count, &owned_component_count,
-            &owned_core_instance_count, &owned_instance_count, &export_count,
+            &owned_func_count, &owned_value_count, &owned_component_count,
+            &owned_core_instance_count, &owned_lowered_func_count,
+            &owned_instance_count, &export_count,
             error_buf, error_buf_size))
         return false;
 
@@ -10480,9 +10804,13 @@ build_component_runtime_instance_from_component(
 
     if (!alloc_nested_component_local_bindings(
             &bindings, bindings.core_module_capacity,
-            bindings.core_instance_capacity, bindings.func_capacity,
-            bindings.value_capacity, bindings.instance_capacity,
-            bindings.component_capacity, error_buf, error_buf_size)
+            bindings.core_instance_capacity, bindings.core_func_capacity,
+            bindings.func_capacity, bindings.value_capacity,
+            bindings.instance_capacity, bindings.component_capacity, error_buf,
+            error_buf_size)
+        || !alloc_component_runtime_array(
+            (void **)&runtime_inst->owned_funcs, owned_func_count,
+            sizeof(*runtime_inst->owned_funcs), error_buf, error_buf_size)
         || !alloc_component_runtime_array(
             (void **)&runtime_inst->owned_values, owned_value_count,
             sizeof(*runtime_inst->owned_values), error_buf, error_buf_size)
@@ -10490,6 +10818,11 @@ build_component_runtime_instance_from_component(
             (void **)&runtime_inst->owned_core_instances,
             owned_core_instance_count,
             sizeof(*runtime_inst->owned_core_instances), error_buf,
+            error_buf_size)
+        || !alloc_component_runtime_array(
+            (void **)&runtime_inst->owned_lowered_funcs,
+            owned_lowered_func_count,
+            sizeof(*runtime_inst->owned_lowered_funcs), error_buf,
             error_buf_size)
         || !alloc_component_runtime_array(
             (void **)&runtime_inst->owned_components, owned_component_count,
@@ -10533,6 +10866,21 @@ build_component_runtime_instance_from_component(
                     if (!instantiate_nested_component_core_instance(
                             runtime_inst, &bindings,
                             &core_inst_section->instances[j], error_buf,
+                            error_buf_size))
+                        goto fail;
+                }
+                break;
+            }
+            case WASM_COMP_SECTION_CANONS:
+            {
+                uint32 j;
+                const WASMComponentCanonSection *canon_section =
+                    section->parsed.canon_section;
+
+                for (j = 0; j < canon_section->count; j++) {
+                    if (!append_nested_component_canon(
+                            inst, runtime_inst, &bindings,
+                            &canon_section->canons[j], error_buf,
                             error_buf_size))
                         goto fail;
                 }
