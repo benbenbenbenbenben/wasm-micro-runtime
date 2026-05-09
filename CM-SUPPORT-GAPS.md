@@ -115,12 +115,15 @@ bound instance handles against the current supported `instancetype` subset.
 That support works for both top-level public imports and nested `with_args`
 instance bindings, and currently covers:
 
+- exported scalar `func` members
 - exported `core module` members
 - exported scalar `value` members
 - exported nested `instance` members, including recursive validation
 
 Typed matching of exported component `func` / `value` / `component` members is
-still rejects non-scalar values plus all component `func` / `component` members.
+still incomplete: non-scalar functions are not yet structurally checked,
+non-scalar values are still rejected, and typed exported `component` members
+are still unsupported.
 
 ### 1.5 Canonical ABI execution is partially implemented
 
@@ -212,7 +215,7 @@ This is a real runtime substrate, but not yet full resource semantics.
 - public tuple/record component calls
 - top-level component import binding
 - typed top-level and nested component-instance import binding for the current
-  exported core-module / scalar-value / nested-instance subset
+  exported scalar-func / core-module / scalar-value / nested-instance subset
 - public value import/export flows
 - top-level and nested value sections
 - top-level and nested start execution for the current supported public-value
@@ -265,10 +268,11 @@ Current limitations include:
 - `wasm_runtime_call_component(...)` remains scalar-only even for nested handles
 - `wasm_runtime_call_component_values(...)` still only supports the current string / `list<u8>` / limited tuple-record subset
 - top-level import binding is limited to existing runtime handles / public values and the current supported host callback subset, not arbitrary host-native lowered adapters
-- typed `instance` import matching is currently limited to exported `core
-  module`, scalar `value`, and nested `instance` members; typed matching for
-  exported component `func` / non-scalar `value` / `component` members is still
-  unsupported
+- typed function import matching is currently limited to scalar functype
+  equivalence, and typed `instance` import matching is currently limited to
+  exported scalar `func`, `core module`, scalar `value`, and nested `instance`
+  members; non-scalar function matching is not enforced yet, and typed exported
+  `component` members are still unsupported
 - host-import tuple/record values are still limited to the current scalar /
   UTF-8 string / nested `list<u8>` subset
 - there is still no public resource import/export contract comparable to the current function/value/instance/component/core-module surface

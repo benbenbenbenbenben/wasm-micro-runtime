@@ -7440,6 +7440,7 @@ append_component_canon_function(WASMComponentInstance *inst,
     func = &inst->component_funcs[inst->component_func_count++];
     memset(func, 0, sizeof(*func));
     func->canon_tag = canon->tag;
+    func->owner_instance = inst;
 
     if (canon->tag == WASM_COMP_CANON_LIFT) {
         if (canon->canon_data.lift.core_func_idx >= inst->core_func_count)
@@ -8216,6 +8217,292 @@ resolve_component_instance_type(const WASMComponent *component, uint32 type_idx,
 }
 
 static bool
+resolve_component_declared_func_type(const WASMComponent *component,
+                                     uint32 type_idx, const char *import_name,
+                                     const char *member_name,
+                                     const char *role,
+                                     const WASMComponentFuncType **out_type,
+                                     char *error_buf, uint32 error_buf_size)
+{
+    const WASMComponentTypes *type_entry =
+        wasm_component_lookup_type(component, type_idx);
+
+    if (!type_entry)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            member_name
+                ? "component import \"%s\" instance export \"%s\" uses "
+                  "unresolved %s function type index %u"
+                : "component import \"%s\" uses unresolved %s function type "
+                  "index %u",
+            import_name ? import_name : "<unnamed>",
+            member_name ? member_name : "", role, type_idx);
+
+    if (type_entry->tag != WASM_COMP_FUNC_TYPE || !type_entry->type.func_type)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            member_name
+                ? "component import \"%s\" instance export \"%s\" %s function "
+                  "type index %u is not a function"
+                : "component import \"%s\" %s function type index %u is not a "
+                  "function",
+            import_name ? import_name : "<unnamed>",
+            member_name ? member_name : "", role, type_idx);
+
+    *out_type = type_entry->type.func_type;
+    return true;
+}
+
+static bool
+resolve_component_scalar_primitive_type(
+    const WASMComponent *component, const WASMComponentValueType *value_type,
+    const char *import_name, const char *member_name, const char *position,
+    uint32 index, WASMComponentPrimValType *out_primitive_type, bool *supported,
+    char *error_buf, uint32 error_buf_size)
+{
+    WASMComponentRuntimeValueType resolved_type;
+    uint8 ignored_core_type = 0;
+    wasm_valkind_t ignored_public_kind = WASM_I32;
+    WASMComponentPrimValType primitive_type;
+
+    if (supported)
+        *supported = false;
+
+    if (!component || !value_type || !out_primitive_type)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            member_name ? "component import \"%s\" instance export \"%s\" uses "
+                          "unsupported typed function matching"
+                        : "component import \"%s\" uses unsupported typed "
+                          "function matching",
+            import_name ? import_name : "<unnamed>",
+            member_name ? member_name : "");
+
+    memset(&resolved_type, 0, sizeof(resolved_type));
+    if (!wasm_component_runtime_value_resolve_type(component, value_type,
+                                                   &resolved_type, error_buf,
+                                                   error_buf_size))
+        return false;
+
+    if (resolved_type.kind == WASM_COMP_RUNTIME_VALUE_TYPE_PRIMITIVE)
+        primitive_type = resolved_type.type.primitive_type;
+    else if (resolved_type.kind == WASM_COMP_RUNTIME_VALUE_TYPE_DEFINED
+             && resolved_type.type.defined_type
+             && resolved_type.type.defined_type->tag == WASM_COMP_DEF_VAL_PRIMVAL)
+        primitive_type = resolved_type.type.defined_type->def_val.primval;
+    else
+        return true;
+
+    if (!component_scalar_prim_to_core(primitive_type, &ignored_core_type,
+                                       &ignored_public_kind))
+        return true;
+
+    *out_primitive_type = primitive_type;
+    if (supported)
+        *supported = true;
+    return true;
+}
+
+static bool
+component_func_type_uses_supported_scalar_matching(
+    const WASMComponent *component, const WASMComponentFuncType *func_type,
+    const char *import_name, const char *member_name, bool *supported,
+    char *error_buf, uint32 error_buf_size)
+{
+    WASMComponentPrimValType ignored_primitive_type;
+    bool value_supported = false;
+    uint32 param_count;
+    uint32 result_count;
+
+    if (supported)
+        *supported = false;
+
+    if (!component || !func_type || !supported)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            member_name ? "component import \"%s\" instance export \"%s\" is "
+                          "missing function type metadata"
+                        : "component import \"%s\" is missing function type "
+                          "metadata",
+            import_name ? import_name : "<unnamed>",
+            member_name ? member_name : "");
+
+    param_count = func_type->params ? func_type->params->count : 0;
+    result_count = get_component_func_result_count(func_type);
+
+    if (result_count > 1)
+        return true;
+
+    for (uint32 i = 0; i < param_count; i++) {
+        if (!resolve_component_scalar_primitive_type(
+                component, func_type->params->params[i].value_type, import_name,
+                member_name, "parameter", i, &ignored_primitive_type,
+                &value_supported, error_buf, error_buf_size))
+            return false;
+        if (!value_supported)
+            return true;
+    }
+
+    if (result_count == 1) {
+        if (!resolve_component_scalar_primitive_type(
+                component, func_type->results->results, import_name,
+                member_name, "result", 0, &ignored_primitive_type,
+                &value_supported, error_buf, error_buf_size))
+            return false;
+        if (!value_supported)
+            return true;
+    }
+
+    *supported = true;
+    return true;
+}
+
+static bool
+validate_component_func_types_equal(
+    const WASMComponent *expected_component,
+    const WASMComponentFuncType *expected_type,
+    const WASMComponent *actual_component,
+    const WASMComponentFuncType *actual_type, const char *import_name,
+    const char *member_name, char *error_buf, uint32 error_buf_size)
+{
+    uint32 expected_param_count, actual_param_count;
+    uint32 expected_result_count, actual_result_count;
+    bool expected_supported = false, actual_supported = false;
+
+    if (!expected_component || !expected_type || !actual_component || !actual_type)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            member_name ? "component import \"%s\" instance export \"%s\" is "
+                          "missing function type metadata"
+                        : "component import \"%s\" is missing function type "
+                          "metadata",
+            import_name ? import_name : "<unnamed>",
+            member_name ? member_name : "");
+
+    if (!component_func_type_uses_supported_scalar_matching(
+            expected_component, expected_type, import_name, member_name,
+            &expected_supported, error_buf, error_buf_size)
+        || !component_func_type_uses_supported_scalar_matching(
+            actual_component, actual_type, import_name, member_name,
+            &actual_supported, error_buf, error_buf_size))
+        return false;
+
+    if (!expected_supported || !actual_supported)
+        return true;
+
+    expected_param_count =
+        expected_type->params ? expected_type->params->count : 0;
+    actual_param_count = actual_type->params ? actual_type->params->count : 0;
+    expected_result_count = get_component_func_result_count(expected_type);
+    actual_result_count = get_component_func_result_count(actual_type);
+
+    if (expected_param_count != actual_param_count
+        || expected_result_count != actual_result_count)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            member_name ? "component import \"%s\" instance export \"%s\" "
+                          "function type mismatch"
+                        : "component import \"%s\" function type mismatch",
+            import_name ? import_name : "<unnamed>",
+            member_name ? member_name : "");
+
+    for (uint32 i = 0; i < expected_param_count; i++) {
+        WASMComponentPrimValType expected_primitive_type, actual_primitive_type;
+        bool param_expected_supported = false, param_actual_supported = false;
+
+        if (!resolve_component_scalar_primitive_type(
+                expected_component, expected_type->params->params[i].value_type,
+                import_name, member_name, "parameter", i,
+                &expected_primitive_type, &param_expected_supported, error_buf,
+                error_buf_size)
+            || !resolve_component_scalar_primitive_type(
+                actual_component, actual_type->params->params[i].value_type,
+                import_name, member_name, "parameter", i, &actual_primitive_type,
+                &param_actual_supported, error_buf, error_buf_size))
+            return false;
+
+        if (!param_expected_supported || !param_actual_supported)
+            return true;
+
+        if (expected_primitive_type != actual_primitive_type)
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                member_name ? "component import \"%s\" instance export \"%s\" "
+                              "function type mismatch"
+                            : "component import \"%s\" function type mismatch",
+                import_name ? import_name : "<unnamed>",
+                member_name ? member_name : "");
+    }
+
+    if (expected_result_count == 1) {
+        WASMComponentPrimValType expected_primitive_type, actual_primitive_type;
+        bool result_expected_supported = false, result_actual_supported = false;
+
+        if (!resolve_component_scalar_primitive_type(
+                expected_component, expected_type->results->results, import_name,
+                member_name, "result", 0, &expected_primitive_type,
+                &result_expected_supported, error_buf, error_buf_size)
+            || !resolve_component_scalar_primitive_type(
+                actual_component, actual_type->results->results, import_name,
+                member_name, "result", 0, &actual_primitive_type,
+                &result_actual_supported, error_buf, error_buf_size))
+            return false;
+
+        if (!result_expected_supported || !result_actual_supported)
+            return true;
+
+        if (expected_primitive_type != actual_primitive_type)
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                member_name ? "component import \"%s\" instance export \"%s\" "
+                              "function type mismatch"
+                            : "component import \"%s\" function type mismatch",
+                import_name ? import_name : "<unnamed>",
+                member_name ? member_name : "");
+    }
+
+    return true;
+}
+
+static bool
+validate_component_runtime_func_against_type(
+    const WASMComponent *expected_component,
+    const WASMComponentRuntimeFunc *runtime_func, uint32 expected_type_idx,
+    const char *import_name, const char *member_name, char *error_buf,
+    uint32 error_buf_size)
+{
+    const WASMComponentFuncType *expected_type, *actual_type;
+    const WASMComponent *actual_component;
+
+    if (!runtime_func || !runtime_func->owner_instance)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            member_name ? "component import \"%s\" instance export \"%s\" is "
+                          "missing runtime function ownership"
+                        : "component import \"%s\" is missing runtime function "
+                          "ownership",
+            import_name ? import_name : "<unnamed>",
+            member_name ? member_name : "");
+
+    actual_component = &runtime_func->owner_instance->module->component;
+
+    if (!resolve_component_declared_func_type(expected_component, expected_type_idx,
+                                              import_name, member_name,
+                                              "expected", &expected_type,
+                                              error_buf, error_buf_size)
+        || !resolve_component_declared_func_type(actual_component,
+                                                 runtime_func->type_idx,
+                                                 import_name, member_name,
+                                                 "actual", &actual_type, error_buf,
+                                                 error_buf_size))
+        return false;
+
+    return validate_component_func_types_equal(
+        expected_component, expected_type, actual_component, actual_type,
+        import_name, member_name, error_buf, error_buf_size);
+}
+
+static bool
 resolve_component_runtime_value_primitive_type(
     const WASMComponentRuntimeValue *runtime_value,
     WASMComponentPrimValType *out_primitive_type)
@@ -8380,6 +8667,19 @@ validate_component_instance_against_type(
                         import_name ? import_name : "<unnamed>");
 
                 switch (export_decl->extern_desc->type) {
+                    case WASM_COMP_EXTERN_FUNC:
+                        if (!lookup_component_instance_export(
+                                component_inst, member_name,
+                                WASM_COMP_RUNTIME_REF_FUNC, &ref, error_buf,
+                                error_buf_size))
+                            return false;
+                        if (!validate_component_runtime_func_against_type(
+                                component, ref.of.function,
+                                export_decl->extern_desc->extern_desc.func.type_idx,
+                                import_name, member_name, error_buf,
+                                error_buf_size))
+                            return false;
+                        break;
                     case WASM_COMP_EXTERN_CORE_MODULE:
                     {
                         uint32 core_type_idx =
@@ -8452,7 +8752,6 @@ validate_component_instance_against_type(
                                 error_buf_size))
                             return false;
                         break;
-                    case WASM_COMP_EXTERN_FUNC:
                     case WASM_COMP_EXTERN_COMPONENT:
                         return set_component_runtime_error_fmt(
                             error_buf, error_buf_size,
@@ -8498,13 +8797,17 @@ validate_component_import_binding_type(const WASMComponent *component,
 
     switch (component_import->extern_desc->type) {
         case WASM_COMP_EXTERN_FUNC:
-            return ref.type == WASM_COMP_RUNTIME_REF_FUNC
-                       ? true
-                       : set_component_runtime_error_fmt(
-                              error_buf, error_buf_size,
-                              "component import \"%s\" bound to the wrong "
-                              "runtime sort",
-                              import_name);
+            if (ref.type != WASM_COMP_RUNTIME_REF_FUNC)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "component import \"%s\" bound to the wrong runtime sort",
+                    import_name);
+            if (find_component_type_count(component) == 0)
+                return true;
+            return validate_component_runtime_func_against_type(
+                component, ref.of.function,
+                component_import->extern_desc->extern_desc.func.type_idx,
+                import_name, NULL, error_buf, error_buf_size);
         case WASM_COMP_EXTERN_VALUE:
             if (ref.type != WASM_COMP_RUNTIME_REF_VALUE)
                 return set_component_runtime_error_fmt(
@@ -8812,6 +9115,7 @@ append_top_level_component_host_import(
     memset(function, 0, sizeof(*function));
     function->kind = WASM_COMP_RUNTIME_FUNC_HOST_IMPORT;
     function->type_idx = component_import->extern_desc->extern_desc.func.type_idx;
+    function->owner_instance = inst;
     function->host_callback = binding->callback;
     function->host_user_data = binding->user_data;
 

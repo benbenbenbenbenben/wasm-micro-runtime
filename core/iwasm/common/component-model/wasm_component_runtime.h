@@ -77,6 +77,7 @@ typedef struct WASMComponentRuntimeFunc {
     WASMComponentRuntimeFuncKind kind;
     WASMComponentCanonType canon_tag;
     uint32 type_idx;
+    struct WASMComponentInstance *owner_instance;
     WASMComponentCanonOpts *canon_opts;
     WASMComponentCoreRuntimeRef core_func_ref;
     WASMComponentCoreRuntimeRef canon_memory_ref;
