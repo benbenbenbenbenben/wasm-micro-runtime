@@ -137,6 +137,8 @@ typedef struct WASMComponentRuntimeInstance {
     WASMComponentRuntimeResourceState *resource_state;
     uint32 owned_value_count;
     WASMComponentRuntimeValue *owned_values;
+    uint32 owned_core_instance_count;
+    WASMComponentCoreRuntimeInstance *owned_core_instances;
     uint32 owned_instance_count;
     struct WASMComponentRuntimeInstance *owned_instances;
     uint32 owned_component_count;

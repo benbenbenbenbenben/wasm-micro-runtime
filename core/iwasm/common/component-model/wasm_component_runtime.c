@@ -34,6 +34,9 @@ typedef struct WASMNestedComponentLocalBindings {
     uint32 core_module_count;
     uint32 core_module_capacity;
     wasm_module_t *core_modules;
+    uint32 core_instance_count;
+    uint32 core_instance_capacity;
+    WASMComponentCoreRuntimeInstance **core_instances;
     uint32 func_count;
     uint32 func_capacity;
     WASMComponentRuntimeRef *funcs;
@@ -276,6 +279,14 @@ destroy_component_runtime_instance(WASMComponentRuntimeInstance *component_inst)
         component_inst->owned_values = NULL;
     }
 
+    if (component_inst->owned_core_instances) {
+        for (i = 0; i < component_inst->owned_core_instance_count; i++)
+            destroy_component_core_instance(
+                &component_inst->owned_core_instances[i]);
+        wasm_runtime_free(component_inst->owned_core_instances);
+        component_inst->owned_core_instances = NULL;
+    }
+
     if (component_inst->owned_instances) {
         for (i = 0; i < component_inst->owned_instance_count; i++)
             destroy_component_runtime_instance(&component_inst->owned_instances[i]);
@@ -301,6 +312,7 @@ destroy_component_runtime_instance(WASMComponentRuntimeInstance *component_inst)
         component_inst->owned_components = NULL;
     }
     component_inst->owned_component_count = 0;
+    component_inst->owned_core_instance_count = 0;
     component_inst->owned_instance_count = 0;
     component_inst->owned_value_count = 0;
     component_inst->owns_exports = false;
@@ -418,8 +430,8 @@ alloc_component_runtime_array(void **buffer, uint32 count, uint32 elem_size,
 static bool
 alloc_nested_component_local_bindings(
     WASMNestedComponentLocalBindings *bindings, uint32 core_module_capacity,
-    uint32 func_capacity, uint32 value_capacity, uint32 instance_capacity,
-    uint32 component_capacity, char *error_buf,
+    uint32 core_instance_capacity, uint32 func_capacity, uint32 value_capacity,
+    uint32 instance_capacity, uint32 component_capacity, char *error_buf,
     uint32 error_buf_size)
 {
     memset(bindings, 0, sizeof(*bindings));
@@ -428,9 +440,13 @@ alloc_nested_component_local_bindings(
                                        core_module_capacity,
                                        sizeof(*bindings->core_modules),
                                        error_buf, error_buf_size)
+        || !alloc_component_runtime_array((void **)&bindings->core_instances,
+                                          core_instance_capacity,
+                                          sizeof(*bindings->core_instances),
+                                          error_buf, error_buf_size)
         || !alloc_component_runtime_array((void **)&bindings->funcs, func_capacity,
-                                         sizeof(*bindings->funcs), error_buf,
-                                         error_buf_size)
+                                          sizeof(*bindings->funcs), error_buf,
+                                          error_buf_size)
         || !alloc_component_runtime_array((void **)&bindings->values,
                                           value_capacity,
                                           sizeof(*bindings->values), error_buf,
@@ -446,6 +462,10 @@ alloc_nested_component_local_bindings(
         if (bindings->core_modules) {
             wasm_runtime_free(bindings->core_modules);
             bindings->core_modules = NULL;
+        }
+        if (bindings->core_instances) {
+            wasm_runtime_free(bindings->core_instances);
+            bindings->core_instances = NULL;
         }
         if (bindings->funcs) {
             wasm_runtime_free(bindings->funcs);
@@ -467,6 +487,7 @@ alloc_nested_component_local_bindings(
     }
 
     bindings->core_module_capacity = core_module_capacity;
+    bindings->core_instance_capacity = core_instance_capacity;
     bindings->func_capacity = func_capacity;
     bindings->value_capacity = value_capacity;
     bindings->instance_capacity = instance_capacity;
@@ -480,6 +501,10 @@ free_nested_component_local_bindings(WASMNestedComponentLocalBindings *bindings)
     if (bindings->core_modules) {
         wasm_runtime_free(bindings->core_modules);
         bindings->core_modules = NULL;
+    }
+    if (bindings->core_instances) {
+        wasm_runtime_free(bindings->core_instances);
+        bindings->core_instances = NULL;
     }
     if (bindings->funcs) {
         wasm_runtime_free(bindings->funcs);
@@ -500,6 +525,8 @@ free_nested_component_local_bindings(WASMNestedComponentLocalBindings *bindings)
 
     bindings->core_module_count = 0;
     bindings->core_module_capacity = 0;
+    bindings->core_instance_count = 0;
+    bindings->core_instance_capacity = 0;
     bindings->func_count = 0;
     bindings->func_capacity = 0;
     bindings->value_count = 0;
@@ -521,6 +548,21 @@ append_nested_component_local_core_module(
             "nested component local core module space overflow");
 
     bindings->core_modules[bindings->core_module_count++] = module;
+    return true;
+}
+
+static bool
+append_nested_component_local_core_instance(
+    WASMNestedComponentLocalBindings *bindings,
+    WASMComponentCoreRuntimeInstance *core_instance, char *error_buf,
+    uint32 error_buf_size)
+{
+    if (bindings->core_instance_count >= bindings->core_instance_capacity)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "nested component local core instance space overflow");
+
+    bindings->core_instances[bindings->core_instance_count++] = core_instance;
     return true;
 }
 
@@ -7140,6 +7182,54 @@ instantiate_component_core_instance(WASMComponentInstance *inst,
 }
 
 static bool
+instantiate_nested_component_core_instance(
+    WASMComponentRuntimeInstance *runtime_inst,
+    WASMNestedComponentLocalBindings *bindings,
+    const WASMComponentCoreInst *core_inst, char *error_buf,
+    uint32 error_buf_size)
+{
+    WASMComponentCoreRuntimeInstance *child_inst =
+        &runtime_inst->owned_core_instances[runtime_inst->owned_core_instance_count];
+    struct InstantiationArgs2 args;
+    wasm_module_t module;
+
+    memset(child_inst, 0, sizeof(*child_inst));
+
+    if (core_inst->instance_expression_tag
+        != WASM_COMP_INSTANCE_EXPRESSION_WITH_ARGS)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "nested component core instance expressions other than instantiate "
+            "are not supported yet");
+
+    if (core_inst->expression.with_args.idx >= bindings->core_module_count)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "nested component core module index %u is out of bounds",
+            core_inst->expression.with_args.idx);
+
+    module = bindings->core_modules[core_inst->expression.with_args.idx];
+    runtime_inst->owned_core_instance_count++;
+    wasm_runtime_instantiation_args_set_defaults(&args);
+    child_inst->module_inst = wasm_runtime_instantiate_internal(
+        (WASMModuleCommon *)module, NULL, NULL, &args, error_buf,
+        error_buf_size);
+    if (!child_inst->module_inst)
+        goto fail;
+
+    if (!append_nested_component_local_core_instance(bindings, child_inst, error_buf,
+                                                     error_buf_size))
+        goto fail;
+
+    return true;
+
+fail:
+    destroy_component_core_instance(child_inst);
+    runtime_inst->owned_core_instance_count--;
+    return false;
+}
+
+static bool
 resolve_component_alias_section(WASMComponentInstance *inst,
                                 const WASMComponentAliasSection *alias_section,
                                 char *error_buf, uint32 error_buf_size)
@@ -7388,21 +7478,24 @@ static bool
 count_nested_component_local_bindings(const WASMComponent *nested_component,
                                       uint32 *import_count,
                                       uint32 *core_module_count,
+                                      uint32 *core_instance_count,
                                       uint32 *func_count,
                                       uint32 *value_count,
                                       uint32 *instance_count,
                                       uint32 *component_count,
                                       uint32 *owned_value_count,
                                       uint32 *owned_component_count,
+                                      uint32 *owned_core_instance_count,
                                       uint32 *owned_instance_count,
                                       uint32 *export_count, char *error_buf,
                                       uint32 error_buf_size)
 {
     uint32 i;
 
-    *import_count = *core_module_count = *func_count = *value_count
-        = *instance_count = *component_count = *owned_value_count
-        = *owned_component_count = *owned_instance_count = *export_count = 0;
+    *import_count = *core_module_count = *core_instance_count = *func_count
+        = *value_count = *instance_count = *component_count
+        = *owned_value_count = *owned_component_count
+        = *owned_core_instance_count = *owned_instance_count = *export_count = 0;
 
     for (i = 0; i < nested_component->section_count; i++) {
         const WASMComponentSection *section = &nested_component->sections[i];
@@ -7462,10 +7555,11 @@ count_nested_component_local_bindings(const WASMComponent *nested_component,
                 (*core_module_count)++;
                 break;
             case WASM_COMP_SECTION_CORE_INSTANCE:
-                return set_component_runtime_error_fmt(
-                    error_buf, error_buf_size,
-                    "nested component core instance sections are not supported "
-                    "yet");
+                (*core_instance_count) +=
+                    section->parsed.core_instance_section->count;
+                (*owned_core_instance_count) +=
+                    section->parsed.core_instance_section->count;
+                break;
             case WASM_COMP_SECTION_CORE_TYPE:
                 return set_component_runtime_error_fmt(
                     error_buf, error_buf_size,
@@ -8366,8 +8460,8 @@ build_component_runtime_instance_from_component(
 {
     WASMNestedComponentLocalBindings bindings;
     uint32 i, import_index = 0, import_count = 0, owned_component_count = 0,
-              owned_value_count = 0, owned_instance_count = 0,
-              export_count = 0;
+              owned_value_count = 0, owned_core_instance_count = 0,
+              owned_instance_count = 0, export_count = 0;
 
     memset(&bindings, 0, sizeof(bindings));
     runtime_inst->resource_state = wasm_component_resource_state_create(
@@ -8378,10 +8472,12 @@ build_component_runtime_instance_from_component(
 
     if (!count_nested_component_local_bindings(
             component, &import_count, &bindings.core_module_capacity,
+            &bindings.core_instance_capacity,
             &bindings.func_capacity, &bindings.value_capacity,
             &bindings.instance_capacity, &bindings.component_capacity,
-            &owned_value_count, &owned_component_count, &owned_instance_count,
-            &export_count, error_buf, error_buf_size))
+            &owned_value_count, &owned_component_count,
+            &owned_core_instance_count, &owned_instance_count, &export_count,
+            error_buf, error_buf_size))
         return false;
 
     if (resolved_import_count != import_count)
@@ -8390,12 +8486,18 @@ build_component_runtime_instance_from_component(
             "nested component import binding count mismatch");
 
     if (!alloc_nested_component_local_bindings(
-            &bindings, bindings.core_module_capacity, bindings.func_capacity,
+            &bindings, bindings.core_module_capacity,
+            bindings.core_instance_capacity, bindings.func_capacity,
             bindings.value_capacity, bindings.instance_capacity,
             bindings.component_capacity, error_buf, error_buf_size)
         || !alloc_component_runtime_array(
             (void **)&runtime_inst->owned_values, owned_value_count,
             sizeof(*runtime_inst->owned_values), error_buf, error_buf_size)
+        || !alloc_component_runtime_array(
+            (void **)&runtime_inst->owned_core_instances,
+            owned_core_instance_count,
+            sizeof(*runtime_inst->owned_core_instances), error_buf,
+            error_buf_size)
         || !alloc_component_runtime_array(
             (void **)&runtime_inst->owned_components, owned_component_count,
             sizeof(*runtime_inst->owned_components), error_buf, error_buf_size)
@@ -8427,6 +8529,21 @@ build_component_runtime_instance_from_component(
                         error_buf, error_buf_size))
                     goto fail;
                 break;
+            case WASM_COMP_SECTION_CORE_INSTANCE:
+            {
+                uint32 j;
+                const WASMComponentCoreInstSection *core_inst_section =
+                    section->parsed.core_instance_section;
+
+                for (j = 0; j < core_inst_section->count; j++) {
+                    if (!instantiate_nested_component_core_instance(
+                            runtime_inst, &bindings,
+                            &core_inst_section->instances[j], error_buf,
+                            error_buf_size))
+                        goto fail;
+                }
+                break;
+            }
             case WASM_COMP_SECTION_COMPONENT:
                 if (!append_nested_component_definition(
                         runtime_inst, &bindings, section->parsed.component,

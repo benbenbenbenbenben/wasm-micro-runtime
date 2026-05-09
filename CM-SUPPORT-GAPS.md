@@ -10,7 +10,8 @@ The short version is:
 
 The main remaining gaps are now centered on:
 
-- Canonical ABI beyond the current scalar / UTF-8 string / `list<u8>` / scalar-leaf tuple-record slices
+- Canonical ABI beyond the current scalar / UTF-8 string / `list<u8>` /
+  supported tuple-record slices
 - canon-lower / imported component-function lowering paths
 - broader composite component values and memory-backed leaves inside composites
 - operational resource semantics
@@ -121,7 +122,8 @@ What works today:
 - memory / realloc / post-return validation and use for supported UTF-8 string lifts
 - host-provided component-function imports for scalar / UTF-8 string / `list<u8>` signatures
 - host-provided component-function imports for tuple/record parameters with scalar, UTF-8 string, and nested `list<u8>` leaves
-- host-provided component-function imports for tuple/record results with scalar leaves
+- host-provided component-function imports for tuple/record results with scalar,
+  UTF-8 string, and nested `list<u8>` leaves
 
 Current supported execution envelope is intentionally narrow:
 
@@ -197,7 +199,9 @@ This is a real runtime substrate, but not yet full resource semantics.
 - top-level and nested value sections
 - top-level and nested start execution for the current supported public-value
   subset, still capped at a single result
-- top-level host function imports across scalar / UTF-8 string / `list<u8>` / supported tuple-record parameter slices with scalar, UTF-8 string, and nested `list<u8>` leaves, plus scalar-leaf tuple-record results
+- top-level host function imports across scalar / UTF-8 string / `list<u8>` /
+  supported tuple-record parameter and result slices with scalar, UTF-8 string,
+  and nested `list<u8>` leaves
 - resource-state and owned-handle cleanup foundations
 
 ## 2. What is still missing for full component-model support
@@ -223,7 +227,8 @@ Major Canonical ABI gaps remain:
 - no list marshalling beyond UTF-8 strings, top-level `list<u8>`, and nested `list<u8>` leaves in exported tuple/record values and host-import tuple/record parameters
 - no variant / flags / enum / option / result marshalling
 - no non-string memory-backed leaves inside tuple/record Canonical ABI values beyond nested `list<u8>` leaves for exported canon-lift calls and host-import tuple/record parameters
-- no broader composite flattening/lifting rules beyond scalar-leaf tuple/record support
+- no broader composite flattening/lifting rules beyond the current
+  string/`list<u8>` tuple-record subset
 - no non-UTF-8 string encodings (`utf16`, `latin1+utf16`)
 - no `memory64` memory-backed Canonical ABI support
 - no `error-context` value support
@@ -242,7 +247,8 @@ Current limitations include:
 - `wasm_runtime_call_component(...)` remains scalar-only even for nested handles
 - `wasm_runtime_call_component_values(...)` still only supports the current string / `list<u8>` / limited tuple-record subset
 - top-level import binding is limited to existing runtime handles / public values and the current supported host callback subset, not arbitrary host-native lowered adapters
-- host-import composite results are limited to tuple/record shapes whose leaves are all scalar
+- host-import tuple/record values are still limited to the current scalar /
+  UTF-8 string / nested `list<u8>` subset
 - there is still no public resource import/export contract comparable to the current function/value/instance/component/core-module surface
 
 ## 5. Broader component values are still missing
@@ -254,7 +260,8 @@ What works today:
 - primitive scalar values
 - raw borrowed/owned value payload storage
 - opaque defined-value payloads for UTF-8 strings and top-level `list<u8>` calls
-- opaque defined-value payloads for tuple/record composites in the currently supported scalar-leaf cases
+- opaque defined-value payloads for tuple/record composites in the currently
+  supported scalar / UTF-8 string / nested `list<u8>` cases
 
 What is still missing:
 
@@ -276,15 +283,14 @@ Start sections are no longer absent, but the implementation is still limited.
 
 Supported today:
 
-- top-level scalar starts
-- nested scalar starts
-- materializing a single scalar result as a component value
+- top-level start execution for the current supported public-value subset
+- nested start execution for the current supported public-value subset
+- materializing at most one start result as a component value
 
 Still missing:
 
-- string/composite start arguments and results
 - multi-result start handling
-- broader Canonical ABI-backed start execution
+- Canonical ABI beyond the current supported public-value subset
 - the more complete execution space needed for start-heavy real-world components
 
 ## 7. Resources are structural/bookkeeping-heavy, not operational
@@ -317,13 +323,16 @@ Nested components now support:
 
 - nested local `core module` sections
 - export/re-export of those nested core modules through nested component instances
+- nested local `core instance` sections in instantiate/`with_args` form
 
 Nested components still reject:
 
-- nested `core instance` sections
+- nested inline/`without_args` `core instance` expressions
 - nested `core type` sections
 
-The runtime can now thread nested local core-module handles through component graphs, but it still does **not** construct a full nested core runtime.
+The runtime can now thread nested local core-module handles and construct nested
+local core instances, but it still does **not** construct a full nested core
+runtime.
 
 ## 9. Remaining spec limitations still apply
 
