@@ -2231,7 +2231,7 @@ validate_lowered_import_signature(
         wasm_runtime_clear_exception((WASMModuleInstanceCommon *)component_inst);
         if (!lookup_component_canon_lift_value_type(
                 component, component_type->results->results, "result", 0, true,
-                false, false, true, &type_info, component_inst))
+                false, true, true, &type_info, component_inst))
             return set_component_runtime_error_from_exception(
                 component_inst, error_buf, error_buf_size,
                 "component canon lower result type resolution failed");
@@ -2271,7 +2271,8 @@ validate_lowered_import_signature(
             needs_memory = true;
             needs_string = true;
         }
-        else if (type_info.kind == WASM_COMP_CANON_LIFT_VALUE_LIST_SCALAR) {
+        else if (type_info.kind == WASM_COMP_CANON_LIFT_VALUE_LIST_SCALAR
+                 || type_info.kind == WASM_COMP_CANON_LIFT_VALUE_LIST_STRING) {
             if (core_param_index + 1 != expected_type->param_count
                 || expected_type->result_count != 0)
                 return set_component_runtime_error_fmt(
@@ -2288,13 +2289,16 @@ validate_lowered_import_signature(
                     "core import result 0 does not match the lowered component "
                     "function signature");
             needs_memory = true;
+            if (type_info.kind == WASM_COMP_CANON_LIFT_VALUE_LIST_STRING)
+                needs_string = true;
         }
         else {
             return set_component_runtime_error_fmt(
                 error_buf, error_buf_size,
                 "component canon lower direct core-call bindings currently "
-                "support only scalar or top-level string/list<scalar> results "
-                "and scalar, string, list<scalar>, or list<string> parameters");
+                "support only scalar or top-level string/list<scalar>/list<string> "
+                "results and scalar, string, list<scalar>, or list<string> "
+                "parameters");
         }
     }
     else if (core_param_index != expected_type->param_count
@@ -2656,7 +2660,7 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
         else {
             if (!lookup_component_canon_lift_value_type(
                     component, component_type->results->results, "result", 0, true,
-                    false, false, true, &result_type_info, component_inst)) {
+                    false, true, true, &result_type_info, component_inst)) {
                 const char *component_exception = wasm_runtime_get_exception(
                     (WASMModuleInstanceCommon *)component_inst);
                 if (call_args != stack_args)
@@ -2673,7 +2677,8 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
 
             expects_memory_result_ptr =
                 result_type_info.kind == WASM_COMP_CANON_LIFT_VALUE_STRING
-                || result_type_info.kind == WASM_COMP_CANON_LIFT_VALUE_LIST_SCALAR;
+                || result_type_info.kind == WASM_COMP_CANON_LIFT_VALUE_LIST_SCALAR
+                || result_type_info.kind == WASM_COMP_CANON_LIFT_VALUE_LIST_STRING;
         }
     }
 
@@ -3248,7 +3253,9 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
     }
     else if (has_result_type
              && (result_type_info.kind == WASM_COMP_CANON_LIFT_VALUE_STRING
-                  || result_type_info.kind == WASM_COMP_CANON_LIFT_VALUE_LIST_SCALAR)) {
+                  || result_type_info.kind == WASM_COMP_CANON_LIFT_VALUE_LIST_SCALAR
+                  || result_type_info.kind
+                         == WASM_COMP_CANON_LIFT_VALUE_LIST_STRING)) {
         const uint8 *result_bytes = NULL;
         uint32 byte_count = 0;
         uint32 result_length;
@@ -3257,6 +3264,8 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
         uint8 *result_area_bytes;
         const bool is_string_result =
             result_type_info.kind == WASM_COMP_CANON_LIFT_VALUE_STRING;
+        const bool is_list_string_result =
+            result_type_info.kind == WASM_COMP_CANON_LIFT_VALUE_LIST_STRING;
 
         if ((!result_shape.is_primitive && result_shape.def_type
              && (result_shape.def_type->tag == WASM_COMP_DEF_VAL_RECORD
@@ -3269,6 +3278,9 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
                 is_string_result
                     ? "component lowered core-call trampoline string results "
                       "must use an i32 return-area pointer parameter"
+                    : is_list_string_result
+                          ? "component lowered core-call trampoline list<string> "
+                            "results must use an i32 return-area pointer parameter"
                     : "component lowered core-call trampoline list<scalar> "
                       "results must use an i32 return-area pointer parameter");
             return;
@@ -3311,6 +3323,25 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
             }
             byte_count = result_length;
         }
+        else if (is_list_string_result) {
+            if (lower_string_encoding != WASM_COMP_RUNTIME_STRING_ENCODING_UTF8
+                || !decode_component_public_list_string_value(
+                    component_inst, &stack_results[0], &result_type_info, "result",
+                    0, &result_bytes, &byte_count, &result_length)) {
+                const char *component_exception = wasm_runtime_get_exception(
+                    (WASMModuleInstanceCommon *)component_inst);
+                wasm_component_value_destroy(&stack_results[0]);
+                wasm_runtime_set_exception(caller_module_inst,
+                                           component_exception
+                                               ? component_exception
+                                               : "component lowered core-call "
+                                                 "trampoline could not decode the "
+                                                 "component result");
+                wasm_runtime_clear_exception(
+                    (WASMModuleInstanceCommon *)component_inst);
+                return;
+            }
+        }
         else {
             uint32 element_size =
                 component_scalar_prim_byte_size(result_type_info.prim_type);
@@ -3329,7 +3360,99 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
 
         result_area_bytes =
             wasm_runtime_addr_app_to_native(caller_module_inst, result_area_ptr);
-        if (byte_count > 0) {
+        if (is_list_string_result) {
+            const uint8 *cursor = result_bytes;
+            const uint8 *end = result_bytes + byte_count;
+            uint64 decoded_count = 0;
+            uint32 table_byte_count = 0;
+            uint32 string_payload_bytes = 0;
+            uint32 payload_base;
+            size_t count_len = 0;
+            bh_leb_read_status_t status;
+
+            status =
+                bh_leb_read(cursor, end, 32, false, &decoded_count, &count_len);
+            if (status != BH_LEB_READ_SUCCESS || decoded_count != result_length
+                || count_len > byte_count
+                || !compute_list_scalar_byte_count(result_length, 8,
+                                                   &table_byte_count)) {
+                wasm_component_value_destroy(&stack_results[0]);
+                wasm_runtime_set_exception(
+                    caller_module_inst,
+                    "component lowered core-call trampoline list<string> result "
+                    "is malformed");
+                return;
+            }
+
+            cursor += count_len;
+            for (uint32 element_index = 0; element_index < result_length;
+                 element_index++) {
+                uint64 string_len = 0;
+                size_t len_len = 0;
+
+                status = bh_leb_read(cursor, end, 32, false, &string_len, &len_len);
+                if (status != BH_LEB_READ_SUCCESS || string_len > UINT32_MAX
+                    || len_len > (size_t)(end - cursor)
+                    || string_len > (uint64)(end - cursor - len_len)
+                    || string_payload_bytes > UINT32_MAX - (uint32)string_len) {
+                    wasm_component_value_destroy(&stack_results[0]);
+                    wasm_runtime_set_exception(
+                        caller_module_inst,
+                        "component lowered core-call trampoline list<string> "
+                        "result is malformed");
+                    return;
+                }
+                cursor += len_len + (uint32)string_len;
+                string_payload_bytes += (uint32)string_len;
+            }
+
+            payload_base = result_area_ptr + 8;
+            if (result_area_ptr > UINT32_MAX - 8
+                || payload_base > UINT32_MAX - table_byte_count
+                || payload_base + table_byte_count > UINT32_MAX - string_payload_bytes
+                || !wasm_runtime_validate_app_addr(caller_module_inst, payload_base,
+                                                  table_byte_count
+                                                      + string_payload_bytes)) {
+                wasm_component_value_destroy(&stack_results[0]);
+                wasm_runtime_set_exception(caller_module_inst,
+                                           "out of bounds memory access");
+                return;
+            }
+
+            if (table_byte_count > 0) {
+                uint8 *payload_bytes = wasm_runtime_addr_app_to_native(
+                    caller_module_inst, payload_base);
+                uint32 string_cursor = payload_base + table_byte_count;
+
+                cursor = result_bytes + count_len;
+                payload_ptr = payload_base;
+                for (uint32 element_index = 0; element_index < result_length;
+                     element_index++) {
+                    uint64 string_len = 0;
+                    size_t len_len = 0;
+                    uint32 string_ptr = 0;
+                    uint32 string_len32;
+
+                    (void)bh_leb_read(cursor, end, 32, false, &string_len, &len_len);
+                    cursor += len_len;
+                    string_len32 = (uint32)string_len;
+                    if (string_len32 > 0) {
+                        string_ptr = string_cursor;
+                        memcpy(wasm_runtime_addr_app_to_native(caller_module_inst,
+                                                               string_ptr),
+                               cursor, string_len32);
+                        string_cursor += string_len32;
+                    }
+
+                    bh_memcpy_s(payload_bytes + ((uint64)element_index * 8),
+                                sizeof(uint32), &string_ptr, sizeof(uint32));
+                    bh_memcpy_s(payload_bytes + ((uint64)element_index * 8) + 4,
+                                sizeof(uint32), &string_len32, sizeof(uint32));
+                    cursor += string_len32;
+                }
+            }
+        }
+        else if (byte_count > 0) {
             uint8 *payload_bytes;
 
             if (result_area_ptr > UINT32_MAX - 8
@@ -8932,7 +9055,7 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
             else {
                 if (!lookup_component_canon_lift_value_type(
                         component, component_type->results->results,
-                        "result", 0, true, false, false, true, &result_info, inst)) {
+                        "result", 0, true, false, true, true, &result_info, inst)) {
                     wasm_component_value_destroy(&callback_results[0]);
                     return false;
                 }
