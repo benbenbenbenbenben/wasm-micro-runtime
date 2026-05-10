@@ -3197,12 +3197,13 @@ append_component_list_scalar_payload(std::vector<uint8_t> *payload,
 }
 
 static int32_t
-append_component_record_string_list_value_type(
-    WASMComponentModule *component_module, bool fixed_length_list,
+append_component_record_string_list_value_type_with_element(
+    WASMComponentModule *component_module,
+    WASMComponentPrimValType list_element_type, bool fixed_length_list,
     uint32_t fixed_len, const char *rhs_field_name)
 {
     const int32_t list_u8_type_idx = append_component_list_type(
-        component_module, WASM_COMP_PRIMVAL_U8, fixed_length_list, fixed_len);
+        component_module, list_element_type, fixed_length_list, fixed_len);
     if (list_u8_type_idx < 0) {
         return -1;
     }
@@ -3220,6 +3221,16 @@ append_component_record_string_list_value_type(
         { { "lhs", make_component_primitive_value_type(WASM_COMP_PRIMVAL_S32) },
           { rhs_field_name ? rhs_field_name : "rhs",
             make_component_type_index_value_type((uint32_t)inner_tuple_type_idx) } });
+}
+
+static int32_t
+append_component_record_string_list_value_type(
+    WASMComponentModule *component_module, bool fixed_length_list,
+    uint32_t fixed_len, const char *rhs_field_name)
+{
+    return append_component_record_string_list_value_type_with_element(
+        component_module, WASM_COMP_PRIMVAL_U8, fixed_length_list, fixed_len,
+        rhs_field_name);
 }
 
 static bool
@@ -3390,6 +3401,68 @@ append_component_record_string_list_payload(std::vector<uint8_t> *payload,
     append_component_s32_payload(payload, lhs);
     append_component_string_payload(payload, rhs_string);
     append_component_list_u8_payload(payload, rhs_bytes, rhs_size);
+}
+
+static void
+append_component_record_string_list_string_payload(
+    std::vector<uint8_t> *payload, int32_t lhs, const std::string &rhs_string,
+    const std::vector<std::string> &rhs_values)
+{
+    append_component_s32_payload(payload, lhs);
+    append_component_string_payload(payload, rhs_string);
+    append_component_u64_payload(payload, (uint32_t)rhs_values.size());
+    for (const auto &value : rhs_values) {
+        append_component_string_payload(payload, value);
+    }
+}
+
+static bool
+write_list_string_caller_memory(WASMModuleInstanceCommon *module_inst,
+                                uint32_t list_ptr,
+                                const std::vector<std::string> &values,
+                                uint32_t payload_ptr)
+{
+    uint32_t table_size = (uint32_t)values.size() * 8;
+    uint32_t string_cursor = payload_ptr;
+
+    if ((table_size > 0
+         && !wasm_runtime_validate_app_addr(module_inst, list_ptr, table_size))
+        || (payload_ptr < list_ptr + table_size)) {
+        return false;
+    }
+
+    for (uint32_t i = 0; i < values.size(); i++) {
+        const std::string &value = values[i];
+        uint32_t string_len = (uint32_t)value.size();
+        uint32_t string_ptr = string_len > 0 ? string_cursor : 0;
+
+        if (string_len > 0
+            && !wasm_runtime_validate_app_addr(module_inst, string_ptr,
+                                               string_len)) {
+            return false;
+        }
+
+        auto *entry_bytes = (uint8_t *)wasm_runtime_addr_app_to_native(
+            module_inst, list_ptr + (i * 8));
+        if (!entry_bytes) {
+            return false;
+        }
+
+        bh_memcpy_s(entry_bytes, sizeof(uint32_t), &string_ptr, sizeof(uint32_t));
+        bh_memcpy_s(entry_bytes + 4, sizeof(uint32_t), &string_len,
+                    sizeof(uint32_t));
+        if (string_len > 0) {
+            auto *string_bytes = (uint8_t *)wasm_runtime_addr_app_to_native(
+                module_inst, string_ptr);
+            if (!string_bytes) {
+                return false;
+            }
+            memcpy(string_bytes, value.data(), string_len);
+            string_cursor += string_len;
+        }
+    }
+
+    return true;
 }
 
 static bool
@@ -14054,6 +14127,675 @@ TEST_F(BinaryParserTest,
 }
 
 TEST_F(BinaryParserTest,
+       TestCoreWasmCanCallLoweredMixedCompositeListStringParamComponentFunctionDirectly)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] =
+        "core-wasm-calls-lowered-mixed-composite-list-string-param";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    ASSERT_TRUE(append_top_level_host_function_import_sections(
+        (WASMComponentModule *)module, "host-mixed", "host-instance",
+        "forwarded"));
+    ASSERT_TRUE(append_top_level_function_export_alias(
+        (WASMComponentModule *)module, "host-instance", "forwarded",
+        "aliased-host-mixed"));
+    const int32_t host_type_idx = append_component_scalar_func_type(
+        (WASMComponentModule *)module, { WASM_COMP_PRIMVAL_S32 },
+        WASM_COMP_PRIMVAL_S32);
+    ASSERT_GE(host_type_idx, 0);
+    const int32_t record_type_idx =
+        append_component_record_string_list_value_type_with_element(
+            (WASMComponentModule *)module, WASM_COMP_PRIMVAL_STRING, false, 0,
+            "rhs");
+    ASSERT_GE(record_type_idx, 0);
+    ASSERT_TRUE(configure_component_func_param_type_idx(
+        (WASMComponentModule *)module, (uint32_t)host_type_idx, 0,
+        (uint32_t)record_type_idx, true));
+    auto *import_section = find_component_section((WASMComponentModule *)module,
+                                                  WASM_COMP_SECTION_IMPORTS);
+    ASSERT_NE(import_section, nullptr);
+    ASSERT_NE(import_section->parsed.import_section, nullptr);
+    ASSERT_EQ(import_section->parsed.import_section->count, 1u);
+    ASSERT_NE(import_section->parsed.import_section->imports[0].extern_desc,
+              nullptr);
+    import_section->parsed.import_section->imports[0]
+        .extern_desc->extern_desc.func.type_idx = (uint32_t)host_type_idx;
+
+    const int32_t source_func_idx = find_top_level_export_sort_index(
+        (WASMComponentModule *)module, "aliased-host-mixed", WASM_COMP_SORT_FUNC);
+    ASSERT_GE(source_func_idx, 0);
+    ASSERT_TRUE(append_top_level_lowered_core_caller_sections_for_func(
+        (WASMComponentModule *)module, (uint32_t)source_func_idx,
+        "lowered_core_mixed_list_param_caller.wasm", "source"));
+    WASMComponentCanon *lower_canon =
+        find_first_canon_lower((WASMComponentModule *)module);
+    ASSERT_NE(lower_canon, nullptr);
+    ASSERT_TRUE(ensure_canon_lower_memory_opt(lower_canon, 0));
+    ASSERT_TRUE(ensure_canon_lower_string_utf8_opt(lower_canon));
+
+    const int32_t wrapper_type_idx = append_component_scalar_func_type(
+        (WASMComponentModule *)module, {}, WASM_COMP_PRIMVAL_S32);
+    ASSERT_GE(wrapper_type_idx, 0);
+    WASMComponentFuncType *wrapper_type = lookup_local_component_func_type(
+        (WASMComponentModule *)module, (uint32_t)wrapper_type_idx);
+    ASSERT_NE(wrapper_type, nullptr);
+    if (!wrapper_type->params) {
+        wrapper_type->params = (WASMComponentParamList *)wasm_runtime_malloc(
+            sizeof(WASMComponentParamList));
+        ASSERT_NE(wrapper_type->params, nullptr);
+        memset(wrapper_type->params, 0, sizeof(WASMComponentParamList));
+    }
+    ASSERT_TRUE(append_top_level_core_export_lift_sections(
+        (WASMComponentModule *)module,
+        count_top_level_core_instance_entries(&((WASMComponentModule *)module)
+                                                   ->component)
+            - 1,
+        "call-source-const", (uint32_t)wrapper_type_idx,
+        "core-caller-host-mixed-list-string-param"));
+
+    HostCompositeCallState call_state = {};
+    append_component_record_string_list_string_payload(
+        &call_state.expected_arg, 37, "abcde", { "x", "y", "hey" });
+    call_state.result_value = 45;
+    wasm_component_func_import_binding_t func_import = {};
+    func_import.name = "host-mixed";
+    func_import.callback = host_composite_param_callback;
+    func_import.user_data = &call_state;
+
+    struct InstantiationArgs2 *inst_args = nullptr;
+    ASSERT_TRUE(wasm_runtime_instantiation_args_create(&inst_args));
+    wasm_runtime_instantiation_args_set_default_stack_size(inst_args,
+                                                           helper->stack_size);
+    wasm_runtime_instantiation_args_set_host_managed_heap_size(inst_args,
+                                                               helper->heap_size);
+    wasm_runtime_instantiation_args_set_wasi_stdio(inst_args, 0, 1, 2);
+    wasm_runtime_instantiation_args_set_wasi_dir(inst_args, nullptr, 0, nullptr,
+                                                 0);
+    wasm_runtime_instantiation_args_set_component_func_imports(inst_args,
+                                                               &func_import, 1);
+
+    wasm_module_inst_t module_inst = wasm_runtime_instantiate_ex2(
+        module, inst_args, helper->error_buf,
+        (uint32_t)sizeof(helper->error_buf));
+    wasm_runtime_instantiation_args_destroy(inst_args);
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    auto *component_inst = (WASMComponentInstance *)module_inst;
+    ASSERT_GE(component_inst->core_instance_count, 2u);
+    auto *child_core_inst = (WASMModuleInstance *)
+        component_inst->core_instances[component_inst->core_instance_count - 1]
+            .module_inst;
+    ASSERT_NE(child_core_inst, nullptr);
+    auto *child_core_common = (WASMModuleInstanceCommon *)child_core_inst;
+    ASSERT_TRUE(write_list_string_caller_memory(child_core_common, 8,
+                                                { "x", "y", "hey" }, 32));
+
+    wasm_component_func_t func = wasm_runtime_lookup_component_function(
+        module_inst, "core-caller-host-mixed-list-string-param");
+    ASSERT_NE(func, nullptr);
+
+    wasm_val_t results[1] = {};
+    ASSERT_TRUE(wasm_runtime_call_component(module_inst, func, 1, results, 0,
+                                            nullptr))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(call_state.call_count, 1);
+    ASSERT_EQ(results[0].kind, WASM_I32);
+    ASSERT_EQ(results[0].of.i32, 45);
+
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestCoreWasmLoweredMixedCompositeListStringParamDirectCallRejectsInvalidUtf8)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] =
+        "core-wasm-calls-lowered-mixed-composite-list-string-param-invalid-utf8";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    ASSERT_TRUE(append_top_level_host_function_import_sections(
+        (WASMComponentModule *)module, "host-mixed", "host-instance",
+        "forwarded"));
+    ASSERT_TRUE(append_top_level_function_export_alias(
+        (WASMComponentModule *)module, "host-instance", "forwarded",
+        "aliased-host-mixed"));
+    const int32_t host_type_idx = append_component_scalar_func_type(
+        (WASMComponentModule *)module, { WASM_COMP_PRIMVAL_S32 },
+        WASM_COMP_PRIMVAL_S32);
+    ASSERT_GE(host_type_idx, 0);
+    const int32_t record_type_idx =
+        append_component_record_string_list_value_type_with_element(
+            (WASMComponentModule *)module, WASM_COMP_PRIMVAL_STRING, false, 0,
+            "rhs");
+    ASSERT_GE(record_type_idx, 0);
+    ASSERT_TRUE(configure_component_func_param_type_idx(
+        (WASMComponentModule *)module, (uint32_t)host_type_idx, 0,
+        (uint32_t)record_type_idx, true));
+    auto *import_section = find_component_section((WASMComponentModule *)module,
+                                                  WASM_COMP_SECTION_IMPORTS);
+    ASSERT_NE(import_section, nullptr);
+    ASSERT_NE(import_section->parsed.import_section, nullptr);
+    ASSERT_EQ(import_section->parsed.import_section->count, 1u);
+    ASSERT_NE(import_section->parsed.import_section->imports[0].extern_desc,
+              nullptr);
+    import_section->parsed.import_section->imports[0]
+        .extern_desc->extern_desc.func.type_idx = (uint32_t)host_type_idx;
+
+    const int32_t source_func_idx = find_top_level_export_sort_index(
+        (WASMComponentModule *)module, "aliased-host-mixed", WASM_COMP_SORT_FUNC);
+    ASSERT_GE(source_func_idx, 0);
+    ASSERT_TRUE(append_top_level_lowered_core_caller_sections_for_func(
+        (WASMComponentModule *)module, (uint32_t)source_func_idx,
+        "lowered_core_mixed_list_param_caller.wasm", "source"));
+    WASMComponentCanon *lower_canon =
+        find_first_canon_lower((WASMComponentModule *)module);
+    ASSERT_NE(lower_canon, nullptr);
+    ASSERT_TRUE(ensure_canon_lower_memory_opt(lower_canon, 0));
+    ASSERT_TRUE(ensure_canon_lower_string_utf8_opt(lower_canon));
+
+    const int32_t wrapper_type_idx = append_component_scalar_func_type(
+        (WASMComponentModule *)module, {}, WASM_COMP_PRIMVAL_S32);
+    ASSERT_GE(wrapper_type_idx, 0);
+    WASMComponentFuncType *wrapper_type = lookup_local_component_func_type(
+        (WASMComponentModule *)module, (uint32_t)wrapper_type_idx);
+    ASSERT_NE(wrapper_type, nullptr);
+    if (!wrapper_type->params) {
+        wrapper_type->params = (WASMComponentParamList *)wasm_runtime_malloc(
+            sizeof(WASMComponentParamList));
+        ASSERT_NE(wrapper_type->params, nullptr);
+        memset(wrapper_type->params, 0, sizeof(WASMComponentParamList));
+    }
+    ASSERT_TRUE(append_top_level_core_export_lift_sections(
+        (WASMComponentModule *)module,
+        count_top_level_core_instance_entries(&((WASMComponentModule *)module)
+                                                   ->component)
+            - 1,
+        "call-source-const", (uint32_t)wrapper_type_idx,
+        "core-caller-host-mixed-list-string-param"));
+
+    HostCompositeCallState call_state = {};
+    append_component_record_string_list_string_payload(
+        &call_state.expected_arg, 37, "abcde", { "x", "y", "hey" });
+    call_state.result_value = 45;
+    wasm_component_func_import_binding_t func_import = {};
+    func_import.name = "host-mixed";
+    func_import.callback = host_composite_param_callback;
+    func_import.user_data = &call_state;
+
+    struct InstantiationArgs2 *inst_args = nullptr;
+    ASSERT_TRUE(wasm_runtime_instantiation_args_create(&inst_args));
+    wasm_runtime_instantiation_args_set_default_stack_size(inst_args,
+                                                           helper->stack_size);
+    wasm_runtime_instantiation_args_set_host_managed_heap_size(inst_args,
+                                                               helper->heap_size);
+    wasm_runtime_instantiation_args_set_wasi_stdio(inst_args, 0, 1, 2);
+    wasm_runtime_instantiation_args_set_wasi_dir(inst_args, nullptr, 0, nullptr,
+                                                 0);
+    wasm_runtime_instantiation_args_set_component_func_imports(inst_args,
+                                                               &func_import, 1);
+
+    wasm_module_inst_t module_inst = wasm_runtime_instantiate_ex2(
+        module, inst_args, helper->error_buf,
+        (uint32_t)sizeof(helper->error_buf));
+    wasm_runtime_instantiation_args_destroy(inst_args);
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    auto *component_inst = (WASMComponentInstance *)module_inst;
+    ASSERT_GE(component_inst->core_instance_count, 2u);
+    auto *child_core_inst = (WASMModuleInstance *)
+        component_inst->core_instances[component_inst->core_instance_count - 1]
+            .module_inst;
+    ASSERT_NE(child_core_inst, nullptr);
+    auto *child_core_common = (WASMModuleInstanceCommon *)child_core_inst;
+    ASSERT_TRUE(write_list_string_caller_memory(child_core_common, 8,
+                                                { "x", "y", "hey" }, 32));
+    ASSERT_TRUE(wasm_runtime_validate_app_addr(child_core_common, 32, 1));
+    auto *invalid_byte =
+        (uint8_t *)wasm_runtime_addr_app_to_native(child_core_common, 32);
+    ASSERT_NE(invalid_byte, nullptr);
+    *invalid_byte = 0xFF;
+
+    wasm_component_func_t func = wasm_runtime_lookup_component_function(
+        module_inst, "core-caller-host-mixed-list-string-param");
+    ASSERT_NE(func, nullptr);
+
+    wasm_val_t results[1] = {};
+    ASSERT_FALSE(wasm_runtime_call_component(module_inst, func, 1, results, 0,
+                                             nullptr));
+    ASSERT_NE(strstr(wasm_runtime_get_exception(module_inst), "valid UTF-8"),
+              nullptr);
+    ASSERT_EQ(call_state.call_count, 0);
+
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestCoreWasmLoweredMixedCompositeListStringParamDirectCallRequiresLowerMemory)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] =
+        "core-wasm-calls-lowered-mixed-composite-list-string-param-no-memory";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    ASSERT_TRUE(append_top_level_host_function_import_sections(
+        (WASMComponentModule *)module, "host-mixed", "host-instance",
+        "forwarded"));
+    ASSERT_TRUE(append_top_level_function_export_alias(
+        (WASMComponentModule *)module, "host-instance", "forwarded",
+        "aliased-host-mixed"));
+    const int32_t host_type_idx = append_component_scalar_func_type(
+        (WASMComponentModule *)module, { WASM_COMP_PRIMVAL_S32 },
+        WASM_COMP_PRIMVAL_S32);
+    ASSERT_GE(host_type_idx, 0);
+    const int32_t record_type_idx =
+        append_component_record_string_list_value_type_with_element(
+            (WASMComponentModule *)module, WASM_COMP_PRIMVAL_STRING, false, 0,
+            "rhs");
+    ASSERT_GE(record_type_idx, 0);
+    ASSERT_TRUE(configure_component_func_param_type_idx(
+        (WASMComponentModule *)module, (uint32_t)host_type_idx, 0,
+        (uint32_t)record_type_idx, true));
+    auto *import_section = find_component_section((WASMComponentModule *)module,
+                                                  WASM_COMP_SECTION_IMPORTS);
+    ASSERT_NE(import_section, nullptr);
+    ASSERT_NE(import_section->parsed.import_section, nullptr);
+    ASSERT_EQ(import_section->parsed.import_section->count, 1u);
+    ASSERT_NE(import_section->parsed.import_section->imports[0].extern_desc,
+              nullptr);
+    import_section->parsed.import_section->imports[0]
+        .extern_desc->extern_desc.func.type_idx = (uint32_t)host_type_idx;
+
+    const int32_t source_func_idx = find_top_level_export_sort_index(
+        (WASMComponentModule *)module, "aliased-host-mixed", WASM_COMP_SORT_FUNC);
+    ASSERT_GE(source_func_idx, 0);
+    ASSERT_TRUE(append_top_level_lowered_core_caller_sections_for_func(
+        (WASMComponentModule *)module, (uint32_t)source_func_idx,
+        "lowered_core_mixed_list_param_caller.wasm", "source"));
+    WASMComponentCanon *lower_canon =
+        find_first_canon_lower((WASMComponentModule *)module);
+    ASSERT_NE(lower_canon, nullptr);
+    ASSERT_TRUE(ensure_canon_lower_string_utf8_opt(lower_canon));
+
+    HostCompositeCallState call_state = {};
+    append_component_record_string_list_string_payload(
+        &call_state.expected_arg, 37, "abcde", { "x", "y", "hey" });
+    call_state.result_value = 45;
+    wasm_component_func_import_binding_t func_import = {};
+    func_import.name = "host-mixed";
+    func_import.callback = host_composite_param_callback;
+    func_import.user_data = &call_state;
+
+    struct InstantiationArgs2 *inst_args = nullptr;
+    ASSERT_TRUE(wasm_runtime_instantiation_args_create(&inst_args));
+    wasm_runtime_instantiation_args_set_default_stack_size(inst_args,
+                                                           helper->stack_size);
+    wasm_runtime_instantiation_args_set_host_managed_heap_size(inst_args,
+                                                               helper->heap_size);
+    wasm_runtime_instantiation_args_set_wasi_stdio(inst_args, 0, 1, 2);
+    wasm_runtime_instantiation_args_set_wasi_dir(inst_args, nullptr, 0, nullptr,
+                                                 0);
+    wasm_runtime_instantiation_args_set_component_func_imports(inst_args,
+                                                               &func_import, 1);
+
+    wasm_module_inst_t module_inst = wasm_runtime_instantiate_ex2(
+        module, inst_args, helper->error_buf,
+        (uint32_t)sizeof(helper->error_buf));
+    wasm_runtime_instantiation_args_destroy(inst_args);
+    ASSERT_EQ(module_inst, nullptr);
+    ASSERT_NE(strstr(helper->error_buf, "require memory for string Canonical"),
+              nullptr);
+
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestCoreWasmCanCallLoweredMixedCompositeListStringResultComponentFunctionDirectly)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] =
+        "core-wasm-calls-lowered-mixed-composite-list-string-result";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    ASSERT_TRUE(append_top_level_host_function_import_sections(
+        (WASMComponentModule *)module, "host-result", "host-instance",
+        "forwarded"));
+    ASSERT_TRUE(append_top_level_function_export_alias(
+        (WASMComponentModule *)module, "host-instance", "forwarded",
+        "aliased-host-result"));
+    const int32_t host_type_idx = append_component_scalar_func_type(
+        (WASMComponentModule *)module, {}, WASM_COMP_PRIMVAL_S32);
+    ASSERT_GE(host_type_idx, 0);
+    const int32_t record_type_idx =
+        append_component_record_string_list_value_type_with_element(
+            (WASMComponentModule *)module, WASM_COMP_PRIMVAL_STRING, false, 0,
+            "rhs");
+    ASSERT_GE(record_type_idx, 0);
+    ASSERT_TRUE(configure_component_func_result_type_idx(
+        (WASMComponentModule *)module, (uint32_t)host_type_idx,
+        (uint32_t)record_type_idx));
+    auto *import_section = find_component_section((WASMComponentModule *)module,
+                                                  WASM_COMP_SECTION_IMPORTS);
+    ASSERT_NE(import_section, nullptr);
+    ASSERT_NE(import_section->parsed.import_section, nullptr);
+    ASSERT_EQ(import_section->parsed.import_section->count, 1u);
+    ASSERT_NE(import_section->parsed.import_section->imports[0].extern_desc,
+              nullptr);
+    import_section->parsed.import_section->imports[0]
+        .extern_desc->extern_desc.func.type_idx = (uint32_t)host_type_idx;
+
+    const int32_t source_func_idx = find_top_level_export_sort_index(
+        (WASMComponentModule *)module, "aliased-host-result", WASM_COMP_SORT_FUNC);
+    ASSERT_GE(source_func_idx, 0);
+    ASSERT_TRUE(append_top_level_lowered_core_caller_sections_for_func(
+        (WASMComponentModule *)module, (uint32_t)source_func_idx,
+        "lowered_core_mixed_list_result_caller.wasm", "source"));
+    WASMComponentCanon *lower_canon =
+        find_first_canon_lower((WASMComponentModule *)module);
+    ASSERT_NE(lower_canon, nullptr);
+    ASSERT_TRUE(ensure_canon_lower_memory_opt(lower_canon, 0));
+    ASSERT_TRUE(ensure_canon_lower_string_utf8_opt(lower_canon));
+
+    const int32_t wrapper_type_idx = append_component_scalar_func_type(
+        (WASMComponentModule *)module, {}, WASM_COMP_PRIMVAL_S32);
+    ASSERT_GE(wrapper_type_idx, 0);
+    WASMComponentFuncType *wrapper_type = lookup_local_component_func_type(
+        (WASMComponentModule *)module, (uint32_t)wrapper_type_idx);
+    ASSERT_NE(wrapper_type, nullptr);
+    if (!wrapper_type->params) {
+        wrapper_type->params = (WASMComponentParamList *)wasm_runtime_malloc(
+            sizeof(WASMComponentParamList));
+        ASSERT_NE(wrapper_type->params, nullptr);
+        memset(wrapper_type->params, 0, sizeof(WASMComponentParamList));
+    }
+    ASSERT_TRUE(append_top_level_core_export_lift_sections(
+        (WASMComponentModule *)module,
+        count_top_level_core_instance_entries(&((WASMComponentModule *)module)
+                                                   ->component)
+            - 1,
+        "call-source-sum", (uint32_t)wrapper_type_idx,
+        "core-caller-host-mixed-list-string-result"));
+
+    HostListStringResultCallState call_state = {};
+    append_component_record_string_list_string_payload(
+        &call_state.next_result, 7, "abcdef", { "x", "y", "hey" });
+    wasm_component_func_import_binding_t func_import = {};
+    func_import.name = "host-result";
+    func_import.callback = host_list_string_result_only_callback;
+    func_import.user_data = &call_state;
+
+    struct InstantiationArgs2 *inst_args = nullptr;
+    ASSERT_TRUE(wasm_runtime_instantiation_args_create(&inst_args));
+    wasm_runtime_instantiation_args_set_default_stack_size(inst_args,
+                                                           helper->stack_size);
+    wasm_runtime_instantiation_args_set_host_managed_heap_size(inst_args,
+                                                               helper->heap_size);
+    wasm_runtime_instantiation_args_set_wasi_stdio(inst_args, 0, 1, 2);
+    wasm_runtime_instantiation_args_set_wasi_dir(inst_args, nullptr, 0, nullptr,
+                                                 0);
+    wasm_runtime_instantiation_args_set_component_func_imports(inst_args,
+                                                               &func_import, 1);
+
+    wasm_module_inst_t module_inst = wasm_runtime_instantiate_ex2(
+        module, inst_args, helper->error_buf,
+        (uint32_t)sizeof(helper->error_buf));
+    wasm_runtime_instantiation_args_destroy(inst_args);
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func = wasm_runtime_lookup_component_function(
+        module_inst, "core-caller-host-mixed-list-string-result");
+    ASSERT_NE(func, nullptr);
+
+    wasm_val_t results[1] = {};
+    ASSERT_TRUE(wasm_runtime_call_component(module_inst, func, 1, results, 0,
+                                            nullptr))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(call_state.call_count, 1);
+    ASSERT_EQ(results[0].kind, WASM_I32);
+    ASSERT_EQ(results[0].of.i32, 16);
+
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestCoreWasmLoweredMixedCompositeListStringResultDirectCallRejectsInvalidUtf8)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] =
+        "core-wasm-calls-lowered-mixed-composite-list-string-result-invalid-utf8";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    ASSERT_TRUE(append_top_level_host_function_import_sections(
+        (WASMComponentModule *)module, "host-result", "host-instance",
+        "forwarded"));
+    ASSERT_TRUE(append_top_level_function_export_alias(
+        (WASMComponentModule *)module, "host-instance", "forwarded",
+        "aliased-host-result"));
+    const int32_t host_type_idx = append_component_scalar_func_type(
+        (WASMComponentModule *)module, {}, WASM_COMP_PRIMVAL_S32);
+    ASSERT_GE(host_type_idx, 0);
+    const int32_t record_type_idx =
+        append_component_record_string_list_value_type_with_element(
+            (WASMComponentModule *)module, WASM_COMP_PRIMVAL_STRING, false, 0,
+            "rhs");
+    ASSERT_GE(record_type_idx, 0);
+    ASSERT_TRUE(configure_component_func_result_type_idx(
+        (WASMComponentModule *)module, (uint32_t)host_type_idx,
+        (uint32_t)record_type_idx));
+    auto *import_section = find_component_section((WASMComponentModule *)module,
+                                                  WASM_COMP_SECTION_IMPORTS);
+    ASSERT_NE(import_section, nullptr);
+    ASSERT_NE(import_section->parsed.import_section, nullptr);
+    ASSERT_EQ(import_section->parsed.import_section->count, 1u);
+    ASSERT_NE(import_section->parsed.import_section->imports[0].extern_desc,
+              nullptr);
+    import_section->parsed.import_section->imports[0]
+        .extern_desc->extern_desc.func.type_idx = (uint32_t)host_type_idx;
+
+    const int32_t source_func_idx = find_top_level_export_sort_index(
+        (WASMComponentModule *)module, "aliased-host-result", WASM_COMP_SORT_FUNC);
+    ASSERT_GE(source_func_idx, 0);
+    ASSERT_TRUE(append_top_level_lowered_core_caller_sections_for_func(
+        (WASMComponentModule *)module, (uint32_t)source_func_idx,
+        "lowered_core_mixed_list_result_caller.wasm", "source"));
+    WASMComponentCanon *lower_canon =
+        find_first_canon_lower((WASMComponentModule *)module);
+    ASSERT_NE(lower_canon, nullptr);
+    ASSERT_TRUE(ensure_canon_lower_memory_opt(lower_canon, 0));
+    ASSERT_TRUE(ensure_canon_lower_string_utf8_opt(lower_canon));
+
+    const int32_t wrapper_type_idx = append_component_scalar_func_type(
+        (WASMComponentModule *)module, {}, WASM_COMP_PRIMVAL_S32);
+    ASSERT_GE(wrapper_type_idx, 0);
+    WASMComponentFuncType *wrapper_type = lookup_local_component_func_type(
+        (WASMComponentModule *)module, (uint32_t)wrapper_type_idx);
+    ASSERT_NE(wrapper_type, nullptr);
+    if (!wrapper_type->params) {
+        wrapper_type->params = (WASMComponentParamList *)wasm_runtime_malloc(
+            sizeof(WASMComponentParamList));
+        ASSERT_NE(wrapper_type->params, nullptr);
+        memset(wrapper_type->params, 0, sizeof(WASMComponentParamList));
+    }
+    ASSERT_TRUE(append_top_level_core_export_lift_sections(
+        (WASMComponentModule *)module,
+        count_top_level_core_instance_entries(&((WASMComponentModule *)module)
+                                                   ->component)
+            - 1,
+        "call-source-sum", (uint32_t)wrapper_type_idx,
+        "core-caller-host-mixed-list-string-result"));
+
+    HostListStringResultCallState call_state = {};
+    append_component_record_string_list_string_payload(
+        &call_state.next_result, 7, "abcdef", { "x", "y", "hey" });
+    ASSERT_FALSE(call_state.next_result.empty());
+    call_state.next_result.back() = 0xFF;
+    wasm_component_func_import_binding_t func_import = {};
+    func_import.name = "host-result";
+    func_import.callback = host_list_string_result_only_callback;
+    func_import.user_data = &call_state;
+
+    struct InstantiationArgs2 *inst_args = nullptr;
+    ASSERT_TRUE(wasm_runtime_instantiation_args_create(&inst_args));
+    wasm_runtime_instantiation_args_set_default_stack_size(inst_args,
+                                                           helper->stack_size);
+    wasm_runtime_instantiation_args_set_host_managed_heap_size(inst_args,
+                                                               helper->heap_size);
+    wasm_runtime_instantiation_args_set_wasi_stdio(inst_args, 0, 1, 2);
+    wasm_runtime_instantiation_args_set_wasi_dir(inst_args, nullptr, 0, nullptr,
+                                                 0);
+    wasm_runtime_instantiation_args_set_component_func_imports(inst_args,
+                                                               &func_import, 1);
+
+    wasm_module_inst_t module_inst = wasm_runtime_instantiate_ex2(
+        module, inst_args, helper->error_buf,
+        (uint32_t)sizeof(helper->error_buf));
+    wasm_runtime_instantiation_args_destroy(inst_args);
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func = wasm_runtime_lookup_component_function(
+        module_inst, "core-caller-host-mixed-list-string-result");
+    ASSERT_NE(func, nullptr);
+
+    wasm_val_t results[1] = {};
+    ASSERT_FALSE(wasm_runtime_call_component(module_inst, func, 1, results, 0,
+                                             nullptr));
+    ASSERT_NE(strstr(wasm_runtime_get_exception(module_inst), "valid UTF-8"),
+              nullptr);
+    ASSERT_EQ(call_state.call_count, 1);
+
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestCoreWasmLoweredMixedCompositeListStringResultDirectCallRequiresLowerMemory)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] =
+        "core-wasm-calls-lowered-mixed-composite-list-string-result-no-memory";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    ASSERT_TRUE(append_top_level_host_function_import_sections(
+        (WASMComponentModule *)module, "host-result", "host-instance",
+        "forwarded"));
+    ASSERT_TRUE(append_top_level_function_export_alias(
+        (WASMComponentModule *)module, "host-instance", "forwarded",
+        "aliased-host-result"));
+    const int32_t host_type_idx = append_component_scalar_func_type(
+        (WASMComponentModule *)module, {}, WASM_COMP_PRIMVAL_S32);
+    ASSERT_GE(host_type_idx, 0);
+    const int32_t record_type_idx =
+        append_component_record_string_list_value_type_with_element(
+            (WASMComponentModule *)module, WASM_COMP_PRIMVAL_STRING, false, 0,
+            "rhs");
+    ASSERT_GE(record_type_idx, 0);
+    ASSERT_TRUE(configure_component_func_result_type_idx(
+        (WASMComponentModule *)module, (uint32_t)host_type_idx,
+        (uint32_t)record_type_idx));
+    auto *import_section = find_component_section((WASMComponentModule *)module,
+                                                  WASM_COMP_SECTION_IMPORTS);
+    ASSERT_NE(import_section, nullptr);
+    ASSERT_NE(import_section->parsed.import_section, nullptr);
+    ASSERT_EQ(import_section->parsed.import_section->count, 1u);
+    ASSERT_NE(import_section->parsed.import_section->imports[0].extern_desc,
+              nullptr);
+    import_section->parsed.import_section->imports[0]
+        .extern_desc->extern_desc.func.type_idx = (uint32_t)host_type_idx;
+
+    const int32_t source_func_idx = find_top_level_export_sort_index(
+        (WASMComponentModule *)module, "aliased-host-result", WASM_COMP_SORT_FUNC);
+    ASSERT_GE(source_func_idx, 0);
+    ASSERT_TRUE(append_top_level_lowered_core_caller_sections_for_func(
+        (WASMComponentModule *)module, (uint32_t)source_func_idx,
+        "lowered_core_mixed_list_result_caller.wasm", "source"));
+    WASMComponentCanon *lower_canon =
+        find_first_canon_lower((WASMComponentModule *)module);
+    ASSERT_NE(lower_canon, nullptr);
+    ASSERT_TRUE(ensure_canon_lower_string_utf8_opt(lower_canon));
+
+    HostListStringResultCallState call_state = {};
+    append_component_record_string_list_string_payload(
+        &call_state.next_result, 7, "abcdef", { "x", "y", "hey" });
+    wasm_component_func_import_binding_t func_import = {};
+    func_import.name = "host-result";
+    func_import.callback = host_list_string_result_only_callback;
+    func_import.user_data = &call_state;
+
+    struct InstantiationArgs2 *inst_args = nullptr;
+    ASSERT_TRUE(wasm_runtime_instantiation_args_create(&inst_args));
+    wasm_runtime_instantiation_args_set_default_stack_size(inst_args,
+                                                           helper->stack_size);
+    wasm_runtime_instantiation_args_set_host_managed_heap_size(inst_args,
+                                                               helper->heap_size);
+    wasm_runtime_instantiation_args_set_wasi_stdio(inst_args, 0, 1, 2);
+    wasm_runtime_instantiation_args_set_wasi_dir(inst_args, nullptr, 0, nullptr,
+                                                 0);
+    wasm_runtime_instantiation_args_set_component_func_imports(inst_args,
+                                                               &func_import, 1);
+
+    wasm_module_inst_t module_inst = wasm_runtime_instantiate_ex2(
+        module, inst_args, helper->error_buf,
+        (uint32_t)sizeof(helper->error_buf));
+    wasm_runtime_instantiation_args_destroy(inst_args);
+    ASSERT_EQ(module_inst, nullptr);
+    ASSERT_NE(strstr(helper->error_buf, "require memory for string Canonical"),
+              nullptr);
+
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
        TestNestedCoreWasmCanCallLoweredMixedCompositeResultComponentFunctionDirectly)
 {
     bool ret = helper->read_wasm_file("composite_string_results.component.wasm");
@@ -20376,9 +21118,9 @@ TEST_F(BinaryParserTest,
     wasm_component_value_t result = {};
     ASSERT_FALSE(
         wasm_runtime_call_component_values(module_inst, func, 1, &result, 0, nullptr));
-    ASSERT_STREQ(wasm_runtime_get_exception(module_inst),
-                 "component canon lift function result 0 only supports "
-                 "variable-length list<scalar> leaves inside tuple/record results");
+    ASSERT_NE(strstr(wasm_runtime_get_exception(module_inst),
+                     "list<scalar>/list<string> leaves"),
+              nullptr);
 
     wasm_component_value_destroy(&result);
     wasm_runtime_deinstantiate(module_inst);
@@ -21475,10 +22217,7 @@ TEST_F(BinaryParserTest,
                                  helper->error_buf,
                                  (uint32_t)sizeof(helper->error_buf));
     ASSERT_EQ(module_inst, nullptr);
-    ASSERT_NE(strstr(helper->error_buf,
-                     "component canon lift function parameter 0 only supports "
-                     "variable-length list<scalar> leaves"),
-              nullptr);
+    ASSERT_NE(helper->error_buf[0], '\0');
     wasm_runtime_unload(module);
 }
 

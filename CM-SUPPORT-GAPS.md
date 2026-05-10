@@ -298,7 +298,8 @@ The executable Canonical ABI surface is currently limited to:
   tested direct subset:
   - scalar parameters/results
   - top-level tuple/record parameters over the tested scalar / UTF-8 string /
-    nested `list<scalar>` leaf subset with scalar results
+    nested variable-length `list<scalar>` / `list<string>` leaf subset with
+    scalar results
   - top-level tuple/record results over that same supported leaf subset through
     the tested `(param i32) -> ()` return-area path
   - UTF-8 string parameters/results through the tested `(param i32 i32 i32) -> ()`
@@ -321,8 +322,9 @@ The executable Canonical ABI surface is currently limited to:
     where a nested child-core lowered import targets a function exported from
     another component instance
   - no lower-side canon options beyond tested `(string-utf8)` / `(memory ...)`
-    for the direct string and direct `list<string>` parameter/result paths and
-    `(memory ...)` for the `list<scalar>` parameter/result path
+    for the direct string, direct `list<string>`, and direct tuple/record
+    `list<string>`-leaf parameter/result paths, and `(memory ...)` for the
+    `list<scalar>` parameter/result path
   - positive top-level and nested direct child-core witnesses plus explicit
     failures for invalid UTF-8 input, omitted lower-side memory, and malformed
     result areas on the tested memory-backed paths
@@ -357,8 +359,8 @@ Major Canonical ABI gaps remain:
   `list<scalar>`-result / tuple/record-parameter / record-result /
   tuple/mixed-composite-result synthetic re-lifts above
 - no executable lower path yet for direct tuple/record results beyond the tested
-  top-level memory-backed return-area path over the current scalar / UTF-8 string
-  / nested `list<scalar>` leaf subset
+  top-level memory-backed return-area path over the current scalar / UTF-8
+  string / nested variable-length `list<scalar>` / `list<string>` leaf subset
 - no executable lower path yet for broader nested lowered-consumer coverage beyond
   the tested nested child-core UTF-8 string / `list<string>`-parameter /
   `list<string>`-result / `list<u8>`- and `list<s32>`-parameter /
@@ -368,12 +370,14 @@ Major Canonical ABI gaps remain:
 - no list marshalling beyond UTF-8 strings, the tested direct top-level and
   nested child-core `list<string>` parameter/result paths, the tested
   cross-component `list<string>` parameter/result seams, top-level
-  `list<scalar>`, and nested `list<scalar>` leaves in exported tuple/record
-  values and host-import tuple/record parameters
+  `list<scalar>`, and the tested top-level direct tuple/record
+  `list<string>`-leaf plus nested `list<scalar>` leaves in exported
+  tuple/record values and host-import tuple/record parameters
 - no variant / flags / enum / option / result marshalling
 - no non-string memory-backed leaves inside tuple/record Canonical ABI values beyond nested `list<scalar>` leaves for exported canon-lift calls and host-import tuple/record parameters
 - no broader composite flattening/lifting rules beyond the current
-  string/`list<scalar>` tuple-record subset
+  string / variable-length `list<scalar>` / variable-length `list<string>`
+  tuple-record subset
 - no non-UTF-8 string encodings (`utf16`, `latin1+utf16`)
 - no `memory64` memory-backed Canonical ABI support
 - no `error-context` value support
