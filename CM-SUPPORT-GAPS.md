@@ -311,9 +311,9 @@ The executable Canonical ABI surface is currently limited to:
     composite-param, and mixed composite-result paths
   - tested cross-component scalar, UTF-8 string, `list<u8>`-parameter /
     `list<u8>`-result, and `list<s32>`-parameter / `list<s32>`-result seams
-    plus a tested cross-component mixed composite-param seam, where a nested
-    child-core lowered import targets a function exported from another component
-    instance
+    plus tested cross-component mixed composite-param and mixed
+    composite-result seams, where a nested child-core lowered import targets a
+    function exported from another component instance
   - no lower-side canon options beyond tested `(string-utf8)` / `(memory ...)`
     for the direct string path and `(memory ...)` for the `list<scalar>`
     parameter/result path
@@ -333,13 +333,13 @@ Major Canonical ABI gaps remain:
 - no general adapter/lowering path for imported component functions beyond the
   supported host-callback subset, the tested cross-component scalar / UTF-8
   string / `list<u8>`-parameter / `list<u8>`-result / `list<s32>`-parameter /
-  `list<s32>`-result / mixed composite-param seams above, and the narrow direct
-  core-call subset above
+  `list<s32>`-result / mixed composite-param / mixed composite-result seams
+  above, and the narrow direct core-call subset above
 - no executable lower path yet for memory-backed Canonical ABI shapes
   beyond the tested direct UTF-8-string parameter/result path, the tested
   cross-component UTF-8 string and `list<u8>`-parameter / `list<u8>`-result /
-  `list<s32>`-parameter / `list<s32>`-result / mixed composite-param seams, the
-  tested direct
+  `list<s32>`-parameter / `list<s32>`-result / mixed composite-param / mixed
+  composite-result seams, the tested direct
   `list<scalar>`-parameter-with-scalar-result path, the tested top-level direct
   `list<scalar>`-result return-area path, the tested nested child-core UTF-8
   string / `list<u8>`- and `list<s32>`-parameter / `list<scalar>`-result /
