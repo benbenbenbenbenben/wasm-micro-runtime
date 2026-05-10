@@ -22,7 +22,7 @@ The main remaining gaps are now centered on:
 
 The implementation is now best described as:
 
-> **A partial but executable component runtime: top-level component loading/instantiation, public import/export APIs, scalar / UTF-8 string / `list<scalar>` / limited tuple-record canon-lift calls, a narrow direct-core-call `canon lower` seam for scalar signatures plus top-level `list<scalar>` params/results on the specifically tested memory-backed path, host-provided component-function imports for the currently supported subset, runtime values, value imports/exports, start execution slices, and resource bookkeeping foundations are all present.**
+> **A partial but executable component runtime: top-level component loading/instantiation, public import/export APIs, scalar / UTF-8 string / `list<scalar>` / limited tuple-record canon-lift calls, a narrow direct-core-call `canon lower` seam for scalar signatures plus top-level UTF-8 string / `list<scalar>` params/results on the specifically tested memory-backed path, host-provided component-function imports for the currently supported subset, runtime values, value imports/exports, start execution slices, and resource bookkeeping foundations are all present.**
 
 ### 1.1 Top-level component loading, instantiation, and teardown
 
@@ -151,9 +151,12 @@ What works today:
 - direct core-wasm calls into lowered component functions for the narrow tested
   subset:
   - scalar-only parameters/results
+  - UTF-8 string parameters/results through i32 pointer/length pairs plus an
+    explicit i32 return-area pointer
   - `list<scalar>` parameters with scalar results
   - top-level `list<scalar>` results through an explicit i32 return-area pointer
-  - lower-side `(memory ...)` only for the tested `list<scalar>` parameter/result
+  - lower-side `(string-utf8)` plus `(memory ...)` for the tested direct string
+    path, and `(memory ...)` for the tested direct `list<scalar>` parameter/result
     path
   - downstream core modules instantiated with explicit `with_args` lowered-function
     bindings
@@ -287,13 +290,16 @@ The executable Canonical ABI surface is currently limited to:
 - direct core-wasm invocation of lowered component functions for the currently
   tested direct subset:
   - scalar parameters/results
+  - UTF-8 string parameters/results through the tested `(param i32 i32 i32) -> ()`
+    direct return-area path
   - `list<scalar>` parameters with scalar results
   - top-level `list<scalar>` results through the tested `(param i32) -> ()`
     return-area path
-  - no lower-side canon options beyond tested `(memory ...)` for the `list<scalar>`
+  - no lower-side canon options beyond tested `(string-utf8)` / `(memory ...)`
+    for the direct string path and `(memory ...)` for the `list<scalar>`
     parameter/result path
-  - positive direct child-core witnesses plus explicit failure when the tested
-    memory-backed path omits lower-side memory
+  - positive direct child-core witnesses plus explicit failures for invalid UTF-8
+    input and omitted lower-side memory on the tested memory-backed paths
 - top-level host-defined component-function imports for the same supported subset
 
 Major Canonical ABI gaps remain:
@@ -307,8 +313,9 @@ Major Canonical ABI gaps remain:
 - no general adapter/lowering path for imported component functions beyond the
   supported host-callback subset and the narrow direct core-call subset above
 - no executable lower path yet for memory-backed Canonical ABI shapes
-  beyond the tested direct `list<scalar>`-parameter-with-scalar-result path, the
-  tested top-level direct `list<scalar>`-result return-area path, and the synthetic
+  beyond the tested direct UTF-8-string parameter/result path, the tested direct
+  `list<scalar>`-parameter-with-scalar-result path, the tested top-level direct
+  `list<scalar>`-result return-area path, and the synthetic
   `list<scalar>`-parameter / `list<scalar>`-result /
   tuple/record-parameter / record-result / tuple/mixed-composite-result
   synthetic re-lifts above
