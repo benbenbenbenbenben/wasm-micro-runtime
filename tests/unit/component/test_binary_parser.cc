@@ -1488,6 +1488,42 @@ count_top_level_core_func_entries(const WASMComponent *component)
     return count;
 }
 
+static uint32_t
+count_top_level_core_module_entries(const WASMComponent *component)
+{
+    uint32_t count = 0;
+
+    if (!component) {
+        return 0;
+    }
+
+    for (uint32_t i = 0; i < component->section_count; i++) {
+        if (component->sections[i].id == WASM_COMP_SECTION_CORE_MODULE) {
+            count++;
+        }
+    }
+
+    return count;
+}
+
+static uint32_t
+count_top_level_core_instance_entries(const WASMComponent *component)
+{
+    uint32_t count = 0;
+
+    if (!component) {
+        return 0;
+    }
+
+    for (uint32_t i = 0; i < component->section_count; i++) {
+        if (component->sections[i].id == WASM_COMP_SECTION_CORE_INSTANCE) {
+            count += component->sections[i].parsed.core_instance_section->count;
+        }
+    }
+
+    return count;
+}
+
 static WASMComponentCanon *
 find_first_canon_lift(WASMComponentModule *component_module)
 {
@@ -1760,8 +1796,230 @@ append_top_level_canon_lower_relift_export_sections(
 
     return source_lift
            && append_top_level_canon_lower_relift_export_sections_for_func(
-               component_module, 0, source_lift->canon_data.lift.type_idx,
-               top_export_name);
+                component_module, 0, source_lift->canon_data.lift.type_idx,
+                top_export_name);
+}
+
+static bool
+append_top_level_lowered_core_caller_sections_for_func(
+    WASMComponentModule *component_module, uint32_t source_func_idx,
+    const char *core_module_path, const char *core_import_name)
+{
+    WASMComponent *component = &component_module->component;
+    char error_buf[128] = {};
+    const uint32_t new_core_func_idx = count_top_level_core_func_entries(component);
+    const uint32_t new_core_module_idx =
+        count_top_level_core_module_entries(component);
+    const uint32_t old_count = component->section_count;
+    auto *new_sections = (WASMComponentSection *)wasm_runtime_malloc(
+        sizeof(WASMComponentSection) * (old_count + 3));
+
+    if (!new_sections) {
+        return false;
+    }
+
+    memset(new_sections, 0, sizeof(WASMComponentSection) * (old_count + 3));
+    memcpy(new_sections, component->sections,
+           sizeof(WASMComponentSection) * old_count);
+    wasm_runtime_free(component->sections);
+    component->sections = new_sections;
+    component->section_count = old_count + 3;
+
+    auto *canon_section = &component->sections[old_count];
+    auto *core_module_section = &component->sections[old_count + 1];
+    auto *core_instance_section = &component->sections[old_count + 2];
+
+    canon_section->id = WASM_COMP_SECTION_CANONS;
+    canon_section->parsed.canon_section =
+        (WASMComponentCanonSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentCanonSection));
+    if (!canon_section->parsed.canon_section) {
+        return false;
+    }
+    memset(canon_section->parsed.canon_section, 0,
+           sizeof(WASMComponentCanonSection));
+    canon_section->parsed.canon_section->count = 1;
+    canon_section->parsed.canon_section->canons =
+        (WASMComponentCanon *)wasm_runtime_malloc(sizeof(WASMComponentCanon));
+    if (!canon_section->parsed.canon_section->canons) {
+        return false;
+    }
+    memset(canon_section->parsed.canon_section->canons, 0,
+           sizeof(WASMComponentCanon));
+    canon_section->parsed.canon_section->canons[0].tag = WASM_COMP_CANON_LOWER;
+    canon_section->parsed.canon_section->canons[0].canon_data.lower.func_idx =
+        source_func_idx;
+
+    core_module_section->id = WASM_COMP_SECTION_CORE_MODULE;
+    core_module_section->parsed.core_module = create_core_module_wrapper_from_file(
+        core_module_path, "lowered-core-caller", error_buf,
+        (uint32_t)sizeof(error_buf));
+    if (!core_module_section->parsed.core_module) {
+        return false;
+    }
+
+    core_instance_section->id = WASM_COMP_SECTION_CORE_INSTANCE;
+    core_instance_section->parsed.core_instance_section =
+        (WASMComponentCoreInstSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentCoreInstSection));
+    if (!core_instance_section->parsed.core_instance_section) {
+        return false;
+    }
+    memset(core_instance_section->parsed.core_instance_section, 0,
+           sizeof(WASMComponentCoreInstSection));
+    core_instance_section->parsed.core_instance_section->count = 1;
+    core_instance_section->parsed.core_instance_section->instances =
+        (WASMComponentCoreInst *)wasm_runtime_malloc(sizeof(WASMComponentCoreInst));
+    if (!core_instance_section->parsed.core_instance_section->instances) {
+        return false;
+    }
+    memset(core_instance_section->parsed.core_instance_section->instances, 0,
+           sizeof(WASMComponentCoreInst));
+    core_instance_section->parsed.core_instance_section->instances[0]
+        .instance_expression_tag = WASM_COMP_INSTANCE_EXPRESSION_WITH_ARGS;
+    core_instance_section->parsed.core_instance_section->instances[0]
+        .expression.with_args.idx = new_core_module_idx;
+    core_instance_section->parsed.core_instance_section->instances[0]
+        .expression.with_args.arg_len = 1;
+    core_instance_section->parsed.core_instance_section->instances[0]
+        .expression.with_args.args =
+        (WASMComponentInstArg *)wasm_runtime_malloc(sizeof(WASMComponentInstArg));
+    if (!core_instance_section->parsed.core_instance_section->instances[0]
+             .expression.with_args.args) {
+        return false;
+    }
+    memset(core_instance_section->parsed.core_instance_section->instances[0]
+               .expression.with_args.args,
+           0, sizeof(WASMComponentInstArg));
+    core_instance_section->parsed.core_instance_section->instances[0]
+        .expression.with_args.args[0]
+        .name = clone_core_name(core_import_name);
+    core_instance_section->parsed.core_instance_section->instances[0]
+        .expression.with_args.args[0]
+        .idx.sort_idx = create_core_sort_idx(WASM_COMP_CORE_SORT_FUNC,
+                                             new_core_func_idx);
+
+    return core_instance_section->parsed.core_instance_section->instances[0]
+               .expression.with_args.args[0]
+               .name
+           && core_instance_section->parsed.core_instance_section->instances[0]
+                  .expression.with_args.args[0]
+                  .idx.sort_idx;
+}
+
+static bool
+append_top_level_core_export_lift_sections(WASMComponentModule *component_module,
+                                           uint32_t core_instance_idx,
+                                           const char *core_export_name,
+                                           uint32_t lift_type_idx,
+                                           const char *component_export_name)
+{
+    WASMComponent *component = &component_module->component;
+    const uint32_t aliased_core_func_idx = count_top_level_core_func_entries(component);
+    const uint32_t lifted_func_idx =
+        count_top_level_sort_entries(component, WASM_COMP_SORT_FUNC);
+    const uint32_t old_count = component->section_count;
+    auto *new_sections = (WASMComponentSection *)wasm_runtime_malloc(
+        sizeof(WASMComponentSection) * (old_count + 3));
+
+    if (!new_sections) {
+        return false;
+    }
+
+    memset(new_sections, 0, sizeof(WASMComponentSection) * (old_count + 3));
+    memcpy(new_sections, component->sections,
+           sizeof(WASMComponentSection) * old_count);
+    wasm_runtime_free(component->sections);
+    component->sections = new_sections;
+    component->section_count = old_count + 3;
+
+    auto *alias_section = &component->sections[old_count];
+    auto *canon_section = &component->sections[old_count + 1];
+    auto *export_section = &component->sections[old_count + 2];
+
+    alias_section->id = WASM_COMP_SECTION_ALIASES;
+    alias_section->parsed.alias_section =
+        (WASMComponentAliasSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentAliasSection));
+    if (!alias_section->parsed.alias_section) {
+        return false;
+    }
+    memset(alias_section->parsed.alias_section, 0,
+           sizeof(WASMComponentAliasSection));
+    alias_section->parsed.alias_section->count = 1;
+    alias_section->parsed.alias_section->aliases =
+        (WASMComponentAliasDefinition *)wasm_runtime_malloc(
+            sizeof(WASMComponentAliasDefinition));
+    if (!alias_section->parsed.alias_section->aliases) {
+        return false;
+    }
+    memset(alias_section->parsed.alias_section->aliases, 0,
+           sizeof(WASMComponentAliasDefinition));
+    alias_section->parsed.alias_section->aliases[0].sort =
+        create_sort(WASM_COMP_SORT_CORE_SORT);
+    if (!alias_section->parsed.alias_section->aliases[0].sort) {
+        return false;
+    }
+    alias_section->parsed.alias_section->aliases[0].sort->core_sort =
+        WASM_COMP_CORE_SORT_FUNC;
+    alias_section->parsed.alias_section->aliases[0].alias_target_type =
+        WASM_COMP_ALIAS_TARGET_CORE_EXPORT;
+    alias_section->parsed.alias_section->aliases[0]
+        .target.core_exported.instance_idx = core_instance_idx;
+    alias_section->parsed.alias_section->aliases[0].target.core_exported.name =
+        clone_core_name(core_export_name);
+    if (!alias_section->parsed.alias_section->aliases[0]
+             .target.core_exported.name) {
+        return false;
+    }
+
+    canon_section->id = WASM_COMP_SECTION_CANONS;
+    canon_section->parsed.canon_section =
+        (WASMComponentCanonSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentCanonSection));
+    if (!canon_section->parsed.canon_section) {
+        return false;
+    }
+    memset(canon_section->parsed.canon_section, 0,
+           sizeof(WASMComponentCanonSection));
+    canon_section->parsed.canon_section->count = 1;
+    canon_section->parsed.canon_section->canons =
+        (WASMComponentCanon *)wasm_runtime_malloc(sizeof(WASMComponentCanon));
+    if (!canon_section->parsed.canon_section->canons) {
+        return false;
+    }
+    memset(canon_section->parsed.canon_section->canons, 0,
+           sizeof(WASMComponentCanon));
+    canon_section->parsed.canon_section->canons[0].tag = WASM_COMP_CANON_LIFT;
+    canon_section->parsed.canon_section->canons[0].canon_data.lift.core_func_idx =
+        aliased_core_func_idx;
+    canon_section->parsed.canon_section->canons[0].canon_data.lift.type_idx =
+        lift_type_idx;
+
+    export_section->id = WASM_COMP_SECTION_EXPORTS;
+    export_section->parsed.export_section =
+        (WASMComponentExportSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentExportSection));
+    if (!export_section->parsed.export_section) {
+        return false;
+    }
+    memset(export_section->parsed.export_section, 0,
+           sizeof(WASMComponentExportSection));
+    export_section->parsed.export_section->count = 1;
+    export_section->parsed.export_section->exports =
+        (WASMComponentExport *)wasm_runtime_malloc(sizeof(WASMComponentExport));
+    if (!export_section->parsed.export_section->exports) {
+        return false;
+    }
+    memset(export_section->parsed.export_section->exports, 0,
+           sizeof(WASMComponentExport));
+    export_section->parsed.export_section->exports[0].export_name =
+        create_export_name(component_export_name);
+    export_section->parsed.export_section->exports[0].sort_idx =
+        create_sort_idx(WASM_COMP_SORT_FUNC, lifted_func_idx);
+
+    return export_section->parsed.export_section->exports[0].export_name
+           && export_section->parsed.export_section->exports[0].sort_idx;
 }
 
 static WASMComponentValueType
@@ -11373,6 +11631,95 @@ TEST_F(BinaryParserTest, TestPublicComponentCallInvokesLowerReliftedScalarHandle
     ASSERT_EQ(results[0].of.i32, 9);
 
     wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest, TestCoreWasmCanCallLoweredScalarComponentFunctionDirectly)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "core-wasm-calls-lowered-scalar";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(append_top_level_lowered_core_caller_sections_for_func(
+        (WASMComponentModule *)module, 0, "lowered_core_caller.wasm", "source"));
+    const int32_t wrapper_type_idx = append_component_scalar_func_type(
+        (WASMComponentModule *)module, {}, WASM_COMP_PRIMVAL_S32);
+    ASSERT_GE(wrapper_type_idx, 0);
+    WASMComponentFuncType *wrapper_type = lookup_local_component_func_type(
+        (WASMComponentModule *)module, (uint32_t)wrapper_type_idx);
+    ASSERT_NE(wrapper_type, nullptr);
+    if (!wrapper_type->params) {
+        wrapper_type->params = (WASMComponentParamList *)wasm_runtime_malloc(
+            sizeof(WASMComponentParamList));
+        ASSERT_NE(wrapper_type->params, nullptr);
+        memset(wrapper_type->params, 0, sizeof(WASMComponentParamList));
+    }
+    ASSERT_TRUE(append_top_level_core_export_lift_sections(
+        (WASMComponentModule *)module,
+        count_top_level_core_instance_entries(&((WASMComponentModule *)module)
+                                                   ->component)
+            - 1,
+        "call-source-const", (uint32_t)wrapper_type_idx, "core-caller-add"));
+
+    wasm_module_inst_t module_inst =
+        instantiate_component_with_default_wasi(module, helper.get());
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+    auto *component_inst = (WASMComponentInstance *)module_inst;
+    ASSERT_GE(component_inst->core_instance_count, 2u);
+    auto *child_core_inst = (WASMModuleInstance *)
+        component_inst->core_instances[component_inst->core_instance_count - 1]
+            .module_inst;
+    ASSERT_NE(child_core_inst, nullptr);
+    wasm_component_func_t func =
+        wasm_runtime_lookup_component_function(module_inst, "core-caller-add");
+    ASSERT_NE(func, nullptr);
+
+    wasm_val_t results[1] = {};
+    ASSERT_TRUE(wasm_runtime_call_component(module_inst, func, 1, results, 0,
+                                            nullptr))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(results[0].kind, WASM_I32);
+    ASSERT_EQ(results[0].of.i32, 42);
+
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestCoreWasmDirectLowerCallRejectsNonScalarLoweredComponentFunction)
+{
+    bool ret = helper->read_wasm_file("composite_string_params.component.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "core-wasm-calls-lowered-nonscalar";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    const int32_t source_func_idx = find_top_level_export_sort_index(
+        (WASMComponentModule *)module, "mixed-list-param", WASM_COMP_SORT_FUNC);
+    ASSERT_GE(source_func_idx, 0);
+    ASSERT_TRUE(append_top_level_lowered_core_caller_sections_for_func(
+        (WASMComponentModule *)module, (uint32_t)source_func_idx,
+        "lowered_core_caller.wasm", "source"));
+
+    wasm_module_inst_t module_inst =
+        instantiate_component_with_default_wasi(module, helper.get());
+    ASSERT_EQ(module_inst, nullptr);
+    ASSERT_NE(strstr(helper->error_buf, "requires component-specific APIs"),
+              nullptr);
+
     wasm_runtime_unload(module);
 }
 

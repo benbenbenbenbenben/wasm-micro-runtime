@@ -58,6 +58,11 @@ typedef struct WASMNestedComponentLocalBindings {
     WASMComponentRuntimeScope *parent_scope;
 } WASMNestedComponentLocalBindings;
 
+typedef struct WASMComponentLoweredImportAttachment {
+    WASMComponentRuntimeFunc *lowered_function;
+    const WASMFuncType *func_type;
+} WASMComponentLoweredImportAttachment;
+
 static uint32
 encode_component_unsigned_leb(uint64 value, uint8 *out_buf);
 
@@ -117,6 +122,22 @@ resolve_component_scalar_primitive_type(
 static bool
 component_scalar_prim_to_core(uint8 prim_type, uint8 *core_type,
                               wasm_valkind_t *public_kind);
+
+static bool
+bind_component_core_instance_import_args(
+    WASMComponentCoreRuntimeInstance *runtime_inst, const WASMComponentInstArg *args,
+    uint32 arg_len,
+    bool (*resolve_arg_ref)(const void *resolver_ctx,
+                            const WASMComponentSortIdx *sort_idx,
+                            WASMComponentCoreRuntimeRef *out_ref,
+                            char *error_buf, uint32 error_buf_size),
+    const void *resolver_ctx, char *error_buf, uint32 error_buf_size);
+
+static bool
+resolve_core_sort_idx(const WASMComponentInstance *inst,
+                      const WASMComponentSortIdx *sort_idx,
+                      WASMComponentCoreRuntimeRef *out_ref, char *error_buf,
+                      uint32 error_buf_size);
 
 static uint32
 get_component_func_result_count(const WASMComponentFuncType *component_type);
@@ -303,6 +324,20 @@ destroy_component_core_instance(WASMComponentCoreRuntimeInstance *core_instance)
             (WASMModuleInstanceCommon *)core_instance->module_inst, false);
         core_instance->module_inst = NULL;
     }
+
+    if (core_instance->patched_import_entries) {
+        wasm_runtime_free(core_instance->patched_import_entries);
+        core_instance->patched_import_entries = NULL;
+    }
+    if (core_instance->patched_module) {
+        wasm_runtime_free(core_instance->patched_module);
+        core_instance->patched_module = NULL;
+    }
+    if (core_instance->patched_import_attachments) {
+        wasm_runtime_free(core_instance->patched_import_attachments);
+        core_instance->patched_import_attachments = NULL;
+    }
+    core_instance->patched_import_count = 0;
 
     if (core_instance->exports) {
         wasm_runtime_free(core_instance->exports);
@@ -862,6 +897,28 @@ resolve_nested_component_local_core_sort_idx(
                 "nested core instance exports only support core module and "
                 "core instance sorts");
     }
+}
+
+static bool
+resolve_component_core_inst_arg_ref(const void *resolver_ctx,
+                                    const WASMComponentSortIdx *sort_idx,
+                                    WASMComponentCoreRuntimeRef *out_ref,
+                                    char *error_buf, uint32 error_buf_size)
+{
+    return resolve_core_sort_idx((const WASMComponentInstance *)resolver_ctx,
+                                 sort_idx, out_ref, error_buf, error_buf_size);
+}
+
+static bool
+resolve_nested_component_core_inst_arg_ref(const void *resolver_ctx,
+                                           const WASMComponentSortIdx *sort_idx,
+                                           WASMComponentCoreRuntimeRef *out_ref,
+                                           char *error_buf,
+                                           uint32 error_buf_size)
+{
+    return resolve_nested_component_local_core_sort_idx(
+        (const WASMNestedComponentLocalBindings *)resolver_ctx, sort_idx, out_ref,
+        error_buf, error_buf_size);
 }
 
 static bool
@@ -1693,6 +1750,442 @@ component_scalar_prim_to_core(uint8 prim_type, uint8 *core_type,
         default:
             return false;
     }
+}
+
+static bool
+component_valkind_matches_core_type(wasm_valkind_t kind, uint8 core_type)
+{
+    switch (kind) {
+        case WASM_I32:
+            return core_type == VALUE_TYPE_I32;
+        case WASM_I64:
+            return core_type == VALUE_TYPE_I64;
+        case WASM_F32:
+            return core_type == VALUE_TYPE_F32;
+        case WASM_F64:
+            return core_type == VALUE_TYPE_F64;
+        default:
+            return false;
+    }
+}
+
+static bool
+validate_lowered_import_scalar_signature(
+    const WASMComponentRuntimeFunc *lowered_function,
+    const WASMFuncType *expected_type, char *error_buf, uint32 error_buf_size)
+{
+    wasm_valkind_t stack_param_types[16];
+    wasm_valkind_t stack_result_types[8];
+    wasm_valkind_t *param_types = stack_param_types;
+    wasm_valkind_t *result_types = stack_result_types;
+    uint32 param_count = 0, result_count = 0, i;
+    bool ok;
+
+    if (!lowered_function || !lowered_function->lowered_target)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "component canon lower import binding is missing its lowered target");
+
+    if (lowered_function->canon_opts
+        && lowered_function->canon_opts->canon_opts_count > 0)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "component canon lower direct core-call bindings currently support "
+            "only scalar signatures without lower-side canon options");
+
+    if (expected_type->param_count
+        > sizeof(stack_param_types) / sizeof(stack_param_types[0])) {
+        param_types = wasm_runtime_malloc(sizeof(wasm_valkind_t)
+                                          * expected_type->param_count);
+        if (!param_types)
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                "allocate memory failed for %u lowered import param types",
+                (uint32)expected_type->param_count);
+    }
+
+    if (expected_type->result_count
+        > sizeof(stack_result_types) / sizeof(stack_result_types[0])) {
+        result_types = wasm_runtime_malloc(sizeof(wasm_valkind_t)
+                                           * expected_type->result_count);
+        if (!result_types) {
+            if (param_types != stack_param_types)
+                wasm_runtime_free(param_types);
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                "allocate memory failed for %u lowered import result types",
+                (uint32)expected_type->result_count);
+        }
+    }
+
+    ok = wasm_component_func_get_generic_signature(
+        lowered_function->owner_instance, lowered_function->lowered_target,
+        &param_count, param_types,
+        expected_type->param_count, &result_count, result_types,
+        expected_type->result_count, error_buf, error_buf_size);
+    if (!ok)
+        goto fail;
+
+    if (param_count != expected_type->param_count
+        || result_count != expected_type->result_count) {
+        ok = set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "core import signature does not match the lowered component "
+            "function arity");
+        goto fail;
+    }
+
+    for (i = 0; i < param_count; i++) {
+        if (!component_valkind_matches_core_type(param_types[i],
+                                                 expected_type->types[i])) {
+            ok = set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                "core import parameter %u does not match the lowered "
+                "component function signature",
+                i);
+            goto fail;
+        }
+    }
+
+    for (i = 0; i < result_count; i++) {
+        if (!component_valkind_matches_core_type(
+                result_types[i], expected_type->types[param_count + i])) {
+            ok = set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                "core import result %u does not match the lowered component "
+                "function signature",
+                i);
+            goto fail;
+        }
+    }
+
+fail:
+    if (param_types != stack_param_types)
+        wasm_runtime_free(param_types);
+    if (result_types != stack_result_types)
+        wasm_runtime_free(result_types);
+    return ok;
+}
+
+static void
+component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
+{
+    WASMModuleInstanceCommon *caller_module_inst;
+    WASMComponentLoweredImportAttachment *attachment;
+    WASMComponentRuntimeFunc *lowered_function;
+    const WASMFuncType *func_type;
+    WASMComponentInstance *component_inst;
+    wasm_val_t stack_args[16];
+    wasm_val_t stack_results[1];
+    wasm_val_t *call_args = stack_args;
+    uint32 param_count, i;
+    bool call_ok;
+
+    if (!exec_env)
+        return;
+
+    caller_module_inst = wasm_runtime_get_module_inst(exec_env);
+    attachment = (WASMComponentLoweredImportAttachment *)
+        wasm_runtime_get_function_attachment(exec_env);
+    lowered_function = attachment ? attachment->lowered_function : NULL;
+    func_type = attachment ? attachment->func_type : NULL;
+    if (!caller_module_inst || !lowered_function || !lowered_function->lowered_target)
+        return;
+    if (!func_type) {
+        wasm_runtime_set_exception(
+            caller_module_inst,
+            "component lowered core-call trampoline could not resolve the "
+            "active import signature");
+        return;
+    }
+
+    if (func_type->result_count > 1) {
+        wasm_runtime_set_exception(
+            caller_module_inst,
+            "component lowered core-call trampoline currently supports only "
+            "single-result scalar signatures");
+        return;
+    }
+
+    param_count = func_type->param_count;
+    if (param_count > sizeof(stack_args) / sizeof(stack_args[0])) {
+        call_args = wasm_runtime_malloc(sizeof(wasm_val_t) * param_count);
+        if (!call_args) {
+            wasm_runtime_set_exception(
+                caller_module_inst,
+                "component lowered core-call trampoline could not allocate "
+                "argument storage");
+            return;
+        }
+    }
+    memset(call_args, 0, sizeof(wasm_val_t) * param_count);
+    memset(stack_results, 0, sizeof(stack_results));
+
+    for (i = 0; i < param_count; i++) {
+        switch (func_type->types[i]) {
+            case VALUE_TYPE_I32:
+                call_args[i].kind = WASM_I32;
+                call_args[i].of.i32 = (int32)raw_args[i];
+                break;
+            case VALUE_TYPE_I64:
+                call_args[i].kind = WASM_I64;
+                call_args[i].of.i64 = (int64)raw_args[i];
+                break;
+            case VALUE_TYPE_F32:
+                call_args[i].kind = WASM_F32;
+                bh_memcpy_s(&call_args[i].of.f32, sizeof(call_args[i].of.f32),
+                            &raw_args[i], sizeof(float32));
+                break;
+            case VALUE_TYPE_F64:
+                call_args[i].kind = WASM_F64;
+                bh_memcpy_s(&call_args[i].of.f64, sizeof(call_args[i].of.f64),
+                            &raw_args[i], sizeof(float64));
+                break;
+            default:
+                if (call_args != stack_args)
+                    wasm_runtime_free(call_args);
+                wasm_runtime_set_exception(
+                    caller_module_inst,
+                    "component lowered core-call trampoline only supports "
+                    "scalar core signatures");
+                return;
+        }
+    }
+
+    component_inst = lowered_function->owner_instance;
+    wasm_runtime_clear_exception((WASMModuleInstanceCommon *)component_inst);
+    call_ok = wasm_component_call(component_inst, lowered_function->lowered_target,
+                                  func_type->result_count, stack_results,
+                                  param_count, call_args);
+    if (call_args != stack_args)
+        wasm_runtime_free(call_args);
+
+    if (!call_ok) {
+        const char *component_exception =
+            wasm_runtime_get_exception((WASMModuleInstanceCommon *)component_inst);
+        wasm_runtime_set_exception(caller_module_inst,
+                                   component_exception
+                                       ? component_exception
+                                       : "component canon lower call failed");
+        return;
+    }
+
+    if (func_type->result_count == 1) {
+        switch (func_type->types[param_count]) {
+            case VALUE_TYPE_I32:
+                raw_args[0] = (uint32)stack_results[0].of.i32;
+                break;
+            case VALUE_TYPE_I64:
+                raw_args[0] = (uint64)stack_results[0].of.i64;
+                break;
+            case VALUE_TYPE_F32:
+                raw_args[0] = 0;
+                bh_memcpy_s(&raw_args[0], sizeof(float32),
+                            &stack_results[0].of.f32, sizeof(float32));
+                break;
+            case VALUE_TYPE_F64:
+                bh_memcpy_s(&raw_args[0], sizeof(float64),
+                            &stack_results[0].of.f64, sizeof(float64));
+                break;
+            default:
+                wasm_runtime_set_exception(
+                    caller_module_inst,
+                    "component lowered core-call trampoline only supports "
+                    "scalar core results");
+                return;
+        }
+    }
+}
+
+static bool
+prepare_component_core_instance_patched_module(
+    WASMComponentCoreRuntimeInstance *runtime_inst, WASMModule *module,
+    char *error_buf, uint32 error_buf_size)
+{
+    if (!module)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "component canon lower direct core-call bindings require a core "
+            "module");
+
+    runtime_inst->patched_module =
+        wasm_runtime_malloc(sizeof(*runtime_inst->patched_module));
+    if (!runtime_inst->patched_module)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "allocate memory failed for patched core module");
+
+    bh_memcpy_s(runtime_inst->patched_module, sizeof(*runtime_inst->patched_module),
+                module, sizeof(*module));
+
+    runtime_inst->patched_import_entries =
+        wasm_runtime_malloc(sizeof(WASMImport) * module->import_count);
+    if (!runtime_inst->patched_import_entries)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "allocate memory failed for %u patched core imports",
+            module->import_count);
+
+    bh_memcpy_s(runtime_inst->patched_import_entries,
+                sizeof(WASMImport) * module->import_count, module->imports,
+                sizeof(WASMImport) * module->import_count);
+
+    runtime_inst->patched_module->imports = runtime_inst->patched_import_entries;
+    runtime_inst->patched_module->import_functions = runtime_inst->patched_import_entries;
+    runtime_inst->patched_module->import_tables =
+        runtime_inst->patched_import_entries + module->import_function_count;
+    runtime_inst->patched_module->import_memories =
+        runtime_inst->patched_module->import_tables + module->import_table_count;
+#if WASM_ENABLE_TAGS != 0
+    runtime_inst->patched_module->import_tags =
+        runtime_inst->patched_module->import_memories + module->import_memory_count;
+    runtime_inst->patched_module->import_globals =
+        runtime_inst->patched_module->import_tags + module->import_tag_count;
+#else
+    runtime_inst->patched_module->import_globals =
+        runtime_inst->patched_module->import_memories + module->import_memory_count;
+#endif
+
+    runtime_inst->patched_import_count = module->import_function_count;
+    return true;
+}
+
+static bool
+prepare_component_core_instance_import_args(
+    WASMComponentCoreRuntimeInstance *runtime_inst, WASMModule *module,
+    const WASMComponentInstArg *args, uint32 arg_len,
+    bool (*resolve_arg_ref)(const void *resolver_ctx,
+                            const WASMComponentSortIdx *sort_idx,
+                            WASMComponentCoreRuntimeRef *out_ref,
+                            char *error_buf, uint32 error_buf_size),
+    const void *resolver_ctx, char *error_buf, uint32 error_buf_size)
+{
+#if WASM_ENABLE_INTERP == 0
+    (void)runtime_inst;
+    (void)args;
+    (void)arg_len;
+    (void)resolve_arg_ref;
+    (void)resolver_ctx;
+    return set_component_runtime_error_fmt(
+        error_buf, error_buf_size,
+        "component canon lower direct core-call bindings require interpreter "
+        "support");
+#else
+    uint32 i, j;
+
+    if (!args || arg_len == 0)
+        return true;
+
+    if (!module)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "component canon lower direct core-call bindings require a core "
+            "module");
+
+    if (((WASMModuleCommon *)module)->module_type != Wasm_Module_Bytecode)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "component canon lower direct core-call bindings currently require "
+            "an interpreted core wasm module");
+
+    if (module->import_function_count == 0)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "core instance expression provides import args but the target core "
+            "module has no function imports");
+
+    if (!prepare_component_core_instance_patched_module(runtime_inst, module, error_buf,
+                                                        error_buf_size))
+        return false;
+
+    module = runtime_inst->patched_module;
+    runtime_inst->patched_import_attachments = wasm_runtime_malloc(
+        sizeof(WASMComponentLoweredImportAttachment)
+         * module->import_function_count);
+    if (!runtime_inst->patched_import_attachments)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "allocate memory failed for %u lowered core import attachments",
+            module->import_function_count);
+
+    memset(runtime_inst->patched_import_attachments, 0,
+           sizeof(WASMComponentLoweredImportAttachment)
+               * module->import_function_count);
+
+    for (i = 0; i < arg_len; i++) {
+        WASMComponentCoreRuntimeRef ref;
+        const char *import_name = args[i].name ? args[i].name->name : NULL;
+        bool matched = false;
+
+        if ((uintptr_t)args[i].idx.sort_idx <= 0x1000)
+            continue;
+
+        if (!import_name)
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                "core instance import binding %u is missing its name",
+                i);
+
+        if (!args[i].idx.sort_idx || !args[i].idx.sort_idx->sort
+            || args[i].idx.sort_idx->sort->sort != WASM_COMP_SORT_CORE_SORT
+            || args[i].idx.sort_idx->sort->core_sort != WASM_COMP_CORE_SORT_FUNC)
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                "core instance import \"%s\" currently only supports lowered "
+                "component function bindings",
+                import_name);
+
+        memset(&ref, 0, sizeof(ref));
+        if (!resolve_arg_ref(resolver_ctx, args[i].idx.sort_idx, &ref, error_buf,
+                             error_buf_size))
+            return false;
+
+        if (ref.type != WASM_COMP_CORE_RUNTIME_REF_LOWERED_FUNC
+            || !ref.of.lowered_function)
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                "core instance import \"%s\" currently only supports lowered "
+                "component function bindings",
+                import_name);
+
+        for (j = 0; j < module->import_function_count; j++) {
+            WASMFunctionImport *import = &module->import_functions[j].u.function;
+            WASMComponentLoweredImportAttachment *attachment =
+                &((WASMComponentLoweredImportAttachment *)
+                      runtime_inst->patched_import_attachments)[j];
+
+            if (!import->field_name || strcmp(import->field_name, import_name))
+                continue;
+
+            if (!validate_lowered_import_scalar_signature(
+                    ref.of.lowered_function, import->func_type, error_buf,
+                    error_buf_size))
+                return false;
+
+            import->func_ptr_linked = component_lowered_import_trampoline;
+            import->signature = NULL;
+            attachment->lowered_function = ref.of.lowered_function;
+            attachment->func_type = import->func_type;
+            import->attachment = attachment;
+            import->call_conv_raw = true;
+#if WASM_ENABLE_MULTI_MODULE != 0
+            import->import_func_linked = NULL;
+            import->import_module = NULL;
+#endif
+            matched = true;
+            break;
+        }
+
+        if (!matched)
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                "core instance import \"%s\" was not found on the target core "
+                "module",
+                import_name);
+    }
+
+    return true;
+#endif
 }
 
 typedef enum WASMComponentCanonLiftValueKind {
@@ -7510,9 +8003,21 @@ instantiate_component_core_instance(WASMComponentInstance *inst,
                 core_inst->expression.with_args.idx);
 
         module = inst->core_modules[core_inst->expression.with_args.idx];
+        if (!prepare_component_core_instance_import_args(
+                runtime_inst, (WASMModule *)module,
+                core_inst->expression.with_args.args,
+                core_inst->expression.with_args.arg_len,
+                resolve_component_core_inst_arg_ref, inst, error_buf,
+                error_buf_size)) {
+            destroy_component_core_instance(runtime_inst);
+            return false;
+        }
         wasm_runtime_instantiation_args_set_defaults(&args);
         runtime_inst->module_inst = wasm_runtime_instantiate_internal(
-            (WASMModuleCommon *)module, NULL, NULL, &args, error_buf,
+            (WASMModuleCommon *)(runtime_inst->patched_module
+                                     ? runtime_inst->patched_module
+                                     : (WASMModule *)module),
+            NULL, NULL, &args, error_buf,
             error_buf_size);
         if (!runtime_inst->module_inst)
             return false;
@@ -7572,9 +8077,19 @@ instantiate_nested_component_core_instance(
             goto fail_oob;
 
         module = bindings->core_modules[core_inst->expression.with_args.idx];
+        if (!prepare_component_core_instance_import_args(
+                child_inst, (WASMModule *)module,
+                core_inst->expression.with_args.args,
+                core_inst->expression.with_args.arg_len,
+                resolve_nested_component_core_inst_arg_ref, bindings, error_buf,
+                error_buf_size))
+            goto fail;
         wasm_runtime_instantiation_args_set_defaults(&args);
         child_inst->module_inst = wasm_runtime_instantiate_internal(
-            (WASMModuleCommon *)module, NULL, NULL, &args, error_buf,
+            (WASMModuleCommon *)(child_inst->patched_module
+                                     ? child_inst->patched_module
+                                     : (WASMModule *)module),
+            NULL, NULL, &args, error_buf,
             error_buf_size);
         if (!child_inst->module_inst)
             goto fail;

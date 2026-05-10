@@ -12,6 +12,8 @@
 #include "wasm_component_value.h"
 
 struct InstantiationArgs2;
+struct WASMModule;
+struct WASMImport;
 
 typedef enum WASMComponentCoreRuntimeRefType {
     WASM_COMP_CORE_RUNTIME_REF_FUNC = 0,
@@ -47,6 +49,10 @@ typedef struct WASMComponentCoreNamedExport {
 
 typedef struct WASMComponentCoreRuntimeInstance {
     wasm_module_inst_t module_inst;
+    struct WASMModule *patched_module;
+    struct WASMImport *patched_import_entries;
+    void *patched_import_attachments;
+    uint32 patched_import_count;
     uint32 export_count;
     WASMComponentCoreNamedExport *exports;
 } WASMComponentCoreRuntimeInstance;
