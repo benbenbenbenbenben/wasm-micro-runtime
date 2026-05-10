@@ -123,8 +123,8 @@ instance bindings, and currently covers:
 - exported scalar `func` members
 - exported top-level public `func` members, plus cross-component nested
   `with_args` `func` members, whose signatures stay within the current scalar /
-  UTF-8 string / variable-length `list<u8>` / `list<string>` / tuple-record
-  leaf subset, with at most one result
+  UTF-8 string / variable-length `list<scalar>` / `list<string>` /
+  tuple-record leaf subset, with at most one result
 - exported `core module` members
 - exported scalar `value` members
 - exported variable-length `list<scalar>` / `list<string>` `value` members
@@ -134,8 +134,8 @@ instance bindings, and currently covers:
 
 Typed matching of exported component `func` / `value` / `component` members is
 still incomplete: typed function matching remains limited to the current scalar /
-UTF-8 string / variable-length `list<u8>` / `list<string>` / tuple-record
-subset, typed value matching beyond the current scalar / UTF-8 string /
+UTF-8 string / variable-length `list<scalar>` / `list<string>` /
+tuple-record subset, typed value matching beyond the current scalar / UTF-8 string /
 variable-length `list<u8>` / `list<string>` tuple-record subset is still
 incomplete, and typed exported
 `component` matching currently only covers zero-import component types plus the
