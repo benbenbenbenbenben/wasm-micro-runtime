@@ -228,6 +228,14 @@ wasm_component_lookup_function(const WASMComponentInstance *inst,
                                const char *name);
 
 bool
+wasm_component_func_get_generic_signature(
+    const WASMComponentInstance *inst,
+    const WASMComponentRuntimeFunc *function, uint32 *param_count,
+    wasm_valkind_t *param_types, uint32 param_types_capacity,
+    uint32 *result_count, wasm_valkind_t *result_types,
+    uint32 result_types_capacity, char *error_buf, uint32 error_buf_size);
+
+bool
 wasm_component_lookup_value(const WASMComponentInstance *inst, const char *name,
                             wasm_component_value_t *value, char *error_buf,
                             uint32 error_buf_size);

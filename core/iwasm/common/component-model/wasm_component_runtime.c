@@ -108,6 +108,20 @@ set_component_call_error_fmt(WASMComponentInstance *inst, const char *format, ..
 }
 
 static bool
+resolve_component_scalar_primitive_type(
+    const WASMComponent *component, const WASMComponentValueType *value_type,
+    const char *import_name, const char *member_name, const char *position,
+    uint32 index, WASMComponentPrimValType *out_primitive_type, bool *supported,
+    char *error_buf, uint32 error_buf_size);
+
+static bool
+component_scalar_prim_to_core(uint8 prim_type, uint8 *core_type,
+                              wasm_valkind_t *public_kind);
+
+static uint32
+get_component_func_result_count(const WASMComponentFuncType *component_type);
+
+static bool
 alloc_component_scope(WASMComponentRuntimeScope **out_scope,
                       WASMComponentRuntimeScope *parent_scope,
                       WASMComponentRuntimeComponent *const *components,
@@ -1334,6 +1348,119 @@ wasm_component_lookup_function(const WASMComponentInstance *inst,
                    WASM_COMP_RUNTIME_REF_FUNC, &ref)
             ? ref.of.function
            : NULL;
+}
+
+bool
+wasm_component_func_get_generic_signature(
+    const WASMComponentInstance *inst,
+    const WASMComponentRuntimeFunc *function, uint32 *param_count,
+    wasm_valkind_t *param_types, uint32 param_types_capacity,
+    uint32 *result_count, wasm_valkind_t *result_types,
+    uint32 result_types_capacity, char *error_buf, uint32 error_buf_size)
+{
+    const WASMComponent *component;
+    const WASMComponentTypes *type_entry;
+    WASMComponentFuncType *func_type;
+    uint32 param_count_local, result_count_local;
+    uint32 i;
+
+    if (error_buf && error_buf_size > 0)
+        error_buf[0] = '\0';
+
+    if (!inst || !function)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "component function handle is not available");
+
+    component = function->type_owner_component ? function->type_owner_component
+                                               : &inst->module->component;
+    if (!component)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "component function is missing type metadata");
+
+    type_entry = wasm_component_lookup_type(component, function->type_idx);
+    if (!type_entry)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "component function uses unresolved type index %u",
+            function->type_idx);
+
+    if (type_entry->tag != WASM_COMP_FUNC_TYPE || !type_entry->type.func_type)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "component function type index %u is not a function",
+            function->type_idx);
+
+    func_type = type_entry->type.func_type;
+    param_count_local = func_type->params ? func_type->params->count : 0;
+    result_count_local = get_component_func_result_count(func_type);
+
+    if (param_types && param_count_local > param_types_capacity)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "generic component signature buffer is too small for %u parameters",
+            param_count_local);
+
+    if (result_types && result_count_local > result_types_capacity)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "generic component signature buffer is too small for %u results",
+            result_count_local);
+
+    for (i = 0; i < param_count_local; i++) {
+        WASMComponentPrimValType primitive_type;
+        bool supported = false;
+        uint8 ignored_core_type = 0;
+        wasm_valkind_t public_kind = WASM_I32;
+
+        if (!resolve_component_scalar_primitive_type(
+                component, func_type->params->params[i].value_type,
+                "generic host API", NULL, "parameter", i, &primitive_type,
+                &supported, error_buf, error_buf_size))
+            return false;
+
+        if (!supported
+            || !component_scalar_prim_to_core(primitive_type, &ignored_core_type,
+                                              &public_kind))
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                "component function parameter %u requires component-specific APIs",
+                i);
+
+        if (param_types)
+            param_types[i] = public_kind;
+    }
+
+    for (i = 0; i < result_count_local; i++) {
+        WASMComponentPrimValType primitive_type;
+        bool supported = false;
+        uint8 ignored_core_type = 0;
+        wasm_valkind_t public_kind = WASM_I32;
+
+        if (!resolve_component_scalar_primitive_type(
+                component, func_type->results->results, "generic host API",
+                NULL, "result", i, &primitive_type, &supported, error_buf,
+                error_buf_size))
+            return false;
+
+        if (!supported
+            || !component_scalar_prim_to_core(primitive_type, &ignored_core_type,
+                                              &public_kind))
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                "component function result %u requires component-specific APIs",
+                i);
+
+        if (result_types)
+            result_types[i] = public_kind;
+    }
+
+    if (param_count)
+        *param_count = param_count_local;
+    if (result_count)
+        *result_count = result_count_local;
+    return true;
 }
 
 bool

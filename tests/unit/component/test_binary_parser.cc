@@ -11019,7 +11019,7 @@ TEST_F(BinaryParserTest, TestRuntimeInstantiateAndDeinstantiateComponent)
     wasm_runtime_unload(module);
 }
 
-TEST_F(BinaryParserTest, TestRuntimeLookupComponentFunctionNotSupportedYet)
+TEST_F(BinaryParserTest, TestGenericRuntimeApisSupportScalarComponentFunction)
 {
     bool ret = helper->read_wasm_file("add.wasm");
     ASSERT_TRUE(ret);
@@ -11032,15 +11032,73 @@ TEST_F(BinaryParserTest, TestRuntimeLookupComponentFunctionNotSupportedYet)
         helper->component_raw, helper->wasm_file_size, &load_args,
         helper->error_buf, (uint32_t)sizeof(helper->error_buf));
     ASSERT_NE(module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(append_component_export_alias_sections(
+        (WASMComponentModule *)module));
 
     wasm_module_inst_t module_inst =
         instantiate_component_with_default_wasi(module, helper.get());
     ASSERT_NE(module_inst, nullptr) << helper->error_buf;
 
-    wasm_function_inst_t func = wasm_runtime_lookup_function(module_inst, "main");
-    ASSERT_EQ(func, nullptr);
+    wasm_exec_env_t exec_env =
+        wasm_runtime_create_exec_env(module_inst, helper->stack_size);
+    ASSERT_NE(exec_env, nullptr);
+    ASSERT_EQ(wasm_runtime_get_module_inst(exec_env), module_inst);
+
+    wasm_function_inst_t func =
+        wasm_runtime_lookup_function(module_inst, "aliased-add");
+    ASSERT_NE(func, nullptr) << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(wasm_func_get_param_count(func, module_inst), 2u);
+    ASSERT_EQ(wasm_func_get_result_count(func, module_inst), 1u);
+
+    wasm_valkind_t param_types[2] = {};
+    wasm_valkind_t result_types[1] = {};
+    wasm_func_get_param_types(func, module_inst, param_types);
+    wasm_func_get_result_types(func, module_inst, result_types);
+    ASSERT_EQ(param_types[0], WASM_I32);
+    ASSERT_EQ(param_types[1], WASM_I32);
+    ASSERT_EQ(result_types[0], WASM_I32);
+
+    wasm_val_t args[2] = {};
+    wasm_val_t results[1] = {};
+    args[0].kind = WASM_I32;
+    args[0].of.i32 = 1;
+    args[1].kind = WASM_I32;
+    args[1].of.i32 = 2;
+    ASSERT_FALSE(
+        wasm_runtime_call_wasm_a(exec_env, func, 1, results, 2, args));
     ASSERT_STREQ(wasm_runtime_get_exception(module_inst),
-                 "component function lookup is not supported yet");
+                 "use wasm_runtime_call_component() to invoke component "
+                 "functions");
+
+    wasm_runtime_destroy_exec_env(exec_env);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest, TestGenericLookupRejectsNonScalarComponentFunction)
+{
+    bool ret = helper->read_wasm_file("list_u8_post_return.component.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "runtime-lookup-component-nonscalar";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    wasm_module_inst_t module_inst =
+        instantiate_component_with_default_wasi(module, helper.get());
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_function_inst_t func = wasm_runtime_lookup_function(module_inst, "echo");
+    ASSERT_EQ(func, nullptr);
+    ASSERT_NE(wasm_runtime_get_exception(module_inst), nullptr);
+    ASSERT_NE(strstr(wasm_runtime_get_exception(module_inst),
+                     "requires component-specific APIs"),
+              nullptr);
 
     wasm_runtime_deinstantiate(module_inst);
     wasm_runtime_unload(module);

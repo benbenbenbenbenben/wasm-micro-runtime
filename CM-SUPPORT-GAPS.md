@@ -84,7 +84,12 @@ Public component-facing APIs now include:
   - `wasm_component_value_get_data(...)`
   - `wasm_component_value_destroy(...)`
 
-Important nuance: the old generic core-Wasm entry points are still component-unaware in places. For example, `wasm_runtime_lookup_function(...)` and `wasm_runtime_create_exec_env(...)` still reject component instances. The supported surface is the newer **component-specific** API above.
+Important nuance: the old generic core-Wasm entry points are still only
+**partially** component-aware. `wasm_runtime_lookup_function(...)` now accepts
+component instances for top-level exported component functions whose signatures
+fit the generic scalar `wasm_val_t` shape, and `wasm_runtime_create_exec_env(...)`
+now also accepts component instances. Actual component invocation still routes
+through the newer **component-specific** APIs above.
 
 ### 1.4 Top-level component imports now have a host-facing API
 
@@ -298,8 +303,10 @@ The public host story is much better than before, but still not complete.
 
 Current limitations include:
 
-- generic `wasm_runtime_lookup_function(...)` still rejects component instances
-- generic `wasm_runtime_create_exec_env(...)` still rejects component instances
+- generic `wasm_runtime_lookup_function(...)` only exposes top-level exported
+  component functions whose signatures stay within the generic scalar
+  `wasm_val_t` shape; string / `list<u8>` / tuple-record component functions
+  still require the component-specific lookup/call APIs
 - `wasm_runtime_call_component(...)` remains scalar-only even for nested handles
 - `wasm_runtime_call_component_values(...)` still only supports the current string / `list<u8>` / limited tuple-record subset
 - lowered core-function execution is still only exposed indirectly through

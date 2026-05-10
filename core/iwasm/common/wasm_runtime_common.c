@@ -2029,14 +2029,6 @@ WASMExecEnv *
 wasm_runtime_create_exec_env(WASMModuleInstanceCommon *module_inst,
                              uint32 stack_size)
 {
-#if WASM_ENABLE_COMPONENT_MODEL != 0
-    if (module_inst->module_type == Wasm_Module_Component) {
-        wasm_runtime_set_exception(
-            module_inst,
-            "component exec env creation is not supported yet");
-        return NULL;
-    }
-#endif
     return wasm_exec_env_create(module_inst, stack_size);
 }
 
@@ -2631,10 +2623,26 @@ wasm_runtime_lookup_function(WASMModuleInstanceCommon *const module_inst,
 {
 #if WASM_ENABLE_COMPONENT_MODEL != 0
     if (module_inst->module_type == Wasm_Module_Component) {
-        wasm_runtime_set_exception(
-            module_inst,
-            "component function lookup is not supported yet");
-        return NULL;
+        WASMComponentRuntimeFunc *function =
+            wasm_component_lookup_function((WASMComponentInstance *)module_inst,
+                                           name);
+        char error_buf[128] = { 0 };
+
+        if (!function)
+            return NULL;
+
+        if (!wasm_component_func_get_generic_signature(
+                (WASMComponentInstance *)module_inst, function, NULL, NULL, 0,
+                NULL, NULL, 0, error_buf, sizeof(error_buf))) {
+            wasm_runtime_set_exception(
+                module_inst,
+                error_buf[0] ? error_buf
+                             : "component function requires component-specific "
+                               "APIs");
+            return NULL;
+        }
+
+        return (WASMFunctionInstanceCommon *)function;
     }
 #endif
 #if WASM_ENABLE_INTERP != 0
@@ -2651,6 +2659,29 @@ wasm_runtime_lookup_function(WASMModuleInstanceCommon *const module_inst,
 }
 
 #if WASM_ENABLE_COMPONENT_MODEL != 0
+static bool
+wasm_runtime_component_get_function_signature(
+    WASMModuleInstanceCommon *module_inst, WASMFunctionInstanceCommon *func_inst,
+    uint32 *param_count, wasm_valkind_t *param_types,
+    uint32 param_types_capacity, uint32 *result_count,
+    wasm_valkind_t *result_types, uint32 result_types_capacity)
+{
+    char error_buf[128] = { 0 };
+
+    if (wasm_component_func_get_generic_signature(
+            (WASMComponentInstance *)module_inst,
+            (WASMComponentRuntimeFunc *)func_inst, param_count, param_types,
+            param_types_capacity, result_count, result_types,
+            result_types_capacity, error_buf, sizeof(error_buf)))
+        return true;
+
+    wasm_runtime_set_exception(
+        module_inst,
+        error_buf[0] ? error_buf
+                     : "component function requires component-specific APIs");
+    return false;
+}
+
 WASMComponentRuntimeFunc *
 wasm_runtime_lookup_component_function(WASMModuleInstanceCommon *const module_inst,
                                        const char *name)
@@ -2743,6 +2774,16 @@ uint32
 wasm_func_get_param_count(WASMFunctionInstanceCommon *const func_inst,
                           WASMModuleInstanceCommon *const module_inst)
 {
+#if WASM_ENABLE_COMPONENT_MODEL != 0
+    if (module_inst->module_type == Wasm_Module_Component) {
+        uint32 param_count = 0;
+
+        if (!wasm_runtime_component_get_function_signature(
+                module_inst, func_inst, &param_count, NULL, 0, NULL, NULL, 0))
+            return 0;
+        return param_count;
+    }
+#endif
     WASMFuncType *type =
         wasm_runtime_get_function_type(func_inst, module_inst->module_type);
     bh_assert(type);
@@ -2754,6 +2795,16 @@ uint32
 wasm_func_get_result_count(WASMFunctionInstanceCommon *const func_inst,
                            WASMModuleInstanceCommon *const module_inst)
 {
+#if WASM_ENABLE_COMPONENT_MODEL != 0
+    if (module_inst->module_type == Wasm_Module_Component) {
+        uint32 result_count = 0;
+
+        if (!wasm_runtime_component_get_function_signature(
+                module_inst, func_inst, NULL, NULL, 0, &result_count, NULL, 0))
+            return 0;
+        return result_count;
+    }
+#endif
     WASMFuncType *type =
         wasm_runtime_get_function_type(func_inst, module_inst->module_type);
     bh_assert(type);
@@ -2790,6 +2841,15 @@ wasm_func_get_param_types(WASMFunctionInstanceCommon *const func_inst,
                           WASMModuleInstanceCommon *const module_inst,
                           wasm_valkind_t *param_types)
 {
+#if WASM_ENABLE_COMPONENT_MODEL != 0
+    if (module_inst->module_type == Wasm_Module_Component) {
+        if (!wasm_runtime_component_get_function_signature(
+                module_inst, func_inst, NULL, param_types, UINT32_MAX, NULL,
+                NULL, 0))
+            return;
+        return;
+    }
+#endif
     WASMFuncType *type =
         wasm_runtime_get_function_type(func_inst, module_inst->module_type);
     uint32 i;
@@ -2806,6 +2866,15 @@ wasm_func_get_result_types(WASMFunctionInstanceCommon *const func_inst,
                            WASMModuleInstanceCommon *const module_inst,
                            wasm_valkind_t *result_types)
 {
+#if WASM_ENABLE_COMPONENT_MODEL != 0
+    if (module_inst->module_type == Wasm_Module_Component) {
+        if (!wasm_runtime_component_get_function_signature(
+                module_inst, func_inst, NULL, NULL, 0, NULL, result_types,
+                UINT32_MAX))
+            return;
+        return;
+    }
+#endif
     WASMFuncType *type =
         wasm_runtime_get_function_type(func_inst, module_inst->module_type);
     uint32 i;
@@ -2995,6 +3064,15 @@ wasm_runtime_call_wasm(WASMExecEnv *exec_env,
         LOG_ERROR("Invalid exec env stack info.");
         return false;
     }
+
+#if WASM_ENABLE_COMPONENT_MODEL != 0
+    if (exec_env->module_inst->module_type == Wasm_Module_Component) {
+        wasm_runtime_set_exception(
+            exec_env->module_inst,
+            "use wasm_runtime_call_component() to invoke component functions");
+        return false;
+    }
+#endif
 
 #if WASM_ENABLE_GC == 0 && WASM_ENABLE_REF_TYPES != 0
     if (!wasm_runtime_prepare_call_function(exec_env, function, argv, argc,
@@ -3233,6 +3311,15 @@ wasm_runtime_call_wasm_a(WASMExecEnv *exec_env,
     WASMFuncType *type;
     bool ret = false;
 
+#if WASM_ENABLE_COMPONENT_MODEL != 0
+    if (exec_env->module_inst->module_type == Wasm_Module_Component) {
+        wasm_runtime_set_exception(
+            exec_env->module_inst,
+            "use wasm_runtime_call_component() to invoke component functions");
+        goto fail1;
+    }
+#endif
+
     module_type = exec_env->module_inst->module_type;
     type = wasm_runtime_get_function_type(function, module_type);
 
@@ -3305,6 +3392,15 @@ wasm_runtime_call_wasm_v(WASMExecEnv *exec_env,
     uint64 total_size;
     uint32 i = 0, module_type;
     va_list vargs;
+
+#if WASM_ENABLE_COMPONENT_MODEL != 0
+    if (exec_env->module_inst->module_type == Wasm_Module_Component) {
+        wasm_runtime_set_exception(
+            exec_env->module_inst,
+            "use wasm_runtime_call_component() to invoke component functions");
+        goto fail1;
+    }
+#endif
 
     module_type = exec_env->module_inst->module_type;
     type = wasm_runtime_get_function_type(function, module_type);
