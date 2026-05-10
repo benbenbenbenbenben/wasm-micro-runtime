@@ -25221,6 +25221,190 @@ TEST_F(
 }
 
 TEST_F(BinaryParserTest,
+       TestPublicComponentInstantiationBindsTypedTopLevelListS32ValueInstanceImports)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    const int32_t element_values[] = { 17, 42 };
+    std::vector<uint8_t> list_payload;
+    append_component_list_scalar_payload(&list_payload, 2, element_values,
+                                         sizeof(element_values));
+
+    LoadArgs source_load_args = {};
+    char source_module_name[] = "typed-list-s32-value-instance-import-source";
+    source_load_args.name = source_module_name;
+    wasm_module_t source_module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &source_load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(source_module, nullptr) << helper->error_buf;
+
+    const int32_t source_list_type_idx = append_component_list_type(
+        (WASMComponentModule *)source_module, WASM_COMP_PRIMVAL_S32, false, 0);
+    ASSERT_GE(source_list_type_idx, 0);
+    const WASMComponentValueType source_list_type =
+        make_component_type_index_value_type((uint32_t)source_list_type_idx);
+    WASMComponentRuntimeValue imported_value = {};
+    ASSERT_TRUE(wasm_component_runtime_value_init_borrowed(
+        &imported_value, &((WASMComponentModule *)source_module)->component,
+        &source_list_type, list_payload.data(), (uint32_t)list_payload.size(),
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf)));
+    WASMComponentNamedExport imported_export = {};
+    imported_export.name = "forwarded-value";
+    imported_export.ref.type = WASM_COMP_RUNTIME_REF_VALUE;
+    imported_export.ref.of.value = &imported_value;
+    WASMComponentRuntimeInstance imported_instance = {};
+    imported_instance.export_count = 1;
+    imported_instance.exports = &imported_export;
+
+    uint32_t target_wasm_file_size = 0;
+    auto *target_component_raw =
+        (unsigned char *)bh_read_file_to_buffer("add.wasm", &target_wasm_file_size);
+    ASSERT_NE(target_component_raw, nullptr);
+
+    LoadArgs target_load_args = {};
+    char target_module_name[] = "typed-list-s32-value-instance-import-target";
+    target_load_args.name = target_module_name;
+    wasm_module_t target_module = wasm_runtime_load_ex(
+        target_component_raw, target_wasm_file_size, &target_load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(target_module, nullptr) << helper->error_buf;
+
+    const int32_t target_list_type_idx = append_component_list_type(
+        (WASMComponentModule *)target_module, WASM_COMP_PRIMVAL_S32, false, 0);
+    ASSERT_GE(target_list_type_idx, 0);
+    const WASMComponentValueType target_list_type =
+        make_component_type_index_value_type((uint32_t)target_list_type_idx);
+    ASSERT_TRUE(append_top_level_typed_value_instance_import_sections_with_value_type(
+        (WASMComponentModule *)target_module, target_list_type));
+
+    struct InstantiationArgs2 *inst_args = nullptr;
+    ASSERT_TRUE(wasm_runtime_instantiation_args_create(&inst_args));
+    wasm_runtime_instantiation_args_set_default_stack_size(inst_args,
+                                                           helper->stack_size);
+    wasm_runtime_instantiation_args_set_host_managed_heap_size(
+        inst_args, helper->heap_size);
+
+    wasm_component_import_binding_t import_binding = {};
+    import_binding.name = "source";
+    import_binding.kind = WASM_COMPONENT_EXTERN_KIND_INSTANCE;
+    import_binding.value.instance = &imported_instance;
+    wasm_runtime_instantiation_args_set_component_imports(inst_args,
+                                                          &import_binding, 1);
+
+    wasm_module_inst_t target_inst =
+        wasm_runtime_instantiate_ex2(target_module, inst_args, helper->error_buf,
+                                     (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(target_inst, nullptr) << helper->error_buf;
+
+    wasm_component_instance_t forwarded_instance =
+        wasm_runtime_lookup_component_instance(target_inst, "forwarded-source");
+    ASSERT_NE(forwarded_instance, nullptr);
+    ASSERT_EQ(forwarded_instance->export_count, 1u);
+    ASSERT_EQ(forwarded_instance->exports[0].ref.type, WASM_COMP_RUNTIME_REF_VALUE);
+    ASSERT_EQ(forwarded_instance->exports[0].ref.of.value->type.kind,
+              WASM_COMP_RUNTIME_VALUE_TYPE_DEFINED);
+    ASSERT_EQ(forwarded_instance->exports[0].ref.of.value->type.type.defined_type->tag,
+              WASM_COMP_DEF_VAL_LIST);
+    ASSERT_EQ(memcmp(wasm_component_runtime_value_get_data(
+                         forwarded_instance->exports[0].ref.of.value),
+                     list_payload.data(), list_payload.size()),
+              0);
+
+    wasm_runtime_instantiation_args_destroy(inst_args);
+    wasm_runtime_deinstantiate(target_inst);
+    wasm_runtime_unload(target_module);
+    BH_FREE(target_component_raw);
+    wasm_component_runtime_value_clear(&imported_value);
+    wasm_runtime_unload(source_module);
+}
+
+TEST_F(
+    BinaryParserTest,
+    TestPublicComponentInstantiationRejectsMismatchedTypedTopLevelListS32ValueInstanceImports)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    std::vector<uint8_t> list_payload;
+    append_component_list_u8_payload(&list_payload, "abc", 3);
+
+    LoadArgs source_load_args = {};
+    char source_module_name[] = "typed-list-s32-value-instance-import-source-mismatch";
+    source_load_args.name = source_module_name;
+    wasm_module_t source_module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &source_load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(source_module, nullptr) << helper->error_buf;
+
+    const int32_t source_list_type_idx = append_component_list_type(
+        (WASMComponentModule *)source_module, WASM_COMP_PRIMVAL_U8, false, 0);
+    ASSERT_GE(source_list_type_idx, 0);
+    const WASMComponentValueType source_list_type =
+        make_component_type_index_value_type((uint32_t)source_list_type_idx);
+    WASMComponentRuntimeValue imported_value = {};
+    ASSERT_TRUE(wasm_component_runtime_value_init_borrowed(
+        &imported_value, &((WASMComponentModule *)source_module)->component,
+        &source_list_type, list_payload.data(), (uint32_t)list_payload.size(),
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf)));
+    WASMComponentNamedExport imported_export = {};
+    imported_export.name = "forwarded-value";
+    imported_export.ref.type = WASM_COMP_RUNTIME_REF_VALUE;
+    imported_export.ref.of.value = &imported_value;
+    WASMComponentRuntimeInstance imported_instance = {};
+    imported_instance.export_count = 1;
+    imported_instance.exports = &imported_export;
+
+    uint32_t target_wasm_file_size = 0;
+    auto *target_component_raw =
+        (unsigned char *)bh_read_file_to_buffer("add.wasm", &target_wasm_file_size);
+    ASSERT_NE(target_component_raw, nullptr);
+
+    LoadArgs target_load_args = {};
+    char target_module_name[] = "typed-list-s32-value-instance-import-target-mismatch";
+    target_load_args.name = target_module_name;
+    wasm_module_t target_module = wasm_runtime_load_ex(
+        target_component_raw, target_wasm_file_size, &target_load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(target_module, nullptr) << helper->error_buf;
+
+    const int32_t target_list_type_idx = append_component_list_type(
+        (WASMComponentModule *)target_module, WASM_COMP_PRIMVAL_S32, false, 0);
+    ASSERT_GE(target_list_type_idx, 0);
+    const WASMComponentValueType target_list_type =
+        make_component_type_index_value_type((uint32_t)target_list_type_idx);
+    ASSERT_TRUE(append_top_level_typed_value_instance_import_sections_with_value_type(
+        (WASMComponentModule *)target_module, target_list_type));
+
+    struct InstantiationArgs2 *inst_args = nullptr;
+    ASSERT_TRUE(wasm_runtime_instantiation_args_create(&inst_args));
+    wasm_runtime_instantiation_args_set_default_stack_size(inst_args,
+                                                           helper->stack_size);
+    wasm_runtime_instantiation_args_set_host_managed_heap_size(
+        inst_args, helper->heap_size);
+
+    wasm_component_import_binding_t import_binding = {};
+    import_binding.name = "source";
+    import_binding.kind = WASM_COMPONENT_EXTERN_KIND_INSTANCE;
+    import_binding.value.instance = &imported_instance;
+    wasm_runtime_instantiation_args_set_component_imports(inst_args,
+                                                          &import_binding, 1);
+
+    wasm_module_inst_t target_inst =
+        wasm_runtime_instantiate_ex2(target_module, inst_args, helper->error_buf,
+                                     (uint32_t)sizeof(helper->error_buf));
+    ASSERT_EQ(target_inst, nullptr);
+    ASSERT_NE(strstr(helper->error_buf, "value type mismatch"), nullptr);
+    ASSERT_NE(strstr(helper->error_buf, "forwarded-value"), nullptr);
+
+    wasm_runtime_instantiation_args_destroy(inst_args);
+    wasm_runtime_unload(target_module);
+    BH_FREE(target_component_raw);
+    wasm_component_runtime_value_clear(&imported_value);
+    wasm_runtime_unload(source_module);
+}
+
+TEST_F(BinaryParserTest,
        TestPublicComponentInstantiationBindsTypedTopLevelCompositeValueInstanceImports)
 {
     bool ret = helper->read_wasm_file("add.wasm");
@@ -30622,6 +30806,69 @@ TEST_F(BinaryParserTest, TestRuntimeBindsTypedNestedListStringValueInstanceImpor
     wasm_runtime_unload(module);
 }
 
+TEST_F(BinaryParserTest, TestRuntimeBindsTypedNestedListS32ValueInstanceImports)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    const int32_t element_values[] = { 17, 42 };
+    std::vector<uint8_t> payload;
+    append_component_list_scalar_payload(&payload, 2, element_values,
+                                         sizeof(element_values));
+
+    LoadArgs load_args = {};
+    char module_name[] = "runtime-typed-nested-list-s32-value-instance-imports";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    const int32_t source_list_type_idx = append_component_list_type(
+        (WASMComponentModule *)module, WASM_COMP_PRIMVAL_S32, false, 0);
+    ASSERT_GE(source_list_type_idx, 0);
+    const WASMComponentValueType source_value_type =
+        make_component_type_index_value_type((uint32_t)source_list_type_idx);
+    ASSERT_TRUE(append_top_level_inline_value_instance_sections_with_type_and_bytes(
+        (WASMComponentModule *)module, source_value_type, payload.data(),
+        (uint32_t)payload.size(), "source-value-instance", "forwarded-value"));
+
+    const int32_t target_list_type_idx = append_component_list_type(
+        (WASMComponentModule *)module, WASM_COMP_PRIMVAL_S32, false, 0);
+    ASSERT_GE(target_list_type_idx, 0);
+    const WASMComponentValueType target_value_type =
+        make_component_type_index_value_type((uint32_t)target_list_type_idx);
+    ASSERT_TRUE(append_nested_typed_value_instance_reexport_sections_with_value_type(
+        (WASMComponentModule *)module, &((WASMComponentModule *)module)->component,
+        target_value_type));
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_instance_t forwarded_instance =
+        wasm_runtime_lookup_component_instance(module_inst,
+                                              "typed-forwarded-value-instance");
+    ASSERT_NE(forwarded_instance, nullptr);
+    ASSERT_EQ(forwarded_instance->export_count, 1u);
+    ASSERT_EQ(std::string(forwarded_instance->exports[0].name), "forwarded-value");
+    ASSERT_EQ(forwarded_instance->exports[0].ref.type, WASM_COMP_RUNTIME_REF_VALUE);
+    ASSERT_EQ(forwarded_instance->exports[0].ref.of.value->type.kind,
+              WASM_COMP_RUNTIME_VALUE_TYPE_DEFINED);
+    ASSERT_EQ(forwarded_instance->exports[0].ref.of.value->type.type.defined_type->tag,
+              WASM_COMP_DEF_VAL_LIST);
+    ASSERT_EQ(memcmp(wasm_component_runtime_value_get_data(
+                         forwarded_instance->exports[0].ref.of.value),
+                     payload.data(), payload.size()),
+              0);
+
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
 TEST_F(BinaryParserTest,
        TestRuntimeBindsTypedNestedCompositeValueInstanceImports)
 {
@@ -30746,6 +30993,53 @@ TEST_F(BinaryParserTest,
 
     const int32_t target_list_type_idx = append_component_list_type(
         (WASMComponentModule *)module, WASM_COMP_PRIMVAL_STRING, false, 0);
+    ASSERT_GE(target_list_type_idx, 0);
+    const WASMComponentValueType target_value_type =
+        make_component_type_index_value_type((uint32_t)target_list_type_idx);
+    ASSERT_TRUE(append_nested_typed_value_instance_reexport_sections_with_value_type(
+        (WASMComponentModule *)module, &((WASMComponentModule *)module)->component,
+        target_value_type));
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_EQ(module_inst, nullptr);
+    ASSERT_NE(strstr(helper->error_buf, "value type mismatch"), nullptr);
+    ASSERT_NE(strstr(helper->error_buf, "forwarded-value"), nullptr);
+
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestRuntimeRejectsMismatchedTypedNestedListS32ValueInstanceImports)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    std::vector<uint8_t> payload;
+    append_component_list_u8_payload(&payload, "abc", 3);
+
+    LoadArgs load_args = {};
+    char module_name[] = "runtime-typed-nested-list-s32-value-instance-mismatch";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    const int32_t source_list_type_idx = append_component_list_type(
+        (WASMComponentModule *)module, WASM_COMP_PRIMVAL_U8, false, 0);
+    ASSERT_GE(source_list_type_idx, 0);
+    const WASMComponentValueType source_value_type =
+        make_component_type_index_value_type((uint32_t)source_list_type_idx);
+    ASSERT_TRUE(append_top_level_inline_value_instance_sections_with_type_and_bytes(
+        (WASMComponentModule *)module, source_value_type, payload.data(),
+        (uint32_t)payload.size(), "source-value-instance", "forwarded-value"));
+
+    const int32_t target_list_type_idx = append_component_list_type(
+        (WASMComponentModule *)module, WASM_COMP_PRIMVAL_S32, false, 0);
     ASSERT_GE(target_list_type_idx, 0);
     const WASMComponentValueType target_value_type =
         make_component_type_index_value_type((uint32_t)target_list_type_idx);
