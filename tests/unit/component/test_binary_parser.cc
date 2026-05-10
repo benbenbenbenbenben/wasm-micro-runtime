@@ -13349,6 +13349,125 @@ TEST_F(BinaryParserTest,
 }
 
 TEST_F(BinaryParserTest,
+       TestNestedCoreWasmCanCallLoweredMixedCompositeParamComponentFunctionDirectly)
+{
+    bool ret = helper->read_wasm_file("composite_string_params.component.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "nested-core-wasm-calls-lowered-mixed-composite-param";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    const int32_t source_func_idx = find_top_level_export_sort_index(
+        (WASMComponentModule *)module, "mixed-list-param", WASM_COMP_SORT_FUNC);
+    WASMComponentFuncType *source_func_type =
+        lookup_top_level_exported_canon_func_type((WASMComponentModule *)module,
+                                                  "mixed-list-param");
+    const int32_t wrapper_type_idx = append_component_scalar_func_type(
+        (WASMComponentModule *)module, {}, WASM_COMP_PRIMVAL_S32);
+    WASMComponentFuncType *wrapper_type = lookup_local_component_func_type(
+        (WASMComponentModule *)module, (uint32_t)wrapper_type_idx);
+    ASSERT_GE(source_func_idx, 0);
+    ASSERT_NE(source_func_type, nullptr);
+    ASSERT_GE(wrapper_type_idx, 0);
+    ASSERT_NE(wrapper_type, nullptr);
+    if (!wrapper_type->params) {
+        wrapper_type->params = (WASMComponentParamList *)wasm_runtime_malloc(
+            sizeof(WASMComponentParamList));
+        ASSERT_NE(wrapper_type->params, nullptr);
+        memset(wrapper_type->params, 0, sizeof(WASMComponentParamList));
+    }
+
+    WASMComponentCanon *nested_lower_canon = nullptr;
+    ASSERT_TRUE(append_nested_component_lowered_core_caller_sections_for_func(
+        (WASMComponentModule *)module, (uint32_t)source_func_idx, source_func_type,
+        wrapper_type, "lowered_core_mixed_list_param_caller.wasm", "source",
+        "call-source-const", &nested_lower_canon));
+    ASSERT_NE(nested_lower_canon, nullptr);
+    ASSERT_TRUE(ensure_canon_lower_memory_opt(nested_lower_canon, 0));
+    ASSERT_TRUE(ensure_canon_lower_string_utf8_opt(nested_lower_canon));
+
+    wasm_module_inst_t module_inst =
+        instantiate_component_with_default_wasi(module, helper.get());
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_instance_t nested_instance =
+        wasm_runtime_lookup_component_instance(module_inst, "nested-lowered-instance");
+    ASSERT_NE(nested_instance, nullptr);
+
+    wasm_component_func_t func =
+        wasm_component_instance_lookup_function(nested_instance, "wrapped");
+    ASSERT_NE(func, nullptr);
+
+    wasm_val_t results[1] = {};
+    ASSERT_TRUE(wasm_runtime_call_component(module_inst, func, 1, results, 0,
+                                            nullptr))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(results[0].kind, WASM_I32);
+    ASSERT_EQ(results[0].of.i32, 45);
+
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestNestedCoreWasmLoweredMixedCompositeParamDirectCallRequiresLowerMemory)
+{
+    bool ret = helper->read_wasm_file("composite_string_params.component.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "nested-core-wasm-calls-lowered-mixed-composite-param-no-memory";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    const int32_t source_func_idx = find_top_level_export_sort_index(
+        (WASMComponentModule *)module, "mixed-list-param", WASM_COMP_SORT_FUNC);
+    WASMComponentFuncType *source_func_type =
+        lookup_top_level_exported_canon_func_type((WASMComponentModule *)module,
+                                                  "mixed-list-param");
+    const int32_t wrapper_type_idx = append_component_scalar_func_type(
+        (WASMComponentModule *)module, {}, WASM_COMP_PRIMVAL_S32);
+    WASMComponentFuncType *wrapper_type = lookup_local_component_func_type(
+        (WASMComponentModule *)module, (uint32_t)wrapper_type_idx);
+    ASSERT_GE(source_func_idx, 0);
+    ASSERT_NE(source_func_type, nullptr);
+    ASSERT_GE(wrapper_type_idx, 0);
+    ASSERT_NE(wrapper_type, nullptr);
+    if (!wrapper_type->params) {
+        wrapper_type->params = (WASMComponentParamList *)wasm_runtime_malloc(
+            sizeof(WASMComponentParamList));
+        ASSERT_NE(wrapper_type->params, nullptr);
+        memset(wrapper_type->params, 0, sizeof(WASMComponentParamList));
+    }
+
+    WASMComponentCanon *nested_lower_canon = nullptr;
+    ASSERT_TRUE(append_nested_component_lowered_core_caller_sections_for_func(
+        (WASMComponentModule *)module, (uint32_t)source_func_idx, source_func_type,
+        wrapper_type, "lowered_core_mixed_list_param_caller.wasm", "source",
+        "call-source-const", &nested_lower_canon));
+    ASSERT_NE(nested_lower_canon, nullptr);
+    ASSERT_TRUE(ensure_canon_lower_string_utf8_opt(nested_lower_canon));
+
+    wasm_module_inst_t module_inst =
+        instantiate_component_with_default_wasi(module, helper.get());
+    ASSERT_EQ(module_inst, nullptr);
+    ASSERT_NE(strstr(helper->error_buf, "require memory for string Canonical ABI"),
+              nullptr);
+
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
        TestCoreWasmDirectLowerCallRejectsNonScalarLoweredComponentFunction)
 {
     bool ret = helper->read_wasm_file("composite_string_params.component.wasm");

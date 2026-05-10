@@ -306,7 +306,7 @@ The executable Canonical ABI surface is currently limited to:
   - top-level `list<scalar>` results through the tested `(param i32) -> ()`
     return-area path
   - nested component-owned child-core consumers on the tested direct mixed
-    composite-result path
+    composite-param and mixed composite-result paths
   - no lower-side canon options beyond tested `(string-utf8)` / `(memory ...)`
     for the direct string path and `(memory ...)` for the `list<scalar>`
     parameter/result path
@@ -337,8 +337,9 @@ Major Canonical ABI gaps remain:
   top-level memory-backed return-area path over the current scalar / UTF-8 string
   / nested `list<scalar>` leaf subset
 - no executable lower path yet for broader nested lowered-consumer coverage beyond
-  the tested nested child-core mixed composite-result path and the tested scalar /
-  UTF-8 string / nested `list<scalar>` tuple-record subset
+  the tested nested child-core mixed composite-param / mixed composite-result
+  paths and the tested scalar / UTF-8 string / nested `list<scalar>` tuple-record
+  subset
 - no list marshalling beyond UTF-8 strings, top-level `list<scalar>`, and nested `list<scalar>` leaves in exported tuple/record values and host-import tuple/record parameters
 - no variant / flags / enum / option / result marshalling
 - no non-string memory-backed leaves inside tuple/record Canonical ABI values beyond nested `list<scalar>` leaves for exported canon-lift calls and host-import tuple/record parameters
