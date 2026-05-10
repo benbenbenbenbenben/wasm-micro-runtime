@@ -23,4 +23,10 @@
     local.tee 0
     call $resource_drop
     local.get 0
-    call $resource_rep))
+    call $resource_rep)
+
+  (func (export "drop-const") (result i32)
+    i32.const 7
+    call $resource_new
+    call $resource_drop
+    i32.const 0))

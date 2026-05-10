@@ -1993,6 +1993,55 @@ resource_builtin_rep_noop_finalizer(void *data, void *ctx)
 }
 
 static bool
+call_core_function_from_resource_builtin(
+    WASMModuleInstanceCommon *exception_target,
+    const WASMComponentCoreRuntimeRef *core_func_ref, const char *acquire_error,
+    const char *call_error, uint32 num_results, wasm_val_t *results,
+    uint32 num_args, wasm_val_t *args)
+{
+    WASMModuleInstanceCommon *target_module_inst;
+    WASMModuleInstanceCommon *previous_module_inst = NULL;
+    WASMExecEnv *exec_env;
+
+    if (!exception_target || !core_func_ref || !core_func_ref->owner_instance
+        || !core_func_ref->owner_instance->module_inst
+        || !core_func_ref->of.function) {
+        wasm_runtime_set_exception(exception_target, call_error);
+        return false;
+    }
+
+    target_module_inst =
+        (WASMModuleInstanceCommon *)core_func_ref->owner_instance->module_inst;
+    exec_env = wasm_runtime_get_exec_env_tls();
+    if (!exec_env) {
+        exec_env = wasm_runtime_get_exec_env_singleton(target_module_inst);
+        if (!exec_env) {
+            wasm_runtime_set_exception(exception_target, acquire_error);
+            return false;
+        }
+    }
+    else if (exec_env->module_inst != target_module_inst) {
+        previous_module_inst = exec_env->module_inst;
+        wasm_exec_env_set_module_inst(exec_env, target_module_inst);
+    }
+
+    wasm_runtime_clear_exception(target_module_inst);
+    if (!wasm_runtime_call_wasm_a(exec_env, core_func_ref->of.function,
+                                  num_results, results, num_args, args)) {
+        const char *core_exception = wasm_runtime_get_exception(target_module_inst);
+        if (previous_module_inst)
+            wasm_exec_env_restore_module_inst(exec_env, previous_module_inst);
+        wasm_runtime_set_exception(exception_target,
+                                   core_exception ? core_exception : call_error);
+        return false;
+    }
+
+    if (previous_module_inst)
+        wasm_exec_env_restore_module_inst(exec_env, previous_module_inst);
+    return true;
+}
+
+static bool
 prepare_resource_builtin_function(
     WASMComponentRuntimeFunc *func, WASMComponentCanonType canon_tag,
     uint32 resource_type_idx, WASMComponentRuntimeResourceState *resource_state,
@@ -2033,13 +2082,6 @@ prepare_resource_builtin_function(
             "resource types (type index %u)",
             resource_type_idx);
 
-    if (resource_type->has_dtor)
-        return set_component_runtime_error_fmt(
-            error_buf, error_buf_size,
-            "component resource builtins currently do not support destructors "
-            "(type index %u)",
-            resource_type_idx);
-
     memset(func, 0, sizeof(*func));
     func->kind = WASM_COMP_RUNTIME_FUNC_RESOURCE_BUILTIN;
     func->canon_tag = canon_tag;
@@ -2047,6 +2089,29 @@ prepare_resource_builtin_function(
     func->owner_instance = owner_instance;
     func->resource_state = resource_state;
     func->type_owner_component = type_owner_component;
+
+    if (resource_type->has_dtor) {
+        if (!owner_instance
+            || resource_type->dtor_func_idx >= owner_instance->core_func_count) {
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                "component resource builtin could not resolve destructor func "
+                "index %u for type index %u",
+                resource_type->dtor_func_idx, resource_type_idx);
+        }
+        if (owner_instance->core_funcs[resource_type->dtor_func_idx].type
+                != WASM_COMP_CORE_RUNTIME_REF_FUNC
+            || !owner_instance->core_funcs[resource_type->dtor_func_idx]
+                    .of.function) {
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                "component resource builtin destructor func index %u did not "
+                "resolve to a core function",
+                resource_type->dtor_func_idx);
+        }
+        func->core_func_ref = owner_instance->core_funcs[resource_type->dtor_func_idx];
+    }
+
     return true;
 }
 
@@ -2682,6 +2747,36 @@ component_resource_builtin_trampoline(WASMModuleInstanceCommon *caller_module_in
             return;
         case WASM_COMP_CANON_RESOURCE_DROP:
             handle = (uint32)raw_args[0];
+            if (handle == 0 || handle - 1 >= resource_type->handle_table.entry_count) {
+                wasm_runtime_set_exception(
+                    caller_module_inst, "component resource handle is invalid");
+                return;
+            }
+            entry = &resource_type->handle_table.entries[handle - 1];
+            if (!entry->is_live || !entry->is_owned) {
+                wasm_runtime_set_exception(
+                    caller_module_inst,
+                    "component resource handle is not an owned live handle");
+                return;
+            }
+            if (resource_type->has_dtor) {
+                wasm_val_t dtor_arg = { 0 };
+                dtor_arg.kind = WASM_I32;
+                dtor_arg.of.i32 = (int32)(uint32)(uintptr_t)entry->data;
+                if (!call_core_function_from_resource_builtin(
+                        (WASMModuleInstanceCommon *)caller_module_inst,
+                        &resource_function->core_func_ref,
+                        "component resource drop could not acquire a destructor "
+                        "execution environment",
+                        "component resource destructor failed", 0, NULL, 1,
+                        &dtor_arg)) {
+                    (void)wasm_component_resource_drop_owned_handle(
+                        resource_function->resource_state,
+                        resource_function->resource_type_idx, handle, error_buf,
+                        (uint32)sizeof(error_buf));
+                    return;
+                }
+            }
             if (!wasm_component_resource_drop_owned_handle(
                     resource_function->resource_state,
                     resource_function->resource_type_idx, handle, error_buf,

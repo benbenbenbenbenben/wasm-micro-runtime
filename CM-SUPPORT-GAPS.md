@@ -251,8 +251,8 @@ The runtime now includes:
 - executable `canon resource.new` / `canon resource.drop` / `canon resource.rep`
   when a child core module imports those builtins
 - the first proven operational subset for those builtins:
-  locally-defined resource types only, `rep i32` only, no declared destructors,
-  no async drop, no imported/aliased resource types
+  locally-defined resource types only, `rep i32` only, sync destructors on
+  explicit `resource.drop`, no async drop, no imported/aliased resource types
 - finalizer cleanup during deinstantiation
 
 This is now a real but narrow operational slice, not yet full resource semantics.
@@ -278,7 +278,8 @@ This is now a real but narrow operational slice, not yet full resource semantics
   and nested `list<scalar>` leaves
 - resource-state and owned-handle cleanup foundations
 - direct child-core execution of the narrow `canon resource.new` /
-  `canon resource.rep` / `canon resource.drop` subset
+  `canon resource.rep` / `canon resource.drop` subset, including sync
+  destructor execution on explicit drops
 
 ## 2. What is still missing for full component-model support
 
@@ -496,6 +497,8 @@ What exists:
 - owned handle allocation/drop helpers
 - executable child-core `canon resource.new` / `canon resource.rep` /
   `canon resource.drop` for the tested locally-defined `rep i32` subset
+- sync destructor execution when that tested subset is dropped explicitly from
+  child core code
 - deinstantiate-time cleanup/finalization
 
 What is still missing:
@@ -505,6 +508,7 @@ What is still missing:
 - resource imports/exports as a complete public host feature
 - runtime enforcement of richer resource lifecycle rules
 - public resource-aware callable component APIs
+- destructor execution for still-live handles during deinstantiate-time cleanup
 - full trap/failure-path operational cleanup semantics
 
 So resources now have a narrow executable seam, not a finished runtime.
