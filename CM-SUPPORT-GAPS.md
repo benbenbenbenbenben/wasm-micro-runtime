@@ -324,7 +324,8 @@ The executable Canonical ABI surface is currently limited to:
     `list<string>`-parameter / `list<string>`-result, `list<u8>`- and
     `list<s32>`-parameter, `list<scalar>`-result, mixed composite-param, and
     mixed composite-result paths, including tuple/record mixed composite-param
-    witnesses with a nested `list<string>` leaf
+    and mixed composite-result witnesses with nested `list<scalar>` /
+    `list<string>` leaves
   - tested cross-component scalar, UTF-8 string, `list<string>`-parameter /
     `list<string>`-result, `list<u8>`-parameter / `list<u8>`-result, and
     `list<s32>`-parameter / `list<s32>`-result seams plus tested
