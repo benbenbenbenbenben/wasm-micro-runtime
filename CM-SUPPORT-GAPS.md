@@ -12,7 +12,7 @@ The main remaining gaps are now centered on:
 
 - Canonical ABI beyond the current scalar / UTF-8 string / `list<u8>` /
   supported tuple-record slices
-- canon-lower / imported component-function lowering paths
+- broader canon-lower / imported component-function lowering paths
 - broader composite component values and memory-backed leaves inside composites
 - operational resource semantics
 - remaining public host API limitations
@@ -22,7 +22,7 @@ The main remaining gaps are now centered on:
 
 The implementation is now best described as:
 
-> **A partial but executable component runtime: top-level component loading/instantiation, public import/export APIs, scalar / UTF-8 string / `list<u8>` / limited tuple-record canon-lift calls, host-provided component-function imports for the currently supported subset, runtime values, value imports/exports, start execution slices, and resource bookkeeping foundations are all present.**
+> **A partial but executable component runtime: top-level component loading/instantiation, public import/export APIs, scalar / UTF-8 string / `list<u8>` / limited tuple-record canon-lift calls, a narrow scalar direct-core-call `canon lower` seam, host-provided component-function imports for the currently supported subset, runtime values, value imports/exports, start execution slices, and resource bookkeeping foundations are all present.**
 
 ### 1.1 Top-level component loading, instantiation, and teardown
 
@@ -148,6 +148,12 @@ What works today:
 
 - `canon lift` runtime metadata resolution
 - direct calling of supported top-level and nested canon-lift function handles
+- direct core-wasm calls into lowered component functions for the narrow tested
+  subset:
+  - scalar-only parameters/results
+  - no lower-side canon options
+  - downstream core modules instantiated with explicit `with_args` lowered-function
+    bindings
 - scalar parameter/result lifting via `wasm_runtime_call_component(...)`
 - UTF-8 string parameter/result handling via `wasm_runtime_call_component_values(...)`
 - top-level `list<u8>` parameter/result handling via `wasm_runtime_call_component_values(...)`
@@ -161,8 +167,13 @@ What works today:
 
 Current supported execution envelope is intentionally narrow:
 
-- only `canon lift` is executable
-- calls may target supported top-level or nested canon-lift / host-import function handles discovered through the runtime graph
+- `canon lift` is executable for the currently supported scalar / UTF-8 string /
+  `list<u8>` / tuple-record subset
+- `canon lower` is executable only for the currently tested scalar direct core-call
+  subset above
+- calls may target supported top-level or nested canon-lift / host-import function
+  handles discovered through the runtime graph, plus direct core-wasm calls through
+  the narrow scalar lowered-import path
 - scalar signatures work through the `wasm_val_t` API
 - UTF-8 string / `list<u8>` / tuple-record signatures work through the component-value API
 - raw `wasm_runtime_call_component(...)` stays scalar-only
@@ -270,15 +281,23 @@ The executable Canonical ABI surface is currently limited to:
     value API over that same supported leaf subset
   - explicit rejection of lower-side canon options and outer synthetic-lift
     canon options on this synthetic path
+- direct core-wasm invocation of lowered component functions for the currently
+  tested scalar subset:
+  - scalar parameters/results only
+  - no lower-side canon options
+  - positive direct child-core witness plus rejection of non-scalar lowered targets
 - top-level host-defined component-function imports for the same supported subset
 
 Major Canonical ABI gaps remain:
 
-- no general executable `canon lower`; the only supported lowering path is the
-  synthetic scalar / UTF-8 string / `list<u8>`-parameter / `list<u8>`-result /
-  tuple/record-parameter / record-result / tuple/mixed-composite-result
-  `lift(lower(f))` subset above
-- no general adapter/lowering path for imported component functions beyond the supported host-callback subset
+- no general executable `canon lower`; the only supported executable lowering
+  paths are:
+  - the narrow scalar direct core-call subset above
+  - the synthetic scalar / UTF-8 string / `list<u8>`-parameter /
+    `list<u8>`-result / tuple/record-parameter / record-result /
+    tuple/mixed-composite-result `lift(lower(f))` subset above
+- no general adapter/lowering path for imported component functions beyond the
+  supported host-callback subset and the narrow scalar direct core-call subset
 - no executable lower path yet for memory-backed Canonical ABI shapes
   beyond the tested `list<u8>`-parameter / `list<u8>`-result /
   tuple/record-parameter / record-result / tuple/mixed-composite-result
@@ -445,7 +464,7 @@ This fork is already useful for:
 It is still not a complete basis for:
 
 - full Canonical ABI execution
-- imported component-function lowering/adapters
+- broad imported component-function lowering/adapters
 - general composite component values
 - complete resource-heavy component APIs
 - full nested core-runtime execution

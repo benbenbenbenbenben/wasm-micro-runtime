@@ -500,6 +500,8 @@ typedef struct WASMComponentCoreCustomSection {
 typedef struct WASMComponentCoreModuleWrapper {
     struct WASMModule *module;
     void *module_handle;
+    uint8 *owned_binary;
+    uint32 owned_binary_size;
 } WASMComponentCoreModuleWrapper;
 
 // -----------------------------------------------------------------------------

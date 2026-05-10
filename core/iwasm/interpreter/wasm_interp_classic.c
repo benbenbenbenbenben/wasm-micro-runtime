@@ -2332,7 +2332,6 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                     goto got_exception;
                 }
 #endif
-
                 cur_func = module->e->functions + fidx;
                 goto call_func_from_interp;
             }

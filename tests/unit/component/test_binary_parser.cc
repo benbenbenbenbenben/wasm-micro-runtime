@@ -264,11 +264,13 @@ create_core_module_wrapper_from_file(const char *path, const char *module_name,
     load_args.name = (char *)module_name;
     core_module->module_handle = wasm_runtime_load_ex(
         wasm_raw, wasm_file_size, &load_args, error_buf, error_buf_size);
-    BH_FREE(wasm_raw);
     if (!core_module->module_handle) {
+        BH_FREE(wasm_raw);
         wasm_runtime_free(core_module);
         return nullptr;
     }
+    core_module->owned_binary = wasm_raw;
+    core_module->owned_binary_size = wasm_file_size;
 
     return core_module;
 }
@@ -11677,9 +11679,43 @@ TEST_F(BinaryParserTest, TestCoreWasmCanCallLoweredScalarComponentFunctionDirect
         component_inst->core_instances[component_inst->core_instance_count - 1]
             .module_inst;
     ASSERT_NE(child_core_inst, nullptr);
+    ASSERT_NE(child_core_inst->module, nullptr);
+    ASSERT_EQ(child_core_inst->module->import_function_count, 1u);
+    ASSERT_EQ(child_core_inst->module->function_count, 1u);
+    ASSERT_EQ(child_core_inst->module->export_count, 1u);
+    ASSERT_NE(child_core_inst->module->exports, nullptr);
+    ASSERT_STREQ(child_core_inst->module->exports[0].name, "call-source-const");
     wasm_component_func_t func =
         wasm_runtime_lookup_component_function(module_inst, "core-caller-add");
     ASSERT_NE(func, nullptr);
+    auto *runtime_func = (WASMComponentRuntimeFunc *)func;
+    ASSERT_EQ(runtime_func->kind, WASM_COMP_RUNTIME_FUNC_LIFT);
+    ASSERT_EQ(runtime_func->core_func_ref.type, WASM_COMP_CORE_RUNTIME_REF_FUNC);
+    ASSERT_EQ(runtime_func->core_func_ref.owner_instance,
+              &component_inst
+                   ->core_instances[component_inst->core_instance_count - 1]);
+    wasm_function_inst_t child_export =
+        wasm_runtime_lookup_function((wasm_module_inst_t)child_core_inst,
+                                     "call-source-const");
+    ASSERT_NE(child_export, nullptr);
+    ASSERT_EQ(runtime_func->core_func_ref.of.function, child_export);
+    auto *child_export_inst = (WASMFunctionInstance *)child_export;
+    ASSERT_FALSE(child_export_inst->is_import_func);
+    const uint8_t *child_code = wasm_get_func_code(child_export_inst);
+    const uint8_t *child_code_end = wasm_get_func_code_end(child_export_inst);
+    ASSERT_NE(child_code, nullptr);
+    ASSERT_NE(child_code_end, nullptr);
+    ASSERT_GT(child_code_end - child_code, 0);
+    ASSERT_TRUE(child_core_inst->e->functions[0].is_import_func);
+    ASSERT_NE(child_core_inst->e->functions[0].u.func_import, nullptr);
+    ASSERT_NE(child_core_inst->import_func_ptrs, nullptr);
+    ASSERT_NE(child_core_inst->import_func_ptrs[0], nullptr);
+    ASSERT_EQ(child_core_inst->import_func_ptrs[0],
+              child_core_inst->e->functions[0].u.func_import->func_ptr_linked);
+    ASSERT_TRUE(child_core_inst->e->functions[0].u.func_import->call_conv_raw);
+    ASSERT_EQ(child_core_inst->e->functions[0].import_func_inst, nullptr);
+    ASSERT_EQ(child_core_inst->e->functions[0].import_module_inst, nullptr);
+    ASSERT_NE(child_core_inst->e->functions[0].u.func_import->attachment, nullptr);
 
     wasm_val_t results[1] = {};
     ASSERT_TRUE(wasm_runtime_call_component(module_inst, func, 1, results, 0,

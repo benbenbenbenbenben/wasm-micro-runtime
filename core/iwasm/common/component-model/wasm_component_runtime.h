@@ -49,8 +49,6 @@ typedef struct WASMComponentCoreNamedExport {
 
 typedef struct WASMComponentCoreRuntimeInstance {
     wasm_module_inst_t module_inst;
-    struct WASMModule *patched_module;
-    struct WASMImport *patched_import_entries;
     void *patched_import_attachments;
     uint32 patched_import_count;
     uint32 export_count;

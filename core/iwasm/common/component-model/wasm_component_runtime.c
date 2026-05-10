@@ -325,14 +325,6 @@ destroy_component_core_instance(WASMComponentCoreRuntimeInstance *core_instance)
         core_instance->module_inst = NULL;
     }
 
-    if (core_instance->patched_import_entries) {
-        wasm_runtime_free(core_instance->patched_import_entries);
-        core_instance->patched_import_entries = NULL;
-    }
-    if (core_instance->patched_module) {
-        wasm_runtime_free(core_instance->patched_module);
-        core_instance->patched_module = NULL;
-    }
     if (core_instance->patched_import_attachments) {
         wasm_runtime_free(core_instance->patched_import_attachments);
         core_instance->patched_import_attachments = NULL;
@@ -1998,62 +1990,9 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
 }
 
 static bool
-prepare_component_core_instance_patched_module(
-    WASMComponentCoreRuntimeInstance *runtime_inst, WASMModule *module,
-    char *error_buf, uint32 error_buf_size)
-{
-    if (!module)
-        return set_component_runtime_error_fmt(
-            error_buf, error_buf_size,
-            "component canon lower direct core-call bindings require a core "
-            "module");
-
-    runtime_inst->patched_module =
-        wasm_runtime_malloc(sizeof(*runtime_inst->patched_module));
-    if (!runtime_inst->patched_module)
-        return set_component_runtime_error_fmt(
-            error_buf, error_buf_size,
-            "allocate memory failed for patched core module");
-
-    bh_memcpy_s(runtime_inst->patched_module, sizeof(*runtime_inst->patched_module),
-                module, sizeof(*module));
-
-    runtime_inst->patched_import_entries =
-        wasm_runtime_malloc(sizeof(WASMImport) * module->import_count);
-    if (!runtime_inst->patched_import_entries)
-        return set_component_runtime_error_fmt(
-            error_buf, error_buf_size,
-            "allocate memory failed for %u patched core imports",
-            module->import_count);
-
-    bh_memcpy_s(runtime_inst->patched_import_entries,
-                sizeof(WASMImport) * module->import_count, module->imports,
-                sizeof(WASMImport) * module->import_count);
-
-    runtime_inst->patched_module->imports = runtime_inst->patched_import_entries;
-    runtime_inst->patched_module->import_functions = runtime_inst->patched_import_entries;
-    runtime_inst->patched_module->import_tables =
-        runtime_inst->patched_import_entries + module->import_function_count;
-    runtime_inst->patched_module->import_memories =
-        runtime_inst->patched_module->import_tables + module->import_table_count;
-#if WASM_ENABLE_TAGS != 0
-    runtime_inst->patched_module->import_tags =
-        runtime_inst->patched_module->import_memories + module->import_memory_count;
-    runtime_inst->patched_module->import_globals =
-        runtime_inst->patched_module->import_tags + module->import_tag_count;
-#else
-    runtime_inst->patched_module->import_globals =
-        runtime_inst->patched_module->import_memories + module->import_memory_count;
-#endif
-
-    runtime_inst->patched_import_count = module->import_function_count;
-    return true;
-}
-
-static bool
-prepare_component_core_instance_import_args(
-    WASMComponentCoreRuntimeInstance *runtime_inst, WASMModule *module,
-    const WASMComponentInstArg *args, uint32 arg_len,
+bind_component_core_instance_import_args(
+    WASMComponentCoreRuntimeInstance *runtime_inst, const WASMComponentInstArg *args,
+    uint32 arg_len,
     bool (*resolve_arg_ref)(const void *resolver_ctx,
                             const WASMComponentSortIdx *sort_idx,
                             WASMComponentCoreRuntimeRef *out_ref,
@@ -2071,34 +2010,25 @@ prepare_component_core_instance_import_args(
         "component canon lower direct core-call bindings require interpreter "
         "support");
 #else
+    WASMModuleInstance *module_inst = (WASMModuleInstance *)runtime_inst->module_inst;
+    WASMModule *module;
     uint32 i, j;
 
-    if (!args || arg_len == 0)
+    if (!runtime_inst->module_inst || !args || arg_len == 0)
         return true;
 
-    if (!module)
-        return set_component_runtime_error_fmt(
-            error_buf, error_buf_size,
-            "component canon lower direct core-call bindings require a core "
-            "module");
-
-    if (((WASMModuleCommon *)module)->module_type != Wasm_Module_Bytecode)
+    if (runtime_inst->module_inst->module_type != Wasm_Module_Bytecode)
         return set_component_runtime_error_fmt(
             error_buf, error_buf_size,
             "component canon lower direct core-call bindings currently require "
             "an interpreted core wasm module");
 
-    if (module->import_function_count == 0)
+    module = module_inst->module;
+    if (!module || module->import_function_count == 0)
         return set_component_runtime_error_fmt(
             error_buf, error_buf_size,
             "core instance expression provides import args but the target core "
             "module has no function imports");
-
-    if (!prepare_component_core_instance_patched_module(runtime_inst, module, error_buf,
-                                                        error_buf_size))
-        return false;
-
-    module = runtime_inst->patched_module;
     runtime_inst->patched_import_attachments = wasm_runtime_malloc(
         sizeof(WASMComponentLoweredImportAttachment)
          * module->import_function_count);
@@ -2111,6 +2041,11 @@ prepare_component_core_instance_import_args(
     memset(runtime_inst->patched_import_attachments, 0,
            sizeof(WASMComponentLoweredImportAttachment)
                * module->import_function_count);
+    runtime_inst->patched_import_count = module->import_function_count;
+    for (i = 0; i < module->import_function_count; i++) {
+        module_inst->e->functions[i].u.func_import =
+            &module->import_functions[i].u.function;
+    }
 
     for (i = 0; i < arg_len; i++) {
         WASMComponentCoreRuntimeRef ref;
@@ -2168,6 +2103,12 @@ prepare_component_core_instance_import_args(
             attachment->func_type = import->func_type;
             import->attachment = attachment;
             import->call_conv_raw = true;
+            module_inst->e->functions[j].u.func_import = import;
+            module_inst->e->functions[j].import_module_inst = NULL;
+            module_inst->e->functions[j].import_func_inst = NULL;
+            module_inst->import_func_ptrs[j] = component_lowered_import_trampoline;
+            if (module_inst->func_ptrs)
+                module_inst->func_ptrs[j] = component_lowered_import_trampoline;
 #if WASM_ENABLE_MULTI_MODULE != 0
             import->import_func_linked = NULL;
             import->import_module = NULL;
@@ -6327,22 +6268,61 @@ get_component_canon_memory_bytes(WASMComponentInstance *inst,
 }
 
 static bool
+call_component_core_function_with_current_exec_env(
+    WASMComponentInstance *inst, const WASMComponentCoreRuntimeRef *core_func_ref,
+    const char *acquire_error, const char *call_error, uint32 num_results,
+    wasm_val_t *results, uint32 num_args, wasm_val_t *args)
+{
+    WASMModuleInstanceCommon *target_module_inst;
+    WASMModuleInstanceCommon *previous_module_inst = NULL;
+    WASMExecEnv *exec_env;
+
+    if (!core_func_ref || !core_func_ref->owner_instance
+        || !core_func_ref->owner_instance->module_inst
+        || !core_func_ref->of.function)
+        return set_component_call_error(inst, call_error);
+
+    target_module_inst =
+        (WASMModuleInstanceCommon *)core_func_ref->owner_instance->module_inst;
+    exec_env = wasm_runtime_get_exec_env_tls();
+    if (!exec_env) {
+        exec_env = wasm_runtime_get_exec_env_singleton(target_module_inst);
+        if (!exec_env)
+            return set_component_call_error(inst, acquire_error);
+    }
+    else if (exec_env->module_inst != target_module_inst) {
+        previous_module_inst = exec_env->module_inst;
+        wasm_exec_env_set_module_inst(exec_env, target_module_inst);
+    }
+
+    wasm_runtime_clear_exception(target_module_inst);
+    if (!wasm_runtime_call_wasm_a(exec_env, core_func_ref->of.function,
+                                  num_results, results, num_args, args)) {
+        const char *core_exception = wasm_runtime_get_exception(target_module_inst);
+        if (previous_module_inst)
+            wasm_exec_env_restore_module_inst(exec_env, previous_module_inst);
+        if (core_exception)
+            wasm_runtime_set_exception((WASMModuleInstanceCommon *)inst,
+                                       core_exception);
+        else
+            wasm_runtime_set_exception((WASMModuleInstanceCommon *)inst,
+                                       call_error);
+        return false;
+    }
+
+    if (previous_module_inst)
+        wasm_exec_env_restore_module_inst(exec_env, previous_module_inst);
+    return true;
+}
+
+static bool
 call_component_canon_realloc_raw(WASMComponentInstance *inst,
                                  const WASMComponentRuntimeFunc *function,
                                  uint32 old_ptr, uint32 old_size, uint32 align,
                                  uint32 new_size, uint32 *ptr_out)
 {
-    WASMExecEnv *exec_env;
     wasm_val_t args[4] = { 0 };
     wasm_val_t result = { 0 };
-
-    exec_env = wasm_runtime_get_exec_env_singleton(
-        (WASMModuleInstanceCommon *)function->canon_realloc_ref.owner_instance
-            ->module_inst);
-    if (!exec_env)
-        return set_component_call_error(
-            inst, "component canon lift function could not acquire a realloc "
-                  "execution environment");
 
     args[0].kind = WASM_I32;
     args[1].kind = WASM_I32;
@@ -6353,17 +6333,11 @@ call_component_canon_realloc_raw(WASMComponentInstance *inst,
     args[2].of.i32 = (int32)align;
     args[3].of.i32 = (int32)new_size;
 
-    if (!wasm_runtime_call_wasm_a(exec_env, function->canon_realloc_ref.of.function,
-                                  1, &result, 4, args)) {
-        const char *core_exception = wasm_runtime_get_exception(
-            (WASMModuleInstanceCommon *)function->canon_realloc_ref.owner_instance
-                ->module_inst);
-        if (core_exception)
-            wasm_runtime_set_exception((WASMModuleInstanceCommon *)inst,
-                                       core_exception);
-        else
-            wasm_runtime_set_exception((WASMModuleInstanceCommon *)inst,
-                                       "component canon lift realloc failed");
+    if (!call_component_core_function_with_current_exec_env(
+            inst, &function->canon_realloc_ref,
+            "component canon lift function could not acquire a realloc "
+            "execution environment",
+            "component canon lift realloc failed", 1, &result, 4, args)) {
         return false;
     }
 
@@ -6446,34 +6420,18 @@ call_component_canon_post_return(WASMComponentInstance *inst,
                                  const WASMComponentRuntimeFunc *function,
                                  uint32 retptr)
 {
-    WASMExecEnv *exec_env;
     wasm_val_t arg = { 0 };
 
     if (!function->canon_post_return_ref.of.function)
         return true;
 
-    exec_env = wasm_runtime_get_exec_env_singleton(
-        (WASMModuleInstanceCommon *)function->canon_post_return_ref.owner_instance
-            ->module_inst);
-    if (!exec_env)
-        return set_component_call_error(
-            inst, "component canon lift function could not acquire a post-return "
-                  "execution environment");
-
     arg.kind = WASM_I32;
     arg.of.i32 = (int32)retptr;
-    if (!wasm_runtime_call_wasm_a(exec_env,
-                                  function->canon_post_return_ref.of.function, 0,
-                                  NULL, 1, &arg)) {
-        const char *core_exception = wasm_runtime_get_exception(
-            (WASMModuleInstanceCommon *)function->canon_post_return_ref
-                .owner_instance->module_inst);
-        if (core_exception)
-            wasm_runtime_set_exception((WASMModuleInstanceCommon *)inst,
-                                       core_exception);
-        else
-            wasm_runtime_set_exception((WASMModuleInstanceCommon *)inst,
-                                       "component canon lift post-return failed");
+    if (!call_component_core_function_with_current_exec_env(
+            inst, &function->canon_post_return_ref,
+            "component canon lift function could not acquire a post-return "
+            "execution environment",
+            "component canon lift post-return failed", 0, NULL, 1, &arg)) {
         return false;
     }
 
@@ -6907,32 +6865,14 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
         goto cleanup;
     }
 
-    exec_env = wasm_runtime_get_exec_env_singleton(
-        (WASMModuleInstanceCommon *)function->core_func_ref.owner_instance->module_inst);
-    if (!exec_env) {
-        set_component_call_error(
-            inst, "component canon lift function could not acquire a core "
-                  "execution environment");
-        call_succeeded = false;
-        goto cleanup;
-    }
-
-    wasm_runtime_clear_exception(
-        (WASMModuleInstanceCommon *)function->core_func_ref.owner_instance->module_inst);
     core_call_attempted = true;
-    if (!wasm_runtime_call_wasm_a(exec_env, function->core_func_ref.of.function,
-                                  core_type->result_count,
-                                  core_type->result_count ? core_results : NULL,
-                                  core_type->param_count, core_args)) {
-        const char *core_exception = wasm_runtime_get_exception(
-            (WASMModuleInstanceCommon *)function->core_func_ref.owner_instance
-                ->module_inst);
-        if (core_exception)
-            wasm_runtime_set_exception((WASMModuleInstanceCommon *)inst,
-                                       core_exception);
-        else
-            wasm_runtime_set_exception((WASMModuleInstanceCommon *)inst,
-                                       "component canon lift call failed");
+    if (!call_component_core_function_with_current_exec_env(
+            inst, &function->core_func_ref,
+            "component canon lift function could not acquire a core "
+            "execution environment",
+            "component canon lift call failed", core_type->result_count,
+            core_type->result_count ? core_results : NULL, core_type->param_count,
+            core_args)) {
         call_succeeded = false;
         goto cleanup;
     }
@@ -7366,25 +7306,12 @@ wasm_component_call_internal(WASMComponentInstance *inst,
                       "core function signature");
     }
 
-    exec_env = wasm_runtime_get_exec_env_singleton(
-        (WASMModuleInstanceCommon *)function->core_func_ref.owner_instance->module_inst);
-    if (!exec_env)
-        return set_component_call_error(
-            inst, "component canon lift function could not acquire a core "
-                  "execution environment");
-
-    wasm_runtime_clear_exception(
-        (WASMModuleInstanceCommon *)function->core_func_ref.owner_instance->module_inst);
-    if (!wasm_runtime_call_wasm_a(exec_env, function->core_func_ref.of.function,
-                                  num_results, results, num_args, args)) {
-        const char *core_exception = wasm_runtime_get_exception(
-            (WASMModuleInstanceCommon *)function->core_func_ref.owner_instance->module_inst);
-        if (core_exception)
-            wasm_runtime_set_exception((WASMModuleInstanceCommon *)inst,
-                                       core_exception);
-        else
-            wasm_runtime_set_exception((WASMModuleInstanceCommon *)inst,
-                                       "component canon lift call failed");
+    if (!call_component_core_function_with_current_exec_env(
+            inst, &function->core_func_ref,
+            "component canon lift function could not acquire a core "
+            "execution environment",
+            "component canon lift call failed", num_results, results, num_args,
+            args)) {
         return false;
     }
 
@@ -8003,24 +7930,20 @@ instantiate_component_core_instance(WASMComponentInstance *inst,
                 core_inst->expression.with_args.idx);
 
         module = inst->core_modules[core_inst->expression.with_args.idx];
-        if (!prepare_component_core_instance_import_args(
-                runtime_inst, (WASMModule *)module,
-                core_inst->expression.with_args.args,
+        wasm_runtime_instantiation_args_set_defaults(&args);
+        runtime_inst->module_inst = wasm_runtime_instantiate_internal(
+            (WASMModuleCommon *)module, NULL, NULL, &args, error_buf,
+            error_buf_size);
+        if (!runtime_inst->module_inst)
+            return false;
+        if (!bind_component_core_instance_import_args(
+                runtime_inst, core_inst->expression.with_args.args,
                 core_inst->expression.with_args.arg_len,
                 resolve_component_core_inst_arg_ref, inst, error_buf,
                 error_buf_size)) {
             destroy_component_core_instance(runtime_inst);
             return false;
         }
-        wasm_runtime_instantiation_args_set_defaults(&args);
-        runtime_inst->module_inst = wasm_runtime_instantiate_internal(
-            (WASMModuleCommon *)(runtime_inst->patched_module
-                                     ? runtime_inst->patched_module
-                                     : (WASMModule *)module),
-            NULL, NULL, &args, error_buf,
-            error_buf_size);
-        if (!runtime_inst->module_inst)
-            return false;
     }
     else if (core_inst->instance_expression_tag
              == WASM_COMP_INSTANCE_EXPRESSION_WITHOUT_ARGS) {
@@ -8077,21 +8000,17 @@ instantiate_nested_component_core_instance(
             goto fail_oob;
 
         module = bindings->core_modules[core_inst->expression.with_args.idx];
-        if (!prepare_component_core_instance_import_args(
-                child_inst, (WASMModule *)module,
-                core_inst->expression.with_args.args,
+        wasm_runtime_instantiation_args_set_defaults(&args);
+        child_inst->module_inst = wasm_runtime_instantiate_internal(
+            (WASMModuleCommon *)module, NULL, NULL, &args, error_buf,
+            error_buf_size);
+        if (!child_inst->module_inst)
+            goto fail;
+        if (!bind_component_core_instance_import_args(
+                child_inst, core_inst->expression.with_args.args,
                 core_inst->expression.with_args.arg_len,
                 resolve_nested_component_core_inst_arg_ref, bindings, error_buf,
                 error_buf_size))
-            goto fail;
-        wasm_runtime_instantiation_args_set_defaults(&args);
-        child_inst->module_inst = wasm_runtime_instantiate_internal(
-            (WASMModuleCommon *)(child_inst->patched_module
-                                     ? child_inst->patched_module
-                                     : (WASMModule *)module),
-            NULL, NULL, &args, error_buf,
-            error_buf_size);
-        if (!child_inst->module_inst)
             goto fail;
     }
     else if (core_inst->instance_expression_tag

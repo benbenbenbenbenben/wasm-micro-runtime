@@ -118,6 +118,11 @@ wasm_component_free_core_module_section(WASMComponentSection *section)
             (wasm_module_t)section->parsed.core_module->module_handle);
         section->parsed.core_module->module_handle = NULL;
     }
+    if (section->parsed.core_module->owned_binary) {
+        BH_FREE(section->parsed.core_module->owned_binary);
+        section->parsed.core_module->owned_binary = NULL;
+        section->parsed.core_module->owned_binary_size = 0;
+    }
     wasm_runtime_free(section->parsed.core_module);
     section->parsed.core_module = NULL;
 }
