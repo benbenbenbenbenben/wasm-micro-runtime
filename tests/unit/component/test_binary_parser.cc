@@ -29401,6 +29401,105 @@ TEST_F(BinaryParserTest,
     wasm_runtime_unload(module);
 }
 
+TEST_F(BinaryParserTest,
+       TestPublicComponentCallSupportsHostTupleResultFuncImportsWithStringAndListS32Leaves)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "public-component-host-tuple-result-import-string-list-s32";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(append_top_level_host_function_import_sections(
+        (WASMComponentModule *)module, "host-add", "host-instance", "forwarded"));
+    ASSERT_TRUE(append_top_level_function_export_alias((WASMComponentModule *)module,
+                                                       "host-instance", "forwarded",
+                                                       "aliased-host-add"));
+
+    const int32_t list_type_idx = append_component_list_type(
+        (WASMComponentModule *)module, WASM_COMP_PRIMVAL_S32, false, 0);
+    ASSERT_GE(list_type_idx, 0);
+    const int32_t tuple_type_idx = append_component_tuple_type(
+        (WASMComponentModule *)module,
+        { make_component_primitive_value_type(WASM_COMP_PRIMVAL_S32),
+          make_component_primitive_value_type(WASM_COMP_PRIMVAL_STRING),
+          make_component_type_index_value_type((uint32_t)list_type_idx) });
+    ASSERT_GE(tuple_type_idx, 0);
+    ASSERT_TRUE(configure_component_func_result_type_idx(
+        (WASMComponentModule *)module, 0, (uint32_t)tuple_type_idx));
+    ASSERT_TRUE(ensure_canon_lift_string_utf8_opt(find_first_canon_lift(
+        (WASMComponentModule *)module)));
+    ASSERT_TRUE(ensure_canon_lift_memory_opt(find_first_canon_lift(
+        (WASMComponentModule *)module),
+                                             0));
+    ASSERT_TRUE(ensure_canon_lift_realloc_opt(find_first_canon_lift(
+        (WASMComponentModule *)module),
+                                              2));
+
+    const int32_t nested_values[] = { -11 };
+    HostCompositeResultCallState call_state = {};
+    call_state.mode = HOST_COMPOSITE_RESULT_INLINE;
+    append_component_s32_payload(&call_state.next_result, 37);
+    append_component_string_payload(&call_state.next_result, "abc");
+    append_component_list_scalar_payload(&call_state.next_result, 1, nested_values,
+                                         (uint32_t)sizeof(nested_values));
+
+    wasm_component_func_import_binding_t func_import = {};
+    func_import.name = "host-add";
+    func_import.callback = host_composite_result_callback;
+    func_import.user_data = &call_state;
+
+    struct InstantiationArgs2 *inst_args = nullptr;
+    ASSERT_TRUE(wasm_runtime_instantiation_args_create(&inst_args));
+    wasm_runtime_instantiation_args_set_default_stack_size(inst_args,
+                                                           helper->stack_size);
+    wasm_runtime_instantiation_args_set_host_managed_heap_size(
+        inst_args, helper->heap_size);
+    wasm_runtime_instantiation_args_set_wasi_stdio(inst_args, 0, 1, 2);
+    wasm_runtime_instantiation_args_set_wasi_dir(inst_args, nullptr, 0, nullptr,
+                                                 0);
+    wasm_runtime_instantiation_args_set_component_func_imports(inst_args,
+                                                               &func_import, 1);
+
+    wasm_module_inst_t module_inst = wasm_runtime_instantiate_ex2(
+        module, inst_args, helper->error_buf,
+        (uint32_t)sizeof(helper->error_buf));
+    wasm_runtime_instantiation_args_destroy(inst_args);
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func =
+        wasm_runtime_lookup_component_function(module_inst, "aliased-host-add");
+    ASSERT_NE(func, nullptr);
+
+    wasm_component_value_t args[2] = { make_component_s32_value(7),
+                                       make_component_s32_value(35) };
+    wasm_component_value_t result = {};
+
+    ASSERT_TRUE(
+        wasm_runtime_call_component_values(module_inst, func, 1, &result, 2, args))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(call_state.call_count, 1);
+    ASSERT_EQ(call_state.last_a, 7);
+    ASSERT_EQ(call_state.last_b, 35);
+    ASSERT_EQ(result.type.kind, WASM_COMPONENT_VALUE_TYPE_DEFINED);
+    ASSERT_EQ(result.storage_kind, WASM_COMPONENT_VALUE_STORAGE_INLINE);
+    ASSERT_EQ(result.byte_size, call_state.next_result.size());
+    ASSERT_EQ(memcmp(wasm_component_value_get_data(&result),
+                     call_state.next_result.data(), call_state.next_result.size()),
+              0);
+
+    wasm_component_value_destroy(&result);
+    wasm_component_value_destroy(&args[0]);
+    wasm_component_value_destroy(&args[1]);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
 TEST_F(
     BinaryParserTest,
     TestPublicComponentCallSupportsHostRecordResultFuncImportsWithStringAndListStringLeaves)
@@ -29444,6 +29543,103 @@ TEST_F(
     append_component_record_string_list_string_payload(
         &call_state.next_result, -29, "nested-host-result-list-string",
         { "hi", "hey", "yo" });
+
+    wasm_component_func_import_binding_t func_import = {};
+    func_import.name = "host-add";
+    func_import.callback = host_composite_result_callback;
+    func_import.user_data = &call_state;
+
+    struct InstantiationArgs2 *inst_args = nullptr;
+    ASSERT_TRUE(wasm_runtime_instantiation_args_create(&inst_args));
+    wasm_runtime_instantiation_args_set_default_stack_size(inst_args,
+                                                           helper->stack_size);
+    wasm_runtime_instantiation_args_set_host_managed_heap_size(
+        inst_args, helper->heap_size);
+    wasm_runtime_instantiation_args_set_wasi_stdio(inst_args, 0, 1, 2);
+    wasm_runtime_instantiation_args_set_wasi_dir(inst_args, nullptr, 0, nullptr,
+                                                 0);
+    wasm_runtime_instantiation_args_set_component_func_imports(inst_args,
+                                                               &func_import, 1);
+
+    wasm_module_inst_t module_inst = wasm_runtime_instantiate_ex2(
+        module, inst_args, helper->error_buf,
+        (uint32_t)sizeof(helper->error_buf));
+    wasm_runtime_instantiation_args_destroy(inst_args);
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func =
+        wasm_runtime_lookup_component_function(module_inst, "aliased-host-add");
+    ASSERT_NE(func, nullptr);
+
+    wasm_component_value_t args[2] = { make_component_s32_value(7),
+                                       make_component_s32_value(35) };
+    wasm_component_value_t result = {};
+
+    ASSERT_TRUE(
+        wasm_runtime_call_component_values(module_inst, func, 1, &result, 2, args))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(call_state.call_count, 1);
+    ASSERT_EQ(call_state.last_a, 7);
+    ASSERT_EQ(call_state.last_b, 35);
+    ASSERT_EQ(result.type.kind, WASM_COMPONENT_VALUE_TYPE_DEFINED);
+    ASSERT_EQ(result.storage_kind, WASM_COMPONENT_VALUE_STORAGE_OWNED);
+    ASSERT_GT(result.byte_size, WASM_COMPONENT_VALUE_INLINE_STORAGE_SIZE);
+    ASSERT_EQ(result.byte_size, call_state.next_result.size());
+    ASSERT_EQ(memcmp(wasm_component_value_get_data(&result),
+                     call_state.next_result.data(), call_state.next_result.size()),
+              0);
+
+    wasm_component_value_destroy(&result);
+    wasm_component_value_destroy(&args[0]);
+    wasm_component_value_destroy(&args[1]);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(
+    BinaryParserTest,
+    TestPublicComponentCallSupportsHostRecordResultFuncImportsWithStringAndListS32Leaves)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] =
+        "public-component-host-record-result-import-string-list-s32";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(append_top_level_host_function_import_sections(
+        (WASMComponentModule *)module, "host-add", "host-instance", "forwarded"));
+    ASSERT_TRUE(append_top_level_function_export_alias((WASMComponentModule *)module,
+                                                       "host-instance", "forwarded",
+                                                       "aliased-host-add"));
+
+    const int32_t record_type_idx =
+        append_component_record_string_list_value_type_with_element(
+            (WASMComponentModule *)module, WASM_COMP_PRIMVAL_S32, false, 0,
+            "rhs");
+    ASSERT_GE(record_type_idx, 0);
+    ASSERT_TRUE(configure_component_func_result_type_idx(
+        (WASMComponentModule *)module, 0, (uint32_t)record_type_idx));
+    ASSERT_TRUE(ensure_canon_lift_string_utf8_opt(find_first_canon_lift(
+        (WASMComponentModule *)module)));
+    ASSERT_TRUE(ensure_canon_lift_memory_opt(find_first_canon_lift(
+        (WASMComponentModule *)module),
+                                             0));
+    ASSERT_TRUE(ensure_canon_lift_realloc_opt(find_first_canon_lift(
+        (WASMComponentModule *)module),
+                                              2));
+
+    const int32_t nested_values[] = { -5, 8, 13 };
+    HostCompositeResultCallState call_state = {};
+    call_state.mode = HOST_COMPOSITE_RESULT_OWNED;
+    append_component_record_string_list_scalar_payload(
+        &call_state.next_result, -29, "nested-host-result-list-s32", 3,
+        nested_values, (uint32_t)sizeof(nested_values));
 
     wasm_component_func_import_binding_t func_import = {};
     func_import.name = "host-add";
