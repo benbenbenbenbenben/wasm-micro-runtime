@@ -12859,26 +12859,35 @@ validate_component_value_types_equal(
     const char *member_name, char *error_buf, uint32 error_buf_size);
 
 static bool
-component_value_type_is_u8_primitive(const WASMComponent *component,
-                                     const WASMComponentValueType *value_type)
+component_value_type_resolve_supported_match_primitive(
+    const WASMComponent *component, const WASMComponentValueType *value_type,
+    WASMComponentPrimValType *out_primitive_type)
 {
     const WASMComponentTypes *type_entry;
     const WASMComponentDefValType *def_type;
+    WASMComponentPrimValType primitive_type;
 
-    if (!component || !value_type)
+    if (!component || !value_type || !out_primitive_type)
         return false;
 
     if (value_type->type == WASM_COMP_VAL_TYPE_PRIMVAL)
-        return value_type->type_specific.primval_type == WASM_COMP_PRIMVAL_U8;
+        primitive_type = value_type->type_specific.primval_type;
+    else {
+        type_entry =
+            wasm_component_lookup_type(component, value_type->type_specific.type_idx);
+        if (!type_entry || type_entry->tag != WASM_COMP_DEF_TYPE
+            || !(def_type = type_entry->type.def_val_type)
+            || def_type->tag != WASM_COMP_DEF_VAL_PRIMVAL)
+            return false;
 
-    type_entry =
-        wasm_component_lookup_type(component, value_type->type_specific.type_idx);
-    if (!type_entry || type_entry->tag != WASM_COMP_DEF_TYPE
-        || !(def_type = type_entry->type.def_val_type))
+        primitive_type = def_type->def_val.primval;
+    }
+
+    if (!is_supported_value_match_primitive(primitive_type))
         return false;
 
-    return def_type->tag == WASM_COMP_DEF_VAL_PRIMVAL
-           && def_type->def_val.primval == WASM_COMP_PRIMVAL_U8;
+    *out_primitive_type = primitive_type;
+    return true;
 }
 
 static bool
@@ -12905,9 +12914,14 @@ component_value_type_uses_supported_matching_subset(
         case WASM_COMP_DEF_VAL_PRIMVAL:
             return is_supported_value_match_primitive(def_type->def_val.primval);
         case WASM_COMP_DEF_VAL_LIST:
+        {
+            WASMComponentPrimValType element_primitive_type;
+
             return def_type->def_val.list && def_type->def_val.list->element_type
-                   && component_value_type_is_u8_primitive(
-                       component, def_type->def_val.list->element_type);
+                   && component_value_type_resolve_supported_match_primitive(
+                       component, def_type->def_val.list->element_type,
+                       &element_primitive_type);
+        }
         case WASM_COMP_DEF_VAL_RECORD:
             if (!def_type->def_val.record)
                 return false;
@@ -13430,10 +13444,21 @@ validate_component_value_types_equal(
             if (!resolve_component_value_match_primitive(&expected_element_resolved,
                                                          &expected_primitive_type)
                 || !resolve_component_value_match_primitive(&actual_element_resolved,
-                                                            &actual_primitive_type)
-                || expected_primitive_type != WASM_COMP_PRIMVAL_U8
-                || actual_primitive_type != WASM_COMP_PRIMVAL_U8)
+                                                            &actual_primitive_type))
                 break;
+
+            if (expected_primitive_type != actual_primitive_type)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    member_name ? "component import \"%s\" instance export \"%s\" "
+                                  "value type mismatch: expected list<%s> but "
+                                  "received list<%s>"
+                                : "component import \"%s\" value type mismatch: "
+                                  "expected list<%s> but received list<%s>",
+                    import_name ? import_name : "<unnamed>",
+                    member_name ? member_name : "",
+                    component_prim_type_name(expected_primitive_type),
+                    component_prim_type_name(actual_primitive_type));
 
             return true;
         }

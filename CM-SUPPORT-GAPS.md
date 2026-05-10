@@ -129,13 +129,14 @@ instance bindings, and currently covers:
 - exported scalar `value` members
 - exported variable-length `list<u8>` `value` members
 - exported tuple/record `value` members in the current scalar / UTF-8 string /
-  nested `list<u8>` leaf subset
+  nested `list<u8>` / `list<string>` leaf subset
 - exported nested `instance` members, including recursive validation
 
 Typed matching of exported component `func` / `value` / `component` members is
 still incomplete: typed function matching remains limited to the current scalar /
 UTF-8 string / variable-length `list<u8>` / tuple-record subset, typed value
-matching beyond that same subset is still incomplete, and typed exported
+matching beyond the current scalar / UTF-8 string / variable-length `list<u8>` /
+`list<string>` tuple-record subset is still incomplete, and typed exported
 `component` matching currently only covers zero-import component types plus the
 recursive typed-`component`-export subset when the actual exports carry explicit
 component type metadata.
@@ -207,7 +208,8 @@ Implemented slices include:
 - top-level value exports
 - top-level public value imports
 - typed top-level and nested value-instance import validation for the current
-  scalar / UTF-8 string / variable-length `list<u8>` / tuple-record leaf subset
+  scalar / UTF-8 string / variable-length `list<u8>` / `list<string>` /
+  tuple-record leaf subset
 - aliasing/re-export of value references through the runtime graph
 
 This is real runtime value plumbing, even though full composite value semantics are still missing.
@@ -433,7 +435,7 @@ What works today:
 - raw borrowed/owned value payload storage
 - opaque defined-value payloads for UTF-8 strings and top-level `list<scalar>` calls
 - opaque defined-value payloads for tuple/record composites in the currently
-  supported scalar / UTF-8 string / nested `list<scalar>` cases
+  supported scalar / UTF-8 string / nested `list<scalar>` / `list<string>` cases
 
 What is still missing:
 
