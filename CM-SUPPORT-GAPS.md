@@ -10,7 +10,7 @@ The short version is:
 
 The main remaining gaps are now centered on:
 
-- Canonical ABI beyond the current scalar / UTF-8 string / `list<u8>` /
+- Canonical ABI beyond the current scalar / UTF-8 string / `list<scalar>` /
   supported tuple-record slices
 - broader canon-lower / imported component-function lowering paths
 - broader composite component values and memory-backed leaves inside composites
@@ -22,7 +22,7 @@ The main remaining gaps are now centered on:
 
 The implementation is now best described as:
 
-> **A partial but executable component runtime: top-level component loading/instantiation, public import/export APIs, scalar / UTF-8 string / `list<u8>` / limited tuple-record canon-lift calls, a narrow direct-core-call `canon lower` seam for scalar signatures plus `list<u8>` parameters with scalar results, host-provided component-function imports for the currently supported subset, runtime values, value imports/exports, start execution slices, and resource bookkeeping foundations are all present.**
+> **A partial but executable component runtime: top-level component loading/instantiation, public import/export APIs, scalar / UTF-8 string / `list<scalar>` / limited tuple-record canon-lift calls, a narrow direct-core-call `canon lower` seam for scalar signatures plus top-level `list<scalar>` params/results on the specifically tested memory-backed path, host-provided component-function imports for the currently supported subset, runtime values, value imports/exports, start execution slices, and resource bookkeeping foundations are all present.**
 
 ### 1.1 Top-level component loading, instantiation, and teardown
 
@@ -151,32 +151,34 @@ What works today:
 - direct core-wasm calls into lowered component functions for the narrow tested
   subset:
   - scalar-only parameters/results
-  - `list<u8>` parameters with scalar results
-  - lower-side `(memory ...)` only for the tested `list<u8>` parameter path
+  - `list<scalar>` parameters with scalar results
+  - top-level `list<scalar>` results through an explicit i32 return-area pointer
+  - lower-side `(memory ...)` only for the tested `list<scalar>` parameter/result
+    path
   - downstream core modules instantiated with explicit `with_args` lowered-function
     bindings
 - scalar parameter/result lifting via `wasm_runtime_call_component(...)`
 - UTF-8 string parameter/result handling via `wasm_runtime_call_component_values(...)`
-- top-level `list<u8>` parameter/result handling via `wasm_runtime_call_component_values(...)`
-- top-level tuple/record parameters with scalar, nested UTF-8 string, and nested `list<u8>` leaves
-- top-level exported `canon lift` tuple/record results with scalar, UTF-8 string, and nested `list<u8>` leaves
+- top-level `list<scalar>` parameter/result handling via `wasm_runtime_call_component_values(...)`
+- top-level tuple/record parameters with scalar, nested UTF-8 string, and nested `list<scalar>` leaves
+- top-level exported `canon lift` tuple/record results with scalar, UTF-8 string, and nested `list<scalar>` leaves
 - memory / realloc / post-return validation and use for supported UTF-8 string lifts
-- host-provided component-function imports for scalar / UTF-8 string / `list<u8>` signatures
-- host-provided component-function imports for tuple/record parameters with scalar, UTF-8 string, and nested `list<u8>` leaves
+- host-provided component-function imports for scalar / UTF-8 string / `list<scalar>` signatures
+- host-provided component-function imports for tuple/record parameters with scalar, UTF-8 string, and nested `list<scalar>` leaves
 - host-provided component-function imports for tuple/record results with scalar,
-  UTF-8 string, and nested `list<u8>` leaves
+  UTF-8 string, and nested `list<scalar>` leaves
 
 Current supported execution envelope is intentionally narrow:
 
 - `canon lift` is executable for the currently supported scalar / UTF-8 string /
-  `list<u8>` / tuple-record subset
+  `list<scalar>` / tuple-record subset
 - `canon lower` is executable only for the currently tested direct core-call
   subset above
 - calls may target supported top-level or nested canon-lift / host-import function
   handles discovered through the runtime graph, plus direct core-wasm calls through
   the narrow lowered-import path above
 - scalar signatures work through the `wasm_val_t` API
-- UTF-8 string / `list<u8>` / tuple-record signatures work through the component-value API
+- UTF-8 string / `list<scalar>` / tuple-record signatures work through the component-value API
 - raw `wasm_runtime_call_component(...)` stays scalar-only
 
 ### 1.6 Runtime values and value sections are implemented
@@ -240,7 +242,7 @@ This is a real runtime substrate, but not yet full resource semantics.
 - public component export discovery/lookup
 - public scalar component calls
 - public UTF-8 string component calls
-- public `list<u8>` component calls
+- public `list<scalar>` component calls
 - public tuple/record component calls
 - top-level component import binding
 - typed top-level and nested component-instance import binding for the current
@@ -249,9 +251,9 @@ This is a real runtime substrate, but not yet full resource semantics.
 - top-level and nested value sections
 - top-level and nested start execution for the current supported public-value
   subset, still capped at a single result
-- top-level host function imports across scalar / UTF-8 string / `list<u8>` /
+- top-level host function imports across scalar / UTF-8 string / `list<scalar>` /
   supported tuple-record parameter and result slices with scalar, UTF-8 string,
-  and nested `list<u8>` leaves
+  and nested `list<scalar>` leaves
 - resource-state and owned-handle cleanup foundations
 
 ## 2. What is still missing for full component-model support
@@ -264,19 +266,19 @@ The executable Canonical ABI surface is currently limited to:
 
 - scalar values
 - UTF-8 strings
-- top-level `list<u8>`
-- top-level tuple/record parameters with scalar, nested UTF-8 string, and nested `list<u8>` leaves
-- top-level exported tuple/record results with scalar, UTF-8 string, and nested `list<u8>` leaves
+- top-level `list<scalar>`
+- top-level tuple/record parameters with scalar, nested UTF-8 string, and nested `list<scalar>` leaves
+- top-level exported tuple/record results with scalar, UTF-8 string, and nested `list<scalar>` leaves
 - top-level exported `canon lift`
 - top-level and nested synthetic `lift(lower(f))` round-trips when `lower`
   targets an existing runtime `canon lift` handle for the currently tested
   subset:
   - scalar signatures
   - UTF-8 string signatures through the component value API
-  - `list<u8>` parameter signatures, including empty-list input
-  - `list<u8>` results
+  - `list<scalar>` parameter signatures, including empty-list input
+  - `list<scalar>` results
   - tuple/record parameter signatures over the current scalar / UTF-8 string /
-    nested `list<u8>` leaf subset
+    nested `list<scalar>` leaf subset
   - record-result signatures
   - tuple-result and mixed tuple/record-result signatures through the component
     value API over that same supported leaf subset
@@ -285,9 +287,11 @@ The executable Canonical ABI surface is currently limited to:
 - direct core-wasm invocation of lowered component functions for the currently
   tested direct subset:
   - scalar parameters/results
-  - `list<u8>` parameters with scalar results
-  - no lower-side canon options beyond tested `(memory ...)` for the `list<u8>`
-    parameter path
+  - `list<scalar>` parameters with scalar results
+  - top-level `list<scalar>` results through the tested `(param i32) -> ()`
+    return-area path
+  - no lower-side canon options beyond tested `(memory ...)` for the `list<scalar>`
+    parameter/result path
   - positive direct child-core witnesses plus explicit failure when the tested
     memory-backed path omits lower-side memory
 - top-level host-defined component-function imports for the same supported subset
@@ -297,23 +301,24 @@ Major Canonical ABI gaps remain:
 - no general executable `canon lower`; the only supported executable lowering
   paths are:
   - the narrow direct core-call subset above
-  - the synthetic scalar / UTF-8 string / `list<u8>`-parameter /
-    `list<u8>`-result / tuple/record-parameter / record-result /
+  - the synthetic scalar / UTF-8 string / `list<scalar>`-parameter /
+    `list<scalar>`-result / tuple/record-parameter / record-result /
     tuple/mixed-composite-result `lift(lower(f))` subset above
 - no general adapter/lowering path for imported component functions beyond the
   supported host-callback subset and the narrow direct core-call subset above
 - no executable lower path yet for memory-backed Canonical ABI shapes
-  beyond the tested direct `list<u8>`-parameter-with-scalar-result path and the
-  synthetic `list<u8>`-parameter / `list<u8>`-result /
+  beyond the tested direct `list<scalar>`-parameter-with-scalar-result path, the
+  tested top-level direct `list<scalar>`-result return-area path, and the synthetic
+  `list<scalar>`-parameter / `list<scalar>`-result /
   tuple/record-parameter / record-result / tuple/mixed-composite-result
   synthetic re-lifts above
 - no executable lower path yet for broader nested composite lowering shapes beyond
-  the tested scalar / UTF-8 string / nested `list<u8>` tuple-record subset
-- no list marshalling beyond UTF-8 strings, top-level `list<u8>`, and nested `list<u8>` leaves in exported tuple/record values and host-import tuple/record parameters
+  the tested scalar / UTF-8 string / nested `list<scalar>` tuple-record subset
+- no list marshalling beyond UTF-8 strings, top-level `list<scalar>`, and nested `list<scalar>` leaves in exported tuple/record values and host-import tuple/record parameters
 - no variant / flags / enum / option / result marshalling
-- no non-string memory-backed leaves inside tuple/record Canonical ABI values beyond nested `list<u8>` leaves for exported canon-lift calls and host-import tuple/record parameters
+- no non-string memory-backed leaves inside tuple/record Canonical ABI values beyond nested `list<scalar>` leaves for exported canon-lift calls and host-import tuple/record parameters
 - no broader composite flattening/lifting rules beyond the current
-  string/`list<u8>` tuple-record subset
+  string/`list<scalar>` tuple-record subset
 - no non-UTF-8 string encodings (`utf16`, `latin1+utf16`)
 - no `memory64` memory-backed Canonical ABI support
 - no `error-context` value support
@@ -329,10 +334,10 @@ Current limitations include:
 
 - generic `wasm_runtime_lookup_function(...)` only exposes top-level exported
   component functions whose signatures stay within the generic scalar
-  `wasm_val_t` shape; string / `list<u8>` / tuple-record component functions
+  `wasm_val_t` shape; string / `list<scalar>` / tuple-record component functions
   still require the component-specific lookup/call APIs
 - `wasm_runtime_call_component(...)` remains scalar-only even for nested handles
-- `wasm_runtime_call_component_values(...)` still only supports the current string / `list<u8>` / limited tuple-record subset
+- `wasm_runtime_call_component_values(...)` still only supports the current string / `list<scalar>` / limited tuple-record subset
 - lowered core-function execution is still only exposed indirectly through
   synthetic re-lifted component exports; there is no general public API for
   invoking or binding lowered core functions
@@ -349,7 +354,7 @@ Current limitations include:
   recurse through typed `component` exports with explicit component type
   metadata; broader componenttype matching is still unsupported
 - host-import tuple/record values are still limited to the current scalar /
-  UTF-8 string / nested `list<u8>` subset
+  UTF-8 string / nested `list<scalar>` subset
 - there is still no public resource import/export contract comparable to the current function/value/instance/component/core-module surface
 
 ## 5. Broader component values are still missing
@@ -360,9 +365,9 @@ What works today:
 
 - primitive scalar values
 - raw borrowed/owned value payload storage
-- opaque defined-value payloads for UTF-8 strings and top-level `list<u8>` calls
+- opaque defined-value payloads for UTF-8 strings and top-level `list<scalar>` calls
 - opaque defined-value payloads for tuple/record composites in the currently
-  supported scalar / UTF-8 string / nested `list<u8>` cases
+  supported scalar / UTF-8 string / nested `list<scalar>` cases
 
 What is still missing:
 
@@ -486,4 +491,4 @@ If this feature is described as:
 
 The right maturity label today is:
 
-> **A real but still partial component runtime: public host APIs, scalar / UTF-8 string / `list<u8>` / limited tuple-record canon-lift calls, a narrow executable direct-core-call `canon lower` subset, supported host-provided component-function imports, runtime values, value imports/exports, start execution slices, and resource bookkeeping foundations are implemented; full support is still blocked on broader canon-lower/imported-function lowering, broader composite Canonical ABI and value semantics, operational resources, remaining host API gaps, and nested core-runtime support.**
+> **A real but still partial component runtime: public host APIs, scalar / UTF-8 string / `list<scalar>` / limited tuple-record canon-lift calls, a narrow executable direct-core-call `canon lower` subset, supported host-provided component-function imports, runtime values, value imports/exports, start execution slices, and resource bookkeeping foundations are implemented; full support is still blocked on broader canon-lower/imported-function lowering, broader composite Canonical ABI and value semantics, operational resources, remaining host API gaps, and nested core-runtime support.**
