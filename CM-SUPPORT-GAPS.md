@@ -233,7 +233,7 @@ This support is still intentionally narrow:
 - start arguments/results are limited to the currently supported public-value
   subset: UTF-8 strings, top-level variable-length `list<u8>` /
   `list<string>`, and tuple/record values with scalar / nested UTF-8 string /
-  nested `list<u8>` leaves
+  nested `list<u8>` / `list<string>` leaves
 - at most one result
 - execution routes through supported canon-lift function shapes
 
