@@ -378,7 +378,7 @@ Major Canonical ABI gaps remain:
   cross-component `list<string>` parameter/result seams, top-level
   `list<scalar>`, and the tested top-level direct tuple/record
   `list<string>`-leaf plus nested `list<scalar>` leaves in exported
-  tuple/record values and host-import tuple/record parameters
+  tuple/record values and host-import tuple/record parameter/result values
 - no variant / flags / enum / option / result marshalling
 - no non-string memory-backed leaves inside tuple/record Canonical ABI values beyond nested `list<scalar>` leaves for exported canon-lift calls and host-import tuple/record parameters
 - no broader composite flattening/lifting rules beyond the current
@@ -402,7 +402,8 @@ Current limitations include:
   `wasm_val_t` shape; string / `list<scalar>` / tuple-record component functions
   still require the component-specific lookup/call APIs
 - `wasm_runtime_call_component(...)` remains scalar-only even for nested handles
-- `wasm_runtime_call_component_values(...)` still only supports the current string / `list<scalar>` / limited tuple-record subset
+- `wasm_runtime_call_component_values(...)` still only supports the current
+  string / `list<scalar>` / `list<string>` / limited tuple-record subset
 - lowered core-function execution is still only exposed indirectly through
   synthetic re-lifted component exports; there is no general public API for
   invoking or binding lowered core functions
@@ -419,7 +420,7 @@ Current limitations include:
   recurse through typed `component` exports with explicit component type
   metadata; broader componenttype matching is still unsupported
 - host-import tuple/record values are still limited to the current scalar /
-  UTF-8 string / nested `list<scalar>` subset
+  UTF-8 string / nested `list<scalar>` / `list<string>` subset
 - there is still no public resource import/export contract comparable to the current function/value/instance/component/core-module surface
 
 ## 5. Broader component values are still missing
