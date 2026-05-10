@@ -213,6 +213,9 @@ Implemented slices include:
   tuple-record leaf subset
 - aliasing/re-export of value references through the runtime graph
 
+Those value-section/value-export paths are now exercised not just for scalars,
+but also for opaque tuple/record payloads with nested `list<string>` leaves.
+
 This is real runtime value plumbing, even though full composite value semantics are still missing.
 
 ### 1.7 Start sections now execute in limited form
