@@ -251,8 +251,9 @@ The runtime now includes:
 - executable `canon resource.new` / `canon resource.drop` / `canon resource.rep`
   when a child core module imports those builtins
 - the first proven operational subset for those builtins:
-  locally-defined resource types only, `rep i32` only, sync destructors on
-  explicit `resource.drop`, no async drop, no imported/aliased resource types
+  locally-defined resource types and aliases thereof, `rep i32` only, sync
+  destructors on explicit `resource.drop`, no async drop, no imported
+  non-alias resource types
 - deinstantiate-time destructor execution for still-live handles in that same
   currently supported local subset
 - finalizer cleanup during deinstantiation
@@ -500,7 +501,8 @@ What exists:
 - alias/import tracking
 - owned handle allocation/drop helpers
 - executable child-core `canon resource.new` / `canon resource.rep` /
-  `canon resource.drop` for the tested locally-defined `rep i32` subset
+  `canon resource.drop` for the tested locally-defined `rep i32` subset and
+  aliases thereof
 - sync destructor execution when that tested subset is dropped explicitly from
   child core code
 - deinstantiate-time sync destructor execution for still-live handles in that

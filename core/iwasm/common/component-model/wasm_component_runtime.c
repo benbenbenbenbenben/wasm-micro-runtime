@@ -2141,6 +2141,10 @@ prepare_resource_builtin_function(
     const WASMComponentRuntimeResourceType *resource_type =
         wasm_component_resource_lookup_runtime_type_const(resource_state,
                                                          resource_type_idx);
+    const WASMComponentRuntimeResourceType *canonical_resource_type =
+        resource_type ? wasm_component_resource_lookup_runtime_type_const(
+                            resource_state, resource_type->canonical_type_idx)
+                      : NULL;
 
     if (!func || !resource_state)
     {
@@ -2164,11 +2168,12 @@ prepare_resource_builtin_function(
             "component resource builtin uses unresolved resource type index %u",
             resource_type_idx);
 
-    if (resource_type->kind != WASM_COMP_RUNTIME_RESOURCE_TYPE_LOCAL)
+    if (!canonical_resource_type
+        || canonical_resource_type->kind != WASM_COMP_RUNTIME_RESOURCE_TYPE_LOCAL)
         return set_component_runtime_error_fmt(
             error_buf, error_buf_size,
             "component resource builtins currently only support locally-defined "
-            "resource types (type index %u)",
+            "resource types or aliases thereof (type index %u)",
             resource_type_idx);
 
     memset(func, 0, sizeof(*func));
@@ -2179,26 +2184,28 @@ prepare_resource_builtin_function(
     func->resource_state = resource_state;
     func->type_owner_component = type_owner_component;
 
-    if (resource_type->has_dtor) {
+    if (canonical_resource_type->has_dtor) {
         if (!owner_instance
-            || resource_type->dtor_func_idx >= owner_instance->core_func_count) {
+            || canonical_resource_type->dtor_func_idx
+                   >= owner_instance->core_func_count) {
             return set_component_runtime_error_fmt(
                 error_buf, error_buf_size,
                 "component resource builtin could not resolve destructor func "
                 "index %u for type index %u",
-                resource_type->dtor_func_idx, resource_type_idx);
+                canonical_resource_type->dtor_func_idx, resource_type_idx);
         }
-        if (owner_instance->core_funcs[resource_type->dtor_func_idx].type
+        if (owner_instance->core_funcs[canonical_resource_type->dtor_func_idx].type
                 != WASM_COMP_CORE_RUNTIME_REF_FUNC
-            || !owner_instance->core_funcs[resource_type->dtor_func_idx]
+            || !owner_instance->core_funcs[canonical_resource_type->dtor_func_idx]
                     .of.function) {
             return set_component_runtime_error_fmt(
                 error_buf, error_buf_size,
                 "component resource builtin destructor func index %u did not "
                 "resolve to a core function",
-                resource_type->dtor_func_idx);
+                canonical_resource_type->dtor_func_idx);
         }
-        func->core_func_ref = owner_instance->core_funcs[resource_type->dtor_func_idx];
+        func->core_func_ref =
+            owner_instance->core_funcs[canonical_resource_type->dtor_func_idx];
     }
 
     return true;
@@ -2802,6 +2809,7 @@ component_resource_builtin_trampoline(WASMModuleInstanceCommon *caller_module_in
                                       uint64 *raw_args)
 {
     const WASMComponentRuntimeResourceType *resource_type;
+    const WASMComponentRuntimeResourceType *canonical_resource_type;
     WASMComponentResourceHandleEntry *entry;
     uint32 handle = 0;
     uint32 rep = 0;
@@ -2813,7 +2821,13 @@ component_resource_builtin_trampoline(WASMModuleInstanceCommon *caller_module_in
 
     resource_type = wasm_component_resource_lookup_runtime_type_const(
         resource_function->resource_state, resource_function->resource_type_idx);
-    if (!resource_type || resource_type->kind != WASM_COMP_RUNTIME_RESOURCE_TYPE_LOCAL) {
+    canonical_resource_type =
+        resource_type ? wasm_component_resource_lookup_runtime_type_const(
+                            resource_function->resource_state,
+                            resource_type->canonical_type_idx)
+                      : NULL;
+    if (!canonical_resource_type
+        || canonical_resource_type->kind != WASM_COMP_RUNTIME_RESOURCE_TYPE_LOCAL) {
         wasm_runtime_set_exception(
             caller_module_inst,
             "component resource builtin could not resolve a supported local "
@@ -2836,19 +2850,20 @@ component_resource_builtin_trampoline(WASMModuleInstanceCommon *caller_module_in
             return;
         case WASM_COMP_CANON_RESOURCE_DROP:
             handle = (uint32)raw_args[0];
-            if (handle == 0 || handle - 1 >= resource_type->handle_table.entry_count) {
+            if (handle == 0
+                || handle - 1 >= canonical_resource_type->handle_table.entry_count) {
                 wasm_runtime_set_exception(
                     caller_module_inst, "component resource handle is invalid");
                 return;
             }
-            entry = &resource_type->handle_table.entries[handle - 1];
+            entry = &canonical_resource_type->handle_table.entries[handle - 1];
             if (!entry->is_live || !entry->is_owned) {
                 wasm_runtime_set_exception(
                     caller_module_inst,
                     "component resource handle is not an owned live handle");
                 return;
             }
-            if (resource_type->has_dtor) {
+            if (canonical_resource_type->has_dtor) {
                 wasm_val_t dtor_arg = { 0 };
                 dtor_arg.kind = WASM_I32;
                 dtor_arg.of.i32 = (int32)(uint32)(uintptr_t)entry->data;
@@ -2876,12 +2891,13 @@ component_resource_builtin_trampoline(WASMModuleInstanceCommon *caller_module_in
             return;
         case WASM_COMP_CANON_RESOURCE_REP:
             handle = (uint32)raw_args[0];
-            if (handle == 0 || handle - 1 >= resource_type->handle_table.entry_count) {
+            if (handle == 0
+                || handle - 1 >= canonical_resource_type->handle_table.entry_count) {
                 wasm_runtime_set_exception(
                     caller_module_inst, "component resource handle is invalid");
                 return;
             }
-            entry = &resource_type->handle_table.entries[handle - 1];
+            entry = &canonical_resource_type->handle_table.entries[handle - 1];
             if (!entry->is_live || !entry->is_owned) {
                 wasm_runtime_set_exception(
                     caller_module_inst,
@@ -14597,6 +14613,11 @@ resolve_top_level_component_imports(
                 matched = true;
                 break;
             }
+        }
+
+        if (!matched && component_import->extern_desc
+            && component_import->extern_desc->type == WASM_COMP_EXTERN_TYPE) {
+            matched = true;
         }
 
         if (!matched && component_import->extern_desc
