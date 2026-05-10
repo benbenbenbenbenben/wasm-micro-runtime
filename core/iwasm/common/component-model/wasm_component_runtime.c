@@ -227,6 +227,77 @@ static WASMComponentRuntimeStringEncoding
 resolve_lowered_import_string_encoding(
     const WASMComponentRuntimeFunc *lowered_function);
 
+typedef struct WASMComponentResultPayloadBuilder
+    WASMComponentResultPayloadBuilder;
+
+struct WASMComponentResultPayloadBuilder {
+    uint8 inline_storage[WASM_COMPONENT_VALUE_INLINE_STORAGE_SIZE];
+    uint8 *storage;
+    uint32 size;
+    uint32 capacity;
+};
+
+static bool
+init_component_defined_payload_value(
+    wasm_component_value_t *value,
+    WASMComponentResultPayloadBuilder *builder);
+
+static bool
+build_lowered_import_composite_param_payload(
+    WASMComponentInstance *component_inst, const WASMComponent *component,
+    const WASMComponentValueType *value_type, uint32 param_index,
+    WASMModuleInstanceCommon *caller_module_inst,
+    WASMComponentRuntimeStringEncoding string_encoding, const uint64 *raw_args,
+    const WASMFuncType *func_type, uint32 *core_param_index_io,
+    WASMComponentResultPayloadBuilder *builder);
+
+static bool
+validate_lowered_import_composite_param_signature(
+    WASMComponentInstance *component_inst, const WASMComponent *component,
+    const WASMComponentValueType *value_type, uint32 param_index,
+    const WASMFuncType *expected_type, uint32 *core_param_index_io,
+    uint32 *flat_param_count_io, char *error_buf, uint32 error_buf_size);
+
+static bool
+lookup_component_call_primitive_type(const WASMComponent *component,
+                                     const WASMComponentValueType *value_type,
+                                     const char *position, uint32 index,
+                                     bool *is_primitive_out,
+                                     uint8 *prim_type_out,
+                                     WASMComponentInstance *inst);
+
+static bool
+classify_component_runtime_composite_param(const WASMComponent *component,
+                                           const WASMComponentValueType *value_type,
+                                           uint32 param_index,
+                                           bool *has_string_leaf_out,
+                                           bool *has_list_scalar_leaf_out,
+                                           char *error_buf,
+                                           uint32 error_buf_size);
+
+static bool
+validate_component_public_composite_param_value(
+    WASMComponentInstance *inst, const WASMComponent *component,
+    const WASMComponentValueType *value_type, const wasm_component_value_t *value,
+    uint32 param_index);
+
+static void
+init_component_result_payload_builder(WASMComponentResultPayloadBuilder *builder);
+
+static void
+destroy_component_result_payload_builder(
+    WASMComponentResultPayloadBuilder *builder);
+
+static bool
+append_component_result_string_leaf(WASMComponentInstance *inst,
+                                    WASMComponentResultPayloadBuilder *builder,
+                                    const uint8 *payload, uint32 payload_len);
+
+static bool
+append_component_result_list_scalar_leaf(
+    WASMComponentInstance *inst, WASMComponentResultPayloadBuilder *builder,
+    uint32 element_count, const uint8 *payload, uint32 payload_len);
+
 static bool
 resolve_core_sort_idx(const WASMComponentInstance *inst,
                       const WASMComponentSortIdx *sort_idx,
@@ -1904,7 +1975,7 @@ validate_lowered_import_signature(
     WASMComponentInstance *component_inst;
     const WASMComponent *component;
     WASMComponentFuncType *component_type = NULL;
-    uint32 core_param_index = 0, expected_result_count, i;
+    uint32 core_param_index = 0, expected_result_count, total_flat_param_count = 0, i;
     bool needs_memory = false;
     bool needs_string = false;
     bool has_memory_opt = false;
@@ -1975,12 +2046,25 @@ validate_lowered_import_signature(
 
         if (!shape.is_primitive && shape.def_type
             && (shape.def_type->tag == WASM_COMP_DEF_VAL_RECORD
-                || shape.def_type->tag == WASM_COMP_DEF_VAL_TUPLE))
-            return set_component_runtime_error_fmt(
-                error_buf, error_buf_size,
-                "component canon lower direct core-call bindings currently "
-                "support only scalar or top-level string/list<scalar> results "
-                "and scalar, string, or list<scalar> parameters");
+                || shape.def_type->tag == WASM_COMP_DEF_VAL_TUPLE)) {
+            bool composite_has_string = false;
+            bool composite_has_list_scalar = false;
+            if (!classify_component_runtime_composite_param(
+                    component, component_type->params->params[i].value_type, i,
+                    &composite_has_string, &composite_has_list_scalar, error_buf,
+                    error_buf_size)
+                || !validate_lowered_import_composite_param_signature(
+                    component_inst, component,
+                    component_type->params->params[i].value_type, i, expected_type,
+                    &core_param_index, &total_flat_param_count, error_buf,
+                    error_buf_size))
+                return false;
+
+            needs_memory = needs_memory || composite_has_string
+                           || composite_has_list_scalar;
+            needs_string = needs_string || composite_has_string;
+            continue;
+        }
 
         wasm_runtime_clear_exception((WASMModuleInstanceCommon *)component_inst);
         if (!lookup_component_canon_lift_value_type(
@@ -1999,6 +2083,12 @@ validate_lowered_import_signature(
                     "component function signature",
                     core_param_index);
             core_param_index++;
+            total_flat_param_count++;
+            if (total_flat_param_count > 16)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "component canon lower direct core-call bindings do not "
+                    "support parameters flattened beyond 16 core arguments");
             continue;
         }
 
@@ -2015,6 +2105,12 @@ validate_lowered_import_signature(
             needs_memory = true;
             needs_string = true;
             core_param_index += 2;
+            total_flat_param_count += 2;
+            if (total_flat_param_count > 16)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "component canon lower direct core-call bindings do not "
+                    "support parameters flattened beyond 16 core arguments");
             continue;
         }
 
@@ -2036,6 +2132,12 @@ validate_lowered_import_signature(
 
         needs_memory = true;
         core_param_index += 2;
+        total_flat_param_count += 2;
+        if (total_flat_param_count > 16)
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                "component canon lower direct core-call bindings do not support "
+                "parameters flattened beyond 16 core arguments");
     }
 
     expected_result_count = get_component_func_result_count(component_type);
@@ -2170,6 +2272,172 @@ validate_lowered_import_signature(
             "lower-side canon options for scalar-only signatures");
 
     return true;
+}
+
+static bool
+validate_lowered_import_composite_param_signature(
+    WASMComponentInstance *component_inst, const WASMComponent *component,
+    const WASMComponentValueType *value_type, uint32 param_index,
+    const WASMFuncType *expected_type,
+    uint32 *core_param_index_io, uint32 *flat_param_count_io, char *error_buf,
+    uint32 error_buf_size)
+{
+    WASMComponentCanonLiftValueShape shape;
+
+    if (!resolve_component_canon_lift_value_shape(
+            component, value_type, "parameter", param_index, &shape,
+            component_inst))
+        return false;
+
+    if (shape.is_primitive) {
+        if (shape.prim_type == WASM_COMP_PRIMVAL_STRING) {
+            if (*core_param_index_io + 1 >= expected_type->param_count
+                || expected_type->types[*core_param_index_io] != VALUE_TYPE_I32
+                || expected_type->types[*core_param_index_io + 1] != VALUE_TYPE_I32)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "core import parameter %u does not match the lowered "
+                    "component function signature",
+                    *core_param_index_io);
+
+            *core_param_index_io += 2;
+            *flat_param_count_io += 2;
+            return *flat_param_count_io <= 16
+                       ? true
+                       : set_component_runtime_error_fmt(
+                             error_buf, error_buf_size,
+                             "component canon lower direct core-call bindings "
+                             "do not support composite parameters flattened "
+                             "beyond 16 core arguments");
+        }
+        else {
+            uint8 expected_core_type;
+            wasm_valkind_t ignored_public_kind;
+
+            if (!component_scalar_prim_to_core(shape.prim_type, &expected_core_type,
+                                               &ignored_public_kind))
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "component canon lower direct core-call bindings only "
+                    "support tuple/record parameters with scalar, UTF-8 "
+                    "string, or variable-length list<scalar> leaves");
+
+            if (*core_param_index_io >= expected_type->param_count
+                || expected_type->types[*core_param_index_io] != expected_core_type)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "core import parameter %u does not match the lowered "
+                    "component function signature",
+                    *core_param_index_io);
+
+            (*core_param_index_io)++;
+            (*flat_param_count_io)++;
+            return *flat_param_count_io <= 16
+                       ? true
+                       : set_component_runtime_error_fmt(
+                             error_buf, error_buf_size,
+                             "component canon lower direct core-call bindings "
+                             "do not support composite parameters flattened "
+                             "beyond 16 core arguments");
+        }
+    }
+
+    if (!shape.def_type)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "component canon lower direct core-call bindings only support "
+            "tuple/record parameters with scalar, UTF-8 string, or "
+            "variable-length list<scalar> leaves");
+
+    switch (shape.def_type->tag) {
+        case WASM_COMP_DEF_VAL_RECORD:
+            if (!shape.def_type->def_val.record)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "component canon lower direct core-call bindings only "
+                    "support tuple/record parameters with scalar, UTF-8 "
+                    "string, or variable-length list<scalar> leaves");
+            for (uint32 i = 0; i < shape.def_type->def_val.record->count; i++) {
+                if (!validate_lowered_import_composite_param_signature(
+                        component_inst, component,
+                        shape.def_type->def_val.record->fields[i].value_type,
+                        param_index, expected_type, core_param_index_io,
+                        flat_param_count_io, error_buf, error_buf_size))
+                    return false;
+            }
+            return true;
+        case WASM_COMP_DEF_VAL_TUPLE:
+            if (!shape.def_type->def_val.tuple)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "component canon lower direct core-call bindings only "
+                    "support tuple/record parameters with scalar, UTF-8 "
+                    "string, or variable-length list<scalar> leaves");
+            for (uint32 i = 0; i < shape.def_type->def_val.tuple->count; i++) {
+                if (!validate_lowered_import_composite_param_signature(
+                        component_inst, component,
+                        &shape.def_type->def_val.tuple->element_types[i],
+                        param_index, expected_type, core_param_index_io,
+                        flat_param_count_io, error_buf, error_buf_size))
+                    return false;
+            }
+            return true;
+        case WASM_COMP_DEF_VAL_LIST:
+        {
+            bool is_primitive = false;
+            uint8 element_prim_type = 0;
+
+            if (!shape.def_type->def_val.list
+                || !shape.def_type->def_val.list->element_type)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "component canon lower function parameter %u uses malformed "
+                    "list type",
+                    param_index);
+            if (!lookup_component_call_primitive_type(
+                    component, shape.def_type->def_val.list->element_type,
+                    "parameter", param_index, &is_primitive, &element_prim_type,
+                    component_inst))
+                return false;
+            if (!is_primitive || component_scalar_prim_byte_size(element_prim_type) == 0)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "component canon lower direct core-call bindings only "
+                    "support variable-length list<scalar> leaves inside "
+                    "tuple/record parameters");
+
+            if (*core_param_index_io + 1 >= expected_type->param_count
+                || expected_type->types[*core_param_index_io] != VALUE_TYPE_I32
+                || expected_type->types[*core_param_index_io + 1] != VALUE_TYPE_I32)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "core import parameter %u does not match the lowered "
+                    "component function signature",
+                    *core_param_index_io);
+
+            *core_param_index_io += 2;
+            *flat_param_count_io += 2;
+            return *flat_param_count_io <= 16
+                       ? true
+                       : set_component_runtime_error_fmt(
+                             error_buf, error_buf_size,
+                             "component canon lower direct core-call bindings "
+                             "do not support composite parameters flattened "
+                             "beyond 16 core arguments");
+        }
+        case WASM_COMP_DEF_VAL_LIST_LEN:
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                "component canon lower direct core-call bindings only support "
+                "variable-length list<scalar> leaves inside tuple/record "
+                "parameters");
+        default:
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                "component canon lower direct core-call bindings only support "
+                "tuple/record parameters with scalar, UTF-8 string, or "
+                "variable-length list<scalar> leaves");
+    }
 }
 
 static void
@@ -2320,13 +2588,37 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
         if (!shape.is_primitive && shape.def_type
             && (shape.def_type->tag == WASM_COMP_DEF_VAL_RECORD
                 || shape.def_type->tag == WASM_COMP_DEF_VAL_TUPLE)) {
-            if (call_args != stack_args)
-                wasm_runtime_free(call_args);
-            wasm_runtime_set_exception(
-                caller_module_inst,
-                "component lowered core-call trampoline does not support "
-                "composite parameters");
-            return;
+            WASMComponentResultPayloadBuilder builder;
+
+            init_component_result_payload_builder(&builder);
+            call_args[i].type.kind = WASM_COMPONENT_VALUE_TYPE_DEFINED;
+            if (!build_lowered_import_composite_param_payload(
+                    component_inst, component,
+                    component_type->params->params[i].value_type, i,
+                    caller_module_inst, lower_string_encoding, raw_args, func_type,
+                    &core_param_index, &builder)
+                || !init_component_defined_payload_value(&call_args[i], &builder)
+                || !validate_component_public_composite_param_value(
+                    component_inst, component,
+                    component_type->params->params[i].value_type, &call_args[i], i)) {
+                const char *component_exception = wasm_runtime_get_exception(
+                    (WASMModuleInstanceCommon *)component_inst);
+                destroy_component_result_payload_builder(&builder);
+                if (!wasm_runtime_get_exception(caller_module_inst)
+                    && component_exception) {
+                    wasm_runtime_set_exception(caller_module_inst,
+                                               component_exception);
+                    wasm_runtime_clear_exception(
+                        (WASMModuleInstanceCommon *)component_inst);
+                }
+                for (uint32 j = 0; j <= i && j < param_count; j++)
+                    wasm_component_value_destroy(&call_args[j]);
+                if (call_args != stack_args)
+                    wasm_runtime_free(call_args);
+                return;
+            }
+            destroy_component_result_payload_builder(&builder);
+            continue;
         }
 
         if (!lookup_component_canon_lift_value_type(
@@ -6038,13 +6330,6 @@ typedef struct WASMComponentCompositeFlatLeaf {
     WASMComponentCanonLiftValueInfo type_info;
 } WASMComponentCompositeFlatLeaf;
 
-typedef struct WASMComponentResultPayloadBuilder {
-    uint8 inline_storage[WASM_COMPONENT_VALUE_INLINE_STORAGE_SIZE];
-    uint8 *storage;
-    uint32 size;
-    uint32 capacity;
-} WASMComponentResultPayloadBuilder;
-
 static bool
 set_component_composite_result_leaf_error(WASMComponentInstance *inst,
                                           uint32 index)
@@ -6402,6 +6687,308 @@ finish_component_result_payload(
     builder->capacity = sizeof(builder->inline_storage);
     builder->size = 0;
     return true;
+}
+
+static bool
+init_component_defined_payload_value(
+    wasm_component_value_t *value, WASMComponentResultPayloadBuilder *builder)
+{
+    memset(value, 0, sizeof(*value));
+    value->type.kind = WASM_COMPONENT_VALUE_TYPE_DEFINED;
+    value->byte_size = builder->size;
+
+    if (builder->size == 0)
+        return true;
+
+    if (builder->storage == builder->inline_storage) {
+        value->storage_kind = WASM_COMPONENT_VALUE_STORAGE_INLINE;
+        memcpy(value->storage.inline_storage, builder->inline_storage,
+               builder->size);
+        return true;
+    }
+
+    value->storage_kind = WASM_COMPONENT_VALUE_STORAGE_OWNED;
+    value->storage.owned_data = builder->storage;
+    builder->storage = builder->inline_storage;
+    builder->capacity = sizeof(builder->inline_storage);
+    builder->size = 0;
+    return true;
+}
+
+static bool
+build_lowered_import_composite_param_payload(
+    WASMComponentInstance *component_inst, const WASMComponent *component,
+    const WASMComponentValueType *value_type, uint32 param_index,
+    WASMModuleInstanceCommon *caller_module_inst,
+    WASMComponentRuntimeStringEncoding string_encoding, const uint64 *raw_args,
+    const WASMFuncType *func_type, uint32 *core_param_index_io,
+    WASMComponentResultPayloadBuilder *builder)
+{
+    WASMComponentCanonLiftValueShape shape;
+
+    if (!resolve_component_canon_lift_value_shape(
+            component, value_type, "parameter", param_index, &shape,
+            component_inst))
+        return false;
+
+    if (shape.is_primitive) {
+        if (shape.prim_type == WASM_COMP_PRIMVAL_STRING) {
+            uint32 payload_len;
+            uint32 payload_ptr;
+            const uint8 *payload = NULL;
+
+            if (*core_param_index_io + 1 >= func_type->param_count
+                || func_type->types[*core_param_index_io] != VALUE_TYPE_I32
+                || func_type->types[*core_param_index_io + 1] != VALUE_TYPE_I32) {
+                wasm_runtime_set_exception(
+                    caller_module_inst,
+                    "component lowered core-call trampoline composite string "
+                    "parameters must flatten to i32 pointer/length pairs");
+                return false;
+            }
+            if (string_encoding != WASM_COMP_RUNTIME_STRING_ENCODING_UTF8) {
+                wasm_runtime_set_exception(
+                    caller_module_inst,
+                    "component lowered core-call trampoline only supports UTF-8 "
+                    "strings");
+                return false;
+            }
+
+            payload_ptr = (uint32)raw_args[*core_param_index_io];
+            payload_len = (uint32)raw_args[*core_param_index_io + 1];
+            if (payload_len > 0) {
+                if (!wasm_runtime_validate_app_addr(caller_module_inst, payload_ptr,
+                                                    payload_len)) {
+                    wasm_runtime_set_exception(caller_module_inst,
+                                               "out of bounds memory access");
+                    return false;
+                }
+                payload =
+                    wasm_runtime_addr_app_to_native(caller_module_inst, payload_ptr);
+                if (!wasm_component_validate_utf8(payload, payload_len)) {
+                    wasm_runtime_set_exception(
+                        caller_module_inst,
+                        "component lowered core-call trampoline string parameter "
+                        "does not contain valid UTF-8");
+                    return false;
+                }
+            }
+
+            *core_param_index_io += 2;
+            return append_component_result_string_leaf(component_inst, builder,
+                                                       payload, payload_len);
+        }
+        else {
+            uint8 expected_core_type;
+            wasm_valkind_t public_kind;
+            WASMComponentCanonLiftValueInfo type_info;
+            wasm_component_value_t encoded = { 0 };
+            const uint8 *encoded_bytes;
+            wasm_val_t flattened_value = { 0 };
+
+            if (!component_scalar_prim_to_core(shape.prim_type, &expected_core_type,
+                                               &public_kind)) {
+                wasm_runtime_set_exception(
+                    caller_module_inst,
+                    "component lowered core-call trampoline only supports "
+                    "tuple/record parameters with scalar, UTF-8 string, or "
+                    "variable-length list<scalar> leaves");
+                return false;
+            }
+            if (*core_param_index_io >= func_type->param_count
+                || func_type->types[*core_param_index_io] != expected_core_type) {
+                wasm_runtime_set_exception(
+                    caller_module_inst,
+                    "component lowered core-call trampoline composite scalar "
+                    "parameter does not match the core function signature");
+                return false;
+            }
+
+            memset(&type_info, 0, sizeof(type_info));
+            type_info.kind = WASM_COMP_CANON_LIFT_VALUE_SCALAR;
+            type_info.prim_type = shape.prim_type;
+            type_info.core_type = expected_core_type;
+            type_info.public_kind = public_kind;
+
+            switch (expected_core_type) {
+                case VALUE_TYPE_I32:
+                    flattened_value.kind = WASM_I32;
+                    flattened_value.of.i32 = (int32)raw_args[*core_param_index_io];
+                    break;
+                case VALUE_TYPE_I64:
+                    flattened_value.kind = WASM_I64;
+                    flattened_value.of.i64 = (int64)raw_args[*core_param_index_io];
+                    break;
+                case VALUE_TYPE_F32:
+                    flattened_value.kind = WASM_F32;
+                    bh_memcpy_s(&flattened_value.of.f32,
+                                sizeof(flattened_value.of.f32),
+                                &raw_args[*core_param_index_io], sizeof(float32));
+                    break;
+                case VALUE_TYPE_F64:
+                    flattened_value.kind = WASM_F64;
+                    bh_memcpy_s(&flattened_value.of.f64,
+                                sizeof(flattened_value.of.f64),
+                                &raw_args[*core_param_index_io], sizeof(float64));
+                    break;
+                default:
+                    wasm_runtime_set_exception(
+                        caller_module_inst,
+                        "component lowered core-call trampoline only supports "
+                        "tuple/record parameters with scalar, UTF-8 string, or "
+                        "variable-length list<scalar> leaves");
+                    return false;
+            }
+
+            if (!encode_component_public_scalar_value(&type_info, &flattened_value,
+                                                      &encoded)) {
+                wasm_runtime_set_exception(
+                    caller_module_inst,
+                    "component lowered core-call trampoline could not encode a "
+                    "composite scalar argument");
+                return false;
+            }
+
+            encoded_bytes = wasm_component_value_get_data(&encoded);
+            if (!append_component_result_payload_bytes(component_inst, builder,
+                                                       encoded_bytes,
+                                                       encoded.byte_size)) {
+                wasm_component_value_destroy(&encoded);
+                return false;
+            }
+            wasm_component_value_destroy(&encoded);
+            (*core_param_index_io)++;
+            return true;
+        }
+    }
+
+    if (!shape.def_type) {
+        wasm_runtime_set_exception(
+            caller_module_inst,
+            "component lowered core-call trampoline only supports tuple/record "
+            "parameters with scalar, UTF-8 string, or variable-length "
+            "list<scalar> leaves");
+        return false;
+    }
+
+    switch (shape.def_type->tag) {
+        case WASM_COMP_DEF_VAL_RECORD:
+            if (!shape.def_type->def_val.record) {
+                wasm_runtime_set_exception(
+                    caller_module_inst,
+                    "component lowered core-call trampoline only supports "
+                    "tuple/record parameters with scalar, UTF-8 string, or "
+                    "variable-length list<scalar> leaves");
+                return false;
+            }
+            for (uint32 i = 0; i < shape.def_type->def_val.record->count; i++) {
+                if (!build_lowered_import_composite_param_payload(
+                        component_inst, component,
+                        shape.def_type->def_val.record->fields[i].value_type,
+                        param_index, caller_module_inst, string_encoding, raw_args,
+                        func_type, core_param_index_io, builder))
+                    return false;
+            }
+            return true;
+        case WASM_COMP_DEF_VAL_TUPLE:
+            if (!shape.def_type->def_val.tuple) {
+                wasm_runtime_set_exception(
+                    caller_module_inst,
+                    "component lowered core-call trampoline only supports "
+                    "tuple/record parameters with scalar, UTF-8 string, or "
+                    "variable-length list<scalar> leaves");
+                return false;
+            }
+            for (uint32 i = 0; i < shape.def_type->def_val.tuple->count; i++) {
+                if (!build_lowered_import_composite_param_payload(
+                        component_inst, component,
+                        &shape.def_type->def_val.tuple->element_types[i],
+                        param_index, caller_module_inst, string_encoding, raw_args,
+                        func_type, core_param_index_io, builder))
+                    return false;
+            }
+            return true;
+        case WASM_COMP_DEF_VAL_LIST:
+        {
+            bool is_primitive = false;
+            uint8 element_prim_type = 0;
+            uint32 element_count;
+            uint32 payload_ptr;
+            uint32 byte_count;
+            uint32 element_size;
+            const uint8 *payload = NULL;
+
+            if (!shape.def_type->def_val.list
+                || !shape.def_type->def_val.list->element_type)
+                return set_component_call_error(
+                    component_inst,
+                    "component canon lower function parameter uses malformed "
+                    "list type");
+            if (!lookup_component_call_primitive_type(
+                    component, shape.def_type->def_val.list->element_type,
+                    "parameter", param_index, &is_primitive, &element_prim_type,
+                    component_inst))
+                return false;
+            if (!is_primitive || component_scalar_prim_byte_size(element_prim_type) == 0) {
+                wasm_runtime_set_exception(
+                    caller_module_inst,
+                    "component lowered core-call trampoline only supports "
+                    "variable-length list<scalar> leaves inside tuple/record "
+                    "parameters");
+                return false;
+            }
+            if (*core_param_index_io + 1 >= func_type->param_count
+                || func_type->types[*core_param_index_io] != VALUE_TYPE_I32
+                || func_type->types[*core_param_index_io + 1] != VALUE_TYPE_I32) {
+                wasm_runtime_set_exception(
+                    caller_module_inst,
+                    "component lowered core-call trampoline composite list<scalar> "
+                    "parameters must flatten to i32 pointer/length pairs");
+                return false;
+            }
+
+            payload_ptr = (uint32)raw_args[*core_param_index_io];
+            element_count = (uint32)raw_args[*core_param_index_io + 1];
+            element_size = component_scalar_prim_byte_size(element_prim_type);
+            if (!compute_list_scalar_byte_count(element_count, element_size,
+                                                &byte_count)) {
+                wasm_runtime_set_exception(
+                    caller_module_inst,
+                    "component lowered core-call trampoline composite "
+                    "list<scalar> byte size overflow");
+                return false;
+            }
+
+            if (byte_count > 0) {
+                if (!wasm_runtime_validate_app_addr(caller_module_inst, payload_ptr,
+                                                    byte_count)) {
+                    wasm_runtime_set_exception(caller_module_inst,
+                                               "out of bounds memory access");
+                    return false;
+                }
+                payload =
+                    wasm_runtime_addr_app_to_native(caller_module_inst, payload_ptr);
+            }
+
+            *core_param_index_io += 2;
+            return append_component_result_list_scalar_leaf(
+                component_inst, builder, element_count, payload, byte_count);
+        }
+        case WASM_COMP_DEF_VAL_LIST_LEN:
+            wasm_runtime_set_exception(
+                caller_module_inst,
+                "component lowered core-call trampoline only supports "
+                "variable-length list<scalar> leaves inside tuple/record "
+                "parameters");
+            return false;
+        default:
+            wasm_runtime_set_exception(
+                caller_module_inst,
+                "component lowered core-call trampoline only supports "
+                "tuple/record parameters with scalar, UTF-8 string, or "
+                "variable-length list<scalar> leaves");
+            return false;
+    }
 }
 
 static bool

@@ -151,6 +151,8 @@ What works today:
 - direct core-wasm calls into lowered component functions for the narrow tested
   subset:
   - scalar-only parameters/results
+  - top-level tuple/record parameters with scalar, nested UTF-8 string, and
+    nested `list<scalar>` leaves
   - UTF-8 string parameters/results through i32 pointer/length pairs plus an
     explicit i32 return-area pointer
   - `list<scalar>` parameters with scalar results
@@ -290,6 +292,8 @@ The executable Canonical ABI surface is currently limited to:
 - direct core-wasm invocation of lowered component functions for the currently
   tested direct subset:
   - scalar parameters/results
+  - top-level tuple/record parameters over the tested scalar / UTF-8 string /
+    nested `list<scalar>` leaf subset with scalar results
   - UTF-8 string parameters/results through the tested `(param i32 i32 i32) -> ()`
     direct return-area path
   - `list<scalar>` parameters with scalar results
@@ -319,6 +323,9 @@ Major Canonical ABI gaps remain:
   `list<scalar>`-parameter / `list<scalar>`-result /
   tuple/record-parameter / record-result / tuple/mixed-composite-result
   synthetic re-lifts above
+- no executable lower path yet for direct tuple/record results; only the tested
+  direct tuple/record **parameter** subset is currently real on the non-synthetic
+  path
 - no executable lower path yet for broader nested composite lowering shapes beyond
   the tested scalar / UTF-8 string / nested `list<scalar>` tuple-record subset
 - no list marshalling beyond UTF-8 strings, top-level `list<scalar>`, and nested `list<scalar>` leaves in exported tuple/record values and host-import tuple/record parameters
