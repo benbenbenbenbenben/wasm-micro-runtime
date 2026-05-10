@@ -129,14 +129,14 @@ instance bindings, and currently covers:
 - exported scalar `value` members
 - exported variable-length `list<scalar>` / `list<string>` `value` members
 - exported tuple/record `value` members in the current scalar / UTF-8 string /
-  nested `list<u8>` / `list<string>` leaf subset
+  nested `list<scalar>` / `list<string>` leaf subset
 - exported nested `instance` members, including recursive validation
 
 Typed matching of exported component `func` / `value` / `component` members is
 still incomplete: typed function matching remains limited to the current scalar /
 UTF-8 string / variable-length `list<scalar>` / `list<string>` /
 tuple-record subset, typed value matching beyond the current scalar / UTF-8 string /
-variable-length `list<u8>` / `list<string>` tuple-record subset is still
+variable-length `list<scalar>` / `list<string>` tuple-record subset is still
 incomplete, and typed exported
 `component` matching currently only covers zero-import component types plus the
 recursive typed-`component`-export subset when the actual exports carry explicit
