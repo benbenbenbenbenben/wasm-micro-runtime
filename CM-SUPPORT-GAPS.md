@@ -309,6 +309,8 @@ The executable Canonical ABI surface is currently limited to:
   - nested component-owned child-core consumers on the tested direct UTF-8 string,
     `list<u8>`- and `list<s32>`-parameter, `list<scalar>`-result, mixed
     composite-param, and mixed composite-result paths
+  - a tested cross-component scalar seam where a nested child-core lowered import
+    targets a function exported from another component instance
   - no lower-side canon options beyond tested `(string-utf8)` / `(memory ...)`
     for the direct string path and `(memory ...)` for the `list<scalar>`
     parameter/result path
@@ -326,7 +328,8 @@ Major Canonical ABI gaps remain:
     `list<scalar>`-result / tuple/record-parameter / record-result /
     tuple/mixed-composite-result `lift(lower(f))` subset above
 - no general adapter/lowering path for imported component functions beyond the
-  supported host-callback subset and the narrow direct core-call subset above
+  supported host-callback subset, the tested cross-component scalar seam above,
+  and the narrow direct core-call subset above
 - no executable lower path yet for memory-backed Canonical ABI shapes
   beyond the tested direct UTF-8-string parameter/result path, the tested direct
   `list<scalar>`-parameter-with-scalar-result path, the tested top-level direct
