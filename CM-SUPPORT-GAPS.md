@@ -314,7 +314,8 @@ The executable Canonical ABI surface is currently limited to:
   - nested component-owned child-core consumers on the tested direct UTF-8 string,
     `list<string>`-parameter / `list<string>`-result, `list<u8>`- and
     `list<s32>`-parameter, `list<scalar>`-result, mixed composite-param, and
-    mixed composite-result paths
+    mixed composite-result paths, including tuple/record mixed composite-param
+    witnesses with a nested `list<string>` leaf
   - tested cross-component scalar, UTF-8 string, `list<string>`-parameter /
     `list<string>`-result, `list<u8>`-parameter / `list<u8>`-result, and
     `list<s32>`-parameter / `list<s32>`-result seams plus tested
@@ -367,6 +368,7 @@ Major Canonical ABI gaps remain:
   the tested nested child-core UTF-8 string / `list<string>`-parameter /
   `list<string>`-result / `list<u8>`- and `list<s32>`-parameter /
   `list<scalar>`-result / mixed composite-param / mixed composite-result paths
+  (including a nested `list<string>` leaf on the mixed composite-param path)
   and the tested scalar / UTF-8 string / nested `list<scalar>` tuple-record
   subset
 - no list marshalling beyond UTF-8 strings, the tested direct top-level and
