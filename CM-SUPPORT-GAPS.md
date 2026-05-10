@@ -330,9 +330,9 @@ The executable Canonical ABI surface is currently limited to:
     `list<string>`-result, `list<u8>`-parameter / `list<u8>`-result, and
     `list<s32>`-parameter / `list<s32>`-result seams plus tested
     cross-component mixed composite-param seams and mixed composite-result seams
-    (including a nested `list<string>` leaf on both the param and result
-    paths), where a nested child-core lowered import targets a function exported
-    from another component instance
+    (including nested `list<scalar>` / `list<string>` leaves on both the param
+    and result paths), where a nested child-core lowered import targets a
+    function exported from another component instance
   - no lower-side canon options beyond tested `(string-utf8)` / `(memory ...)`
     for the direct string, direct `list<string>`, and direct tuple/record
     `list<scalar>` / `list<string>`-leaf parameter/result paths, and
