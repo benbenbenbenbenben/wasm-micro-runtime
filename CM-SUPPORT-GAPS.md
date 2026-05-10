@@ -303,6 +303,8 @@ The executable Canonical ABI surface is currently limited to:
     the tested `(param i32) -> ()` return-area path
   - UTF-8 string parameters/results through the tested `(param i32 i32 i32) -> ()`
     direct return-area path
+  - top-level `list<string>` parameters with scalar results through the tested
+    `(param i32 i32) -> i32` direct path
   - `list<scalar>` parameters with scalar results
   - top-level `list<scalar>` results through the tested `(param i32) -> ()`
     return-area path
@@ -315,8 +317,8 @@ The executable Canonical ABI surface is currently limited to:
     composite-result seams, where a nested child-core lowered import targets a
     function exported from another component instance
   - no lower-side canon options beyond tested `(string-utf8)` / `(memory ...)`
-    for the direct string path and `(memory ...)` for the `list<scalar>`
-    parameter/result path
+    for the direct string and direct `list<string>`-parameter paths and
+    `(memory ...)` for the `list<scalar>` parameter/result path
   - positive top-level and nested direct child-core witnesses plus explicit
     failures for invalid UTF-8 input, omitted lower-side memory, and malformed
     result areas on the tested memory-backed paths
@@ -337,6 +339,7 @@ Major Canonical ABI gaps remain:
   above, and the narrow direct core-call subset above
 - no executable lower path yet for memory-backed Canonical ABI shapes
   beyond the tested direct UTF-8-string parameter/result path, the tested
+  direct top-level `list<string>`-parameter-with-scalar-result path,
   cross-component UTF-8 string and `list<u8>`-parameter / `list<u8>`-result /
   `list<s32>`-parameter / `list<s32>`-result / mixed composite-param / mixed
   composite-result seams, the tested direct
@@ -355,7 +358,10 @@ Major Canonical ABI gaps remain:
   `list<scalar>`-result / mixed composite-param / mixed composite-result paths
   and the tested scalar / UTF-8 string / nested `list<scalar>` tuple-record
   subset
-- no list marshalling beyond UTF-8 strings, top-level `list<scalar>`, and nested `list<scalar>` leaves in exported tuple/record values and host-import tuple/record parameters
+- no list marshalling beyond UTF-8 strings, the tested direct top-level
+  `list<string>`-parameter path, top-level `list<scalar>`, and nested
+  `list<scalar>` leaves in exported tuple/record values and host-import
+  tuple/record parameters
 - no variant / flags / enum / option / result marshalling
 - no non-string memory-backed leaves inside tuple/record Canonical ABI values beyond nested `list<scalar>` leaves for exported canon-lift calls and host-import tuple/record parameters
 - no broader composite flattening/lifting rules beyond the current
