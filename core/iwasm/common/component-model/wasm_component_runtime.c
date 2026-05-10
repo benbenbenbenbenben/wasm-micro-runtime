@@ -61,13 +61,80 @@ typedef struct WASMNestedComponentLocalBindings {
 typedef struct WASMComponentLoweredImportAttachment {
     WASMComponentRuntimeFunc *lowered_function;
     const WASMFuncType *func_type;
+    WASMComponentCoreRuntimeRef canon_memory_ref;
 } WASMComponentLoweredImportAttachment;
+
+typedef enum WASMComponentCanonLiftValueKind {
+    WASM_COMP_CANON_LIFT_VALUE_SCALAR = 0,
+    WASM_COMP_CANON_LIFT_VALUE_STRING,
+    WASM_COMP_CANON_LIFT_VALUE_LIST_U8
+} WASMComponentCanonLiftValueKind;
+
+typedef struct WASMComponentCanonLiftValueInfo {
+    WASMComponentCanonLiftValueKind kind;
+    bool declared_as_defined;
+    uint8 prim_type;
+    uint8 core_type;
+    wasm_valkind_t public_kind;
+} WASMComponentCanonLiftValueInfo;
+
+typedef struct WASMComponentCanonLiftValueShape {
+    bool declared_as_defined;
+    bool is_primitive;
+    uint8 prim_type;
+    const WASMComponentDefValType *def_type;
+} WASMComponentCanonLiftValueShape;
 
 static uint32
 encode_component_unsigned_leb(uint64 value, uint8 *out_buf);
 
 static uint32
 encode_component_signed_leb(int64 value, uint8 *out_buf);
+
+static bool
+wasm_component_call_values_internal(WASMComponentInstance *inst,
+                                    const WASMComponentRuntimeFunc *function,
+                                    uint32 num_results,
+                                    wasm_component_value_t *results,
+                                    uint32 num_args,
+                                    const wasm_component_value_t *args,
+                                    bool require_top_level_export);
+
+static bool
+resolve_component_func_type(WASMComponentInstance *inst,
+                            const WASMComponentRuntimeFunc *function,
+                            const char *function_name,
+                            WASMComponentFuncType **out_component_type);
+
+static bool
+get_component_func_owner_component(WASMComponentInstance *inst,
+                                   const WASMComponentRuntimeFunc *function,
+                                   const WASMComponent **out_component);
+
+static bool
+resolve_component_canon_lift_value_shape(
+    const WASMComponent *component, const WASMComponentValueType *value_type,
+    const char *position, uint32 index,
+    WASMComponentCanonLiftValueShape *out_shape, WASMComponentInstance *inst);
+
+static bool
+lookup_component_canon_lift_value_type(
+    const WASMComponent *component, const WASMComponentValueType *value_type,
+    const char *position, uint32 index, bool allow_string, bool allow_list_u8,
+    bool allow_result_defined, WASMComponentCanonLiftValueInfo *out_info,
+    WASMComponentInstance *inst);
+
+static bool
+decode_component_public_scalar_value(WASMComponentInstance *inst,
+                                     const wasm_component_value_t *value,
+                                     const WASMComponentCanonLiftValueInfo *type_info,
+                                     const char *position, uint32 index,
+                                     wasm_val_t *out);
+
+static bool
+encode_component_public_scalar_value(
+    const WASMComponentCanonLiftValueInfo *type_info, const wasm_val_t *input,
+    wasm_component_value_t *value);
 
 static void
 set_component_runtime_error(char *error_buf, uint32 error_buf_size,
@@ -1762,101 +1829,220 @@ component_valkind_matches_core_type(wasm_valkind_t kind, uint8 core_type)
 }
 
 static bool
-validate_lowered_import_scalar_signature(
+set_component_runtime_error_from_exception(WASMComponentInstance *inst,
+                                          char *error_buf,
+                                          uint32 error_buf_size,
+                                          const char *fallback)
+{
+    const char *exception =
+        inst ? wasm_runtime_get_exception((WASMModuleInstanceCommon *)inst) : NULL;
+
+    set_component_runtime_error(error_buf, error_buf_size,
+                                exception && exception[0] ? exception : fallback);
+    if (inst)
+        wasm_runtime_clear_exception((WASMModuleInstanceCommon *)inst);
+    return false;
+}
+
+static bool
+resolve_lowered_import_component_type(
+    const WASMComponentRuntimeFunc *lowered_function,
+    WASMComponentFuncType **out_component_type, char *error_buf,
+    uint32 error_buf_size)
+{
+    WASMComponentInstance *component_inst;
+
+    if (!lowered_function || !lowered_function->owner_instance)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "component canon lower import binding is missing its owner "
+            "component instance");
+
+    component_inst = lowered_function->owner_instance;
+    wasm_runtime_clear_exception((WASMModuleInstanceCommon *)component_inst);
+    if (!resolve_component_func_type(component_inst, lowered_function->lowered_target,
+                                     "component canon lower function",
+                                     out_component_type))
+        return set_component_runtime_error_from_exception(
+            component_inst, error_buf, error_buf_size,
+            "component canon lower function type resolution failed");
+    return true;
+}
+
+static bool
+validate_lowered_import_signature(
     const WASMComponentRuntimeFunc *lowered_function,
     const WASMFuncType *expected_type, char *error_buf, uint32 error_buf_size)
 {
-    wasm_valkind_t stack_param_types[16];
-    wasm_valkind_t stack_result_types[8];
-    wasm_valkind_t *param_types = stack_param_types;
-    wasm_valkind_t *result_types = stack_result_types;
-    uint32 param_count = 0, result_count = 0, i;
-    bool ok;
+    WASMComponentInstance *component_inst;
+    const WASMComponent *component;
+    WASMComponentFuncType *component_type = NULL;
+    uint32 core_param_index = 0, expected_result_count, i;
+    bool needs_memory = false;
+    bool has_memory_opt = false;
 
     if (!lowered_function || !lowered_function->lowered_target)
         return set_component_runtime_error_fmt(
             error_buf, error_buf_size,
             "component canon lower import binding is missing its lowered target");
 
-    if (lowered_function->canon_opts
-        && lowered_function->canon_opts->canon_opts_count > 0)
-        return set_component_runtime_error_fmt(
-            error_buf, error_buf_size,
-            "component canon lower direct core-call bindings currently support "
-            "only scalar signatures without lower-side canon options");
+    if (!resolve_lowered_import_component_type(lowered_function, &component_type,
+                                               error_buf, error_buf_size))
+        return false;
 
-    if (expected_type->param_count
-        > sizeof(stack_param_types) / sizeof(stack_param_types[0])) {
-        param_types = wasm_runtime_malloc(sizeof(wasm_valkind_t)
-                                          * expected_type->param_count);
-        if (!param_types)
+    component_inst = lowered_function->owner_instance;
+    if (!get_component_func_owner_component(component_inst,
+                                            lowered_function->lowered_target,
+                                            &component))
+        return set_component_runtime_error_from_exception(
+            component_inst, error_buf, error_buf_size,
+            "component canon lower function owner resolution failed");
+
+    if (lowered_function->canon_opts) {
+        for (i = 0; i < lowered_function->canon_opts->canon_opts_count; i++) {
+            const WASMComponentCanonOpt *opt =
+                &lowered_function->canon_opts->canon_opts[i];
+
+            if (opt->tag == WASM_COMP_CANON_OPT_MEMORY) {
+                has_memory_opt = true;
+                continue;
+            }
+
             return set_component_runtime_error_fmt(
                 error_buf, error_buf_size,
-                "allocate memory failed for %u lowered import param types",
-                (uint32)expected_type->param_count);
-    }
-
-    if (expected_type->result_count
-        > sizeof(stack_result_types) / sizeof(stack_result_types[0])) {
-        result_types = wasm_runtime_malloc(sizeof(wasm_valkind_t)
-                                           * expected_type->result_count);
-        if (!result_types) {
-            if (param_types != stack_param_types)
-                wasm_runtime_free(param_types);
-            return set_component_runtime_error_fmt(
-                error_buf, error_buf_size,
-                "allocate memory failed for %u lowered import result types",
-                (uint32)expected_type->result_count);
+                "component canon lower direct core-call bindings do not support "
+                "lower-side canon option %u",
+                (uint32)opt->tag);
         }
     }
 
-    ok = wasm_component_func_get_generic_signature(
-        lowered_function->owner_instance, lowered_function->lowered_target,
-        &param_count, param_types,
-        expected_type->param_count, &result_count, result_types,
-        expected_type->result_count, error_buf, error_buf_size);
-    if (!ok)
-        goto fail;
-
-    if (param_count != expected_type->param_count
-        || result_count != expected_type->result_count) {
-        ok = set_component_runtime_error_fmt(
+    if (!component_type || !component_type->params)
+        return set_component_runtime_error_fmt(
             error_buf, error_buf_size,
-            "core import signature does not match the lowered component "
-            "function arity");
-        goto fail;
-    }
+            "component canon lower function is missing parameter metadata");
 
-    for (i = 0; i < param_count; i++) {
-        if (!component_valkind_matches_core_type(param_types[i],
-                                                 expected_type->types[i])) {
-            ok = set_component_runtime_error_fmt(
+    for (i = 0; i < component_type->params->count; i++) {
+        WASMComponentCanonLiftValueShape shape;
+        WASMComponentCanonLiftValueInfo type_info;
+
+        wasm_runtime_clear_exception((WASMModuleInstanceCommon *)component_inst);
+        if (!resolve_component_canon_lift_value_shape(
+                component, component_type->params->params[i].value_type, "parameter",
+                i, &shape, component_inst))
+            return set_component_runtime_error_from_exception(
+                component_inst, error_buf, error_buf_size,
+                "component canon lower parameter type resolution failed");
+
+        if (!shape.is_primitive && shape.def_type
+            && (shape.def_type->tag == WASM_COMP_DEF_VAL_RECORD
+                || shape.def_type->tag == WASM_COMP_DEF_VAL_TUPLE))
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                "component canon lower direct core-call bindings currently "
+                "support only scalar results and scalar or list<u8> parameters");
+
+        wasm_runtime_clear_exception((WASMModuleInstanceCommon *)component_inst);
+        if (!lookup_component_canon_lift_value_type(
+                component, component_type->params->params[i].value_type, "parameter",
+                i, true, true, false, &type_info, component_inst))
+            return set_component_runtime_error_from_exception(
+                component_inst, error_buf, error_buf_size,
+                "component canon lower parameter type resolution failed");
+
+        if (type_info.kind == WASM_COMP_CANON_LIFT_VALUE_SCALAR) {
+            if (core_param_index >= expected_type->param_count
+                || expected_type->types[core_param_index] != type_info.core_type)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "core import parameter %u does not match the lowered "
+                    "component function signature",
+                    core_param_index);
+            core_param_index++;
+            continue;
+        }
+
+        if (type_info.kind != WASM_COMP_CANON_LIFT_VALUE_LIST_U8)
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                "component canon lower direct core-call bindings currently "
+                "support only scalar results and scalar or list<u8> parameters");
+
+        if (core_param_index + 1 >= expected_type->param_count
+            || expected_type->types[core_param_index] != VALUE_TYPE_I32
+            || expected_type->types[core_param_index + 1] != VALUE_TYPE_I32)
+            return set_component_runtime_error_fmt(
                 error_buf, error_buf_size,
                 "core import parameter %u does not match the lowered "
                 "component function signature",
-                i);
-            goto fail;
-        }
+                core_param_index);
+
+        needs_memory = true;
+        core_param_index += 2;
     }
 
-    for (i = 0; i < result_count; i++) {
-        if (!component_valkind_matches_core_type(
-                result_types[i], expected_type->types[param_count + i])) {
-            ok = set_component_runtime_error_fmt(
+    if (core_param_index != expected_type->param_count)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "core import signature does not match the lowered component "
+            "function arity");
+
+    expected_result_count = get_component_func_result_count(component_type);
+    if (expected_result_count != expected_type->result_count)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "core import signature does not match the lowered component "
+            "function arity");
+
+    if (expected_result_count == 1) {
+        WASMComponentCanonLiftValueShape shape;
+        WASMComponentCanonLiftValueInfo type_info;
+
+        wasm_runtime_clear_exception((WASMModuleInstanceCommon *)component_inst);
+        if (!resolve_component_canon_lift_value_shape(component,
+                                                      component_type->results->results,
+                                                      "result", 0, &shape,
+                                                      component_inst))
+            return set_component_runtime_error_from_exception(
+                component_inst, error_buf, error_buf_size,
+                "component canon lower result type resolution failed");
+
+        if (!shape.is_primitive && shape.def_type
+            && (shape.def_type->tag == WASM_COMP_DEF_VAL_RECORD
+                || shape.def_type->tag == WASM_COMP_DEF_VAL_TUPLE))
+            return set_component_runtime_error_fmt(
                 error_buf, error_buf_size,
-                "core import result %u does not match the lowered component "
-                "function signature",
-                i);
-            goto fail;
-        }
+                "component canon lower direct core-call bindings currently "
+                "support only scalar results and scalar or list<u8> parameters");
+
+        wasm_runtime_clear_exception((WASMModuleInstanceCommon *)component_inst);
+        if (!lookup_component_canon_lift_value_type(
+                component, component_type->results->results, "result", 0, true,
+                false, true, &type_info, component_inst))
+            return set_component_runtime_error_from_exception(
+                component_inst, error_buf, error_buf_size,
+                "component canon lower result type resolution failed");
+
+        if (type_info.kind != WASM_COMP_CANON_LIFT_VALUE_SCALAR
+            || expected_type->types[expected_type->param_count] != type_info.core_type)
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                "core import result 0 does not match the lowered component "
+                "function signature");
     }
 
-fail:
-    if (param_types != stack_param_types)
-        wasm_runtime_free(param_types);
-    if (result_types != stack_result_types)
-        wasm_runtime_free(result_types);
-    return ok;
+    if (needs_memory && !has_memory_opt)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "component canon lower direct core-call bindings require memory for "
+            "list<u8> Canonical ABI");
+
+    if (!needs_memory && has_memory_opt)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "component canon lower direct core-call bindings do not require "
+            "lower-side canon options for scalar-only signatures");
+
+    return true;
 }
 
 static void
@@ -1867,10 +2053,12 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
     WASMComponentRuntimeFunc *lowered_function;
     const WASMFuncType *func_type;
     WASMComponentInstance *component_inst;
-    wasm_val_t stack_args[16];
-    wasm_val_t stack_results[1];
-    wasm_val_t *call_args = stack_args;
-    uint32 param_count, i;
+    const WASMComponent *component;
+    WASMComponentFuncType *component_type = NULL;
+    wasm_component_value_t stack_args[16];
+    wasm_component_value_t stack_results[1];
+    wasm_component_value_t *call_args = stack_args;
+    uint32 param_count, expected_result_count, core_param_index = 0, i;
     bool call_ok;
 
     if (!exec_env)
@@ -1891,17 +2079,54 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
         return;
     }
 
-    if (func_type->result_count > 1) {
-        wasm_runtime_set_exception(
-            caller_module_inst,
-            "component lowered core-call trampoline currently supports only "
-            "single-result scalar signatures");
+    component_inst = lowered_function->owner_instance;
+    if (!resolve_component_func_type(component_inst, lowered_function->lowered_target,
+                                     "component canon lower function",
+                                     &component_type)) {
+        const char *component_exception =
+            wasm_runtime_get_exception((WASMModuleInstanceCommon *)component_inst);
+        wasm_runtime_set_exception(caller_module_inst,
+                                   component_exception
+                                       ? component_exception
+                                       : "component canon lower function type "
+                                         "resolution failed");
+        wasm_runtime_clear_exception((WASMModuleInstanceCommon *)component_inst);
+        return;
+    }
+    if (!get_component_func_owner_component(component_inst,
+                                            lowered_function->lowered_target,
+                                            &component)) {
+        const char *component_exception =
+            wasm_runtime_get_exception((WASMModuleInstanceCommon *)component_inst);
+        wasm_runtime_set_exception(caller_module_inst,
+                                   component_exception
+                                       ? component_exception
+                                       : "component canon lower function owner "
+                                         "resolution failed");
+        wasm_runtime_clear_exception((WASMModuleInstanceCommon *)component_inst);
         return;
     }
 
-    param_count = func_type->param_count;
+    expected_result_count = get_component_func_result_count(component_type);
+    if (func_type->result_count > 1 || expected_result_count > 1) {
+        wasm_runtime_set_exception(
+            caller_module_inst,
+            "component lowered core-call trampoline currently supports at most "
+            "one result");
+        return;
+    }
+
+    if (!component_type || !component_type->params) {
+        wasm_runtime_set_exception(
+            caller_module_inst,
+            "component canon lower function is missing parameter metadata");
+        return;
+    }
+
+    param_count = component_type->params->count;
     if (param_count > sizeof(stack_args) / sizeof(stack_args[0])) {
-        call_args = wasm_runtime_malloc(sizeof(wasm_val_t) * param_count);
+        call_args =
+            wasm_runtime_malloc(sizeof(wasm_component_value_t) * param_count);
         if (!call_args) {
             wasm_runtime_set_exception(
                 caller_module_inst,
@@ -1910,45 +2135,200 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
             return;
         }
     }
-    memset(call_args, 0, sizeof(wasm_val_t) * param_count);
+    memset(call_args, 0, sizeof(wasm_component_value_t) * param_count);
     memset(stack_results, 0, sizeof(stack_results));
 
     for (i = 0; i < param_count; i++) {
-        switch (func_type->types[i]) {
-            case VALUE_TYPE_I32:
-                call_args[i].kind = WASM_I32;
-                call_args[i].of.i32 = (int32)raw_args[i];
-                break;
-            case VALUE_TYPE_I64:
-                call_args[i].kind = WASM_I64;
-                call_args[i].of.i64 = (int64)raw_args[i];
-                break;
-            case VALUE_TYPE_F32:
-                call_args[i].kind = WASM_F32;
-                bh_memcpy_s(&call_args[i].of.f32, sizeof(call_args[i].of.f32),
-                            &raw_args[i], sizeof(float32));
-                break;
-            case VALUE_TYPE_F64:
-                call_args[i].kind = WASM_F64;
-                bh_memcpy_s(&call_args[i].of.f64, sizeof(call_args[i].of.f64),
-                            &raw_args[i], sizeof(float64));
-                break;
-            default:
+        WASMComponentCanonLiftValueShape shape;
+        WASMComponentCanonLiftValueInfo type_info;
+
+        if (!resolve_component_canon_lift_value_shape(
+                component, component_type->params->params[i].value_type, "parameter",
+                i, &shape, component_inst)) {
+            const char *component_exception =
+                wasm_runtime_get_exception((WASMModuleInstanceCommon *)component_inst);
+            if (call_args != stack_args)
+                wasm_runtime_free(call_args);
+            wasm_runtime_set_exception(caller_module_inst,
+                                       component_exception
+                                           ? component_exception
+                                           : "component canon lower parameter "
+                                             "type resolution failed");
+            wasm_runtime_clear_exception((WASMModuleInstanceCommon *)component_inst);
+            return;
+        }
+
+        if (!shape.is_primitive && shape.def_type
+            && (shape.def_type->tag == WASM_COMP_DEF_VAL_RECORD
+                || shape.def_type->tag == WASM_COMP_DEF_VAL_TUPLE)) {
+            if (call_args != stack_args)
+                wasm_runtime_free(call_args);
+            wasm_runtime_set_exception(
+                caller_module_inst,
+                "component lowered core-call trampoline does not support "
+                "composite parameters");
+            return;
+        }
+
+        if (!lookup_component_canon_lift_value_type(
+                component, component_type->params->params[i].value_type, "parameter",
+                i, true, true, false, &type_info, component_inst)) {
+            const char *component_exception =
+                wasm_runtime_get_exception((WASMModuleInstanceCommon *)component_inst);
+            if (call_args != stack_args)
+                wasm_runtime_free(call_args);
+            wasm_runtime_set_exception(caller_module_inst,
+                                       component_exception
+                                           ? component_exception
+                                           : "component canon lower parameter "
+                                             "type resolution failed");
+            wasm_runtime_clear_exception((WASMModuleInstanceCommon *)component_inst);
+            return;
+        }
+
+        if (type_info.kind == WASM_COMP_CANON_LIFT_VALUE_SCALAR) {
+            wasm_val_t input = { 0 };
+
+            if (core_param_index >= func_type->param_count) {
                 if (call_args != stack_args)
                     wasm_runtime_free(call_args);
                 wasm_runtime_set_exception(
                     caller_module_inst,
-                    "component lowered core-call trampoline only supports "
-                    "scalar core signatures");
+                    "component lowered core-call trampoline parameter arity "
+                    "mismatch");
                 return;
+            }
+
+            switch (func_type->types[core_param_index]) {
+                case VALUE_TYPE_I32:
+                    input.kind = WASM_I32;
+                    input.of.i32 = (int32)raw_args[core_param_index];
+                    break;
+                case VALUE_TYPE_I64:
+                    input.kind = WASM_I64;
+                    input.of.i64 = (int64)raw_args[core_param_index];
+                    break;
+                case VALUE_TYPE_F32:
+                    input.kind = WASM_F32;
+                    bh_memcpy_s(&input.of.f32, sizeof(input.of.f32),
+                                &raw_args[core_param_index], sizeof(float32));
+                    break;
+                case VALUE_TYPE_F64:
+                    input.kind = WASM_F64;
+                    bh_memcpy_s(&input.of.f64, sizeof(input.of.f64),
+                                &raw_args[core_param_index], sizeof(float64));
+                    break;
+                default:
+                    if (call_args != stack_args)
+                        wasm_runtime_free(call_args);
+                    wasm_runtime_set_exception(
+                        caller_module_inst,
+                        "component lowered core-call trampoline only supports "
+                        "scalar or list<u8> core parameters");
+                    return;
+            }
+
+            if (!encode_component_public_scalar_value(&type_info, &input,
+                                                      &call_args[i])) {
+                if (call_args != stack_args)
+                    wasm_runtime_free(call_args);
+                wasm_runtime_set_exception(
+                    caller_module_inst,
+                    "component lowered core-call trampoline could not encode a "
+                    "scalar argument");
+                return;
+            }
+            core_param_index++;
+            continue;
         }
+
+        if (type_info.kind != WASM_COMP_CANON_LIFT_VALUE_LIST_U8) {
+            if (call_args != stack_args)
+                wasm_runtime_free(call_args);
+            wasm_runtime_set_exception(
+                caller_module_inst,
+                "component lowered core-call trampoline only supports list<u8> "
+                "memory-backed parameters");
+            return;
+        }
+
+        if (core_param_index + 1 >= func_type->param_count
+            || func_type->types[core_param_index] != VALUE_TYPE_I32
+            || func_type->types[core_param_index + 1] != VALUE_TYPE_I32) {
+            if (call_args != stack_args)
+                wasm_runtime_free(call_args);
+            wasm_runtime_set_exception(
+                caller_module_inst,
+                "component lowered core-call trampoline list<u8> parameters "
+                "must flatten to i32 pointer/length pairs");
+            return;
+        }
+
+        if (attachment->canon_memory_ref.type != WASM_COMP_CORE_RUNTIME_REF_MEMORY) {
+            if (call_args != stack_args)
+                wasm_runtime_free(call_args);
+            wasm_runtime_set_exception(
+                caller_module_inst,
+                "component lowered core-call trampoline could not resolve the "
+                "caller memory");
+            return;
+        }
+
+        call_args[i].type.kind = WASM_COMPONENT_VALUE_TYPE_DEFINED;
+        call_args[i].byte_size = (uint32)raw_args[core_param_index + 1];
+        if (call_args[i].byte_size > 0) {
+            uint32 arg_ptr = (uint32)raw_args[core_param_index];
+            uint8 *caller_bytes;
+            uint8 *storage;
+
+            if (!wasm_runtime_validate_app_addr(caller_module_inst, arg_ptr,
+                                                call_args[i].byte_size)) {
+                if (call_args != stack_args)
+                    wasm_runtime_free(call_args);
+                wasm_runtime_set_exception(
+                    caller_module_inst,
+                    "out of bounds memory access");
+                return;
+            }
+
+            caller_bytes = wasm_runtime_addr_app_to_native(caller_module_inst,
+                                                           arg_ptr);
+            storage = wasm_runtime_malloc(call_args[i].byte_size);
+            if (!storage) {
+                if (call_args != stack_args)
+                    wasm_runtime_free(call_args);
+                wasm_runtime_set_exception(
+                    caller_module_inst,
+                    "component lowered core-call trampoline could not allocate "
+                    "list<u8> storage");
+                return;
+            }
+
+            memcpy(storage, caller_bytes, call_args[i].byte_size);
+            call_args[i].storage_kind = WASM_COMPONENT_VALUE_STORAGE_OWNED;
+            call_args[i].storage.owned_data = storage;
+        }
+
+        core_param_index += 2;
     }
 
-    component_inst = lowered_function->owner_instance;
+    if (core_param_index != func_type->param_count) {
+        for (i = 0; i < param_count; i++)
+            wasm_component_value_destroy(&call_args[i]);
+        if (call_args != stack_args)
+            wasm_runtime_free(call_args);
+        wasm_runtime_set_exception(caller_module_inst,
+                                   "component lowered core-call trampoline "
+                                   "parameter arity mismatch");
+        return;
+    }
+
     wasm_runtime_clear_exception((WASMModuleInstanceCommon *)component_inst);
-    call_ok = wasm_component_call(component_inst, lowered_function->lowered_target,
-                                  func_type->result_count, stack_results,
-                                  param_count, call_args);
+    call_ok = wasm_component_call_values_internal(
+        component_inst, lowered_function->lowered_target, expected_result_count,
+        stack_results, param_count, call_args, false);
+    for (i = 0; i < param_count; i++)
+        wasm_component_value_destroy(&call_args[i]);
     if (call_args != stack_args)
         wasm_runtime_free(call_args);
 
@@ -1963,30 +2343,92 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
     }
 
     if (func_type->result_count == 1) {
-        switch (func_type->types[param_count]) {
+        WASMComponentCanonLiftValueShape shape;
+        WASMComponentCanonLiftValueInfo type_info;
+        wasm_val_t core_result = { 0 };
+
+        if (!resolve_component_canon_lift_value_shape(component,
+                                                      component_type->results->results,
+                                                      "result", 0, &shape,
+                                                      component_inst)
+            || (!shape.is_primitive && shape.def_type
+                && (shape.def_type->tag == WASM_COMP_DEF_VAL_RECORD
+                    || shape.def_type->tag == WASM_COMP_DEF_VAL_TUPLE))
+            || !lookup_component_canon_lift_value_type(
+                   component, component_type->results->results, "result", 0, true,
+                   false, true, &type_info, component_inst)
+            || type_info.kind != WASM_COMP_CANON_LIFT_VALUE_SCALAR
+            || !decode_component_public_scalar_value(component_inst, &stack_results[0],
+                                                     &type_info, "result", 0,
+                                                     &core_result)) {
+            const char *component_exception =
+                wasm_runtime_get_exception((WASMModuleInstanceCommon *)component_inst);
+            wasm_component_value_destroy(&stack_results[0]);
+            wasm_runtime_set_exception(caller_module_inst,
+                                       component_exception
+                                           ? component_exception
+                                           : "component lowered core-call "
+                                             "trampoline could not decode the "
+                                             "component result");
+            wasm_runtime_clear_exception((WASMModuleInstanceCommon *)component_inst);
+            return;
+        }
+
+        switch (func_type->types[func_type->param_count]) {
             case VALUE_TYPE_I32:
-                raw_args[0] = (uint32)stack_results[0].of.i32;
+                raw_args[0] = (uint32)core_result.of.i32;
                 break;
             case VALUE_TYPE_I64:
-                raw_args[0] = (uint64)stack_results[0].of.i64;
+                raw_args[0] = (uint64)core_result.of.i64;
                 break;
             case VALUE_TYPE_F32:
                 raw_args[0] = 0;
                 bh_memcpy_s(&raw_args[0], sizeof(float32),
-                            &stack_results[0].of.f32, sizeof(float32));
+                            &core_result.of.f32, sizeof(float32));
                 break;
             case VALUE_TYPE_F64:
                 bh_memcpy_s(&raw_args[0], sizeof(float64),
-                            &stack_results[0].of.f64, sizeof(float64));
+                            &core_result.of.f64, sizeof(float64));
                 break;
             default:
+                wasm_component_value_destroy(&stack_results[0]);
                 wasm_runtime_set_exception(
                     caller_module_inst,
                     "component lowered core-call trampoline only supports "
                     "scalar core results");
                 return;
         }
+
+        wasm_component_value_destroy(&stack_results[0]);
     }
+}
+
+static bool
+resolve_lowered_import_canon_memory(const WASMComponentRuntimeFunc *lowered_function,
+                                    WASMModuleInstance *module_inst,
+                                    WASMComponentCoreRuntimeRef *out_memory_ref,
+                                    char *error_buf, uint32 error_buf_size)
+{
+    uint32 i;
+
+    (void)module_inst;
+    memset(out_memory_ref, 0, sizeof(*out_memory_ref));
+    if (!lowered_function || !lowered_function->canon_opts
+        || lowered_function->canon_opts->canon_opts_count == 0)
+        return true;
+
+    for (i = 0; i < lowered_function->canon_opts->canon_opts_count; i++) {
+        const WASMComponentCanonOpt *opt =
+            &lowered_function->canon_opts->canon_opts[i];
+
+        if (opt->tag != WASM_COMP_CANON_OPT_MEMORY)
+            continue;
+
+        out_memory_ref->type = WASM_COMP_CORE_RUNTIME_REF_MEMORY;
+        return true;
+    }
+
+    return true;
 }
 
 static bool
@@ -2092,9 +2534,14 @@ bind_component_core_instance_import_args(
             if (!import->field_name || strcmp(import->field_name, import_name))
                 continue;
 
-            if (!validate_lowered_import_scalar_signature(
+            if (!validate_lowered_import_signature(
                     ref.of.lowered_function, import->func_type, error_buf,
                     error_buf_size))
+                return false;
+            if (!resolve_lowered_import_canon_memory(ref.of.lowered_function,
+                                                     module_inst,
+                                                     &attachment->canon_memory_ref,
+                                                     error_buf, error_buf_size))
                 return false;
 
             import->func_ptr_linked = component_lowered_import_trampoline;
@@ -2128,27 +2575,6 @@ bind_component_core_instance_import_args(
     return true;
 #endif
 }
-
-typedef enum WASMComponentCanonLiftValueKind {
-    WASM_COMP_CANON_LIFT_VALUE_SCALAR = 0,
-    WASM_COMP_CANON_LIFT_VALUE_STRING,
-    WASM_COMP_CANON_LIFT_VALUE_LIST_U8
-} WASMComponentCanonLiftValueKind;
-
-typedef struct WASMComponentCanonLiftValueInfo {
-    WASMComponentCanonLiftValueKind kind;
-    bool declared_as_defined;
-    uint8 prim_type;
-    uint8 core_type;
-    wasm_valkind_t public_kind;
-} WASMComponentCanonLiftValueInfo;
-
-typedef struct WASMComponentCanonLiftValueShape {
-    bool declared_as_defined;
-    bool is_primitive;
-    uint8 prim_type;
-    const WASMComponentDefValType *def_type;
-} WASMComponentCanonLiftValueShape;
 
 typedef struct WASMComponentCanonParamAllocation {
     uint32 ptr;
