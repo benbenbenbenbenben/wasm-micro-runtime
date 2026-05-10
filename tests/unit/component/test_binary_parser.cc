@@ -3899,10 +3899,15 @@ append_nested_component_instance_reexport_sections(
 }
 
 static bool
-append_nested_component_alias_export_sections(
-    WASMComponentModule *component_module)
+append_nested_component_alias_export_sections_for_func(
+    WASMComponentModule *component_module, const char *source_export_name,
+    const char *forwarded_func_name, const char *nested_instance_export_name)
 {
     WASMComponent *component = &component_module->component;
+    const uint32_t new_component_idx =
+        count_top_level_sort_entries(component, WASM_COMP_SORT_COMPONENT);
+    const uint32_t new_instance_idx =
+        count_top_level_sort_entries(component, WASM_COMP_SORT_INSTANCE);
     const uint32_t old_count = component->section_count;
     const uint32_t new_count = old_count + 3;
     auto *new_sections = (WASMComponentSection *)wasm_runtime_malloc(
@@ -4005,7 +4010,7 @@ append_nested_component_alias_export_sections(
         .target.exported.instance_idx = 0;
     component_section->parsed.component->sections[1]
         .parsed.alias_section->aliases[0]
-        .target.exported.name = clone_core_name("add");
+        .target.exported.name = clone_core_name(source_export_name);
     if (!component_section->parsed.component->sections[1]
              .parsed.alias_section->aliases[0]
              .sort
@@ -4037,7 +4042,7 @@ append_nested_component_alias_export_sections(
            0, sizeof(WASMComponentExport));
     component_section->parsed.component->sections[2]
         .parsed.export_section->exports[0]
-        .export_name = create_export_name("forwarded-add");
+        .export_name = create_export_name(forwarded_func_name);
     component_section->parsed.component->sections[2]
         .parsed.export_section->exports[0]
         .sort_idx = create_sort_idx(WASM_COMP_SORT_FUNC, 0);
@@ -4070,7 +4075,7 @@ append_nested_component_alias_export_sections(
     instance_section->parsed.instance_section->instances[0]
         .instance_expression_tag = WASM_COMP_INSTANCE_EXPRESSION_WITH_ARGS;
     instance_section->parsed.instance_section->instances[0].expression.with_args.idx =
-        1;
+        new_component_idx;
     instance_section->parsed.instance_section->instances[0]
         .expression.with_args.arg_len = 1;
     instance_section->parsed.instance_section->instances[0]
@@ -4116,11 +4121,19 @@ append_nested_component_alias_export_sections(
     memset(export_section->parsed.export_section->exports, 0,
            sizeof(WASMComponentExport));
     export_section->parsed.export_section->exports[0].export_name =
-        create_export_name("aliased-nested-add");
+        create_export_name(nested_instance_export_name);
     export_section->parsed.export_section->exports[0].sort_idx =
-        create_sort_idx(WASM_COMP_SORT_INSTANCE, 1);
+        create_sort_idx(WASM_COMP_SORT_INSTANCE, new_instance_idx);
     return export_section->parsed.export_section->exports[0].export_name
            && export_section->parsed.export_section->exports[0].sort_idx;
+}
+
+static bool
+append_nested_component_alias_export_sections(
+    WASMComponentModule *component_module)
+{
+    return append_nested_component_alias_export_sections_for_func(
+        component_module, "add", "forwarded-add", "aliased-nested-add");
 }
 
 static bool
@@ -14394,6 +14407,131 @@ TEST_F(BinaryParserTest,
         << wasm_runtime_get_exception(target_inst);
     ASSERT_EQ(result.kind, WASM_I32);
     ASSERT_EQ(result.of.i32, 42);
+
+    wasm_runtime_deinstantiate(target_inst);
+    wasm_runtime_unload(target_module);
+    BH_FREE(target_component_raw);
+    wasm_runtime_deinstantiate(source_inst);
+    wasm_runtime_unload(source_module);
+}
+
+TEST_F(BinaryParserTest,
+       TestNestedCoreWasmCanCallCrossComponentLoweredUtf8StringFunctionDirectly)
+{
+    bool ret = helper->read_wasm_file("list_u8_post_return.component.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs source_load_args = {};
+    char source_module_name[] = "cross-component-lower-string-source";
+    source_load_args.name = source_module_name;
+    wasm_module_t source_module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &source_load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(source_module, nullptr) << helper->error_buf;
+
+    wasm_module_inst_t source_inst =
+        instantiate_component_with_default_wasi(source_module, helper.get());
+    ASSERT_NE(source_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t source_func =
+        wasm_runtime_lookup_component_function(source_inst, "echo");
+    ASSERT_NE(source_func, nullptr);
+    WASMComponentNamedExport imported_export = {};
+    imported_export.name = "forwarded-echo";
+    imported_export.ref.type = WASM_COMP_RUNTIME_REF_FUNC;
+    imported_export.ref.of.function = source_func;
+    WASMComponentRuntimeInstance imported_instance = {};
+    imported_instance.export_count = 1;
+    imported_instance.exports = &imported_export;
+
+    uint32_t target_wasm_file_size = 0;
+    auto *target_component_raw =
+        (unsigned char *)bh_read_file_to_buffer("list_u8_post_return.component.wasm",
+                                                &target_wasm_file_size);
+    ASSERT_NE(target_component_raw, nullptr);
+
+    LoadArgs target_load_args = {};
+    char target_module_name[] = "cross-component-lower-string-target";
+    target_load_args.name = target_module_name;
+    wasm_module_t target_module = wasm_runtime_load_ex(
+        target_component_raw, target_wasm_file_size, &target_load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(target_module, nullptr) << helper->error_buf;
+
+    auto *target_component_module = (WASMComponentModule *)target_module;
+    const int32_t source_type_idx = lookup_top_level_exported_canon_func_type_idx(
+        target_component_module, "echo");
+    ASSERT_GE(source_type_idx, 0);
+    ASSERT_TRUE(append_top_level_typed_func_instance_import_sections(
+        target_component_module, "forwarded-echo", (uint32_t)source_type_idx));
+    ASSERT_TRUE(append_top_level_function_export_alias(
+        target_component_module, "forwarded-source", "forwarded-echo",
+        "aliased-forwarded-echo"));
+
+    const int32_t source_func_idx = find_top_level_export_sort_index(
+        target_component_module, "aliased-forwarded-echo", WASM_COMP_SORT_FUNC);
+    WASMComponentFuncType *source_func_type = lookup_local_component_func_type(
+        target_component_module, (uint32_t)source_type_idx);
+    const int32_t wrapper_type_idx = append_component_scalar_func_type(
+        target_component_module, {}, WASM_COMP_PRIMVAL_S32);
+    WASMComponentFuncType *wrapper_type = lookup_local_component_func_type(
+        target_component_module, (uint32_t)wrapper_type_idx);
+    ASSERT_GE(source_func_idx, 0);
+    ASSERT_NE(source_func_type, nullptr);
+    ASSERT_GE(wrapper_type_idx, 0);
+    ASSERT_NE(wrapper_type, nullptr);
+    if (!wrapper_type->params) {
+        wrapper_type->params = (WASMComponentParamList *)wasm_runtime_malloc(
+            sizeof(WASMComponentParamList));
+        ASSERT_NE(wrapper_type->params, nullptr);
+        memset(wrapper_type->params, 0, sizeof(WASMComponentParamList));
+    }
+
+    WASMComponentCanon *nested_lower_canon = nullptr;
+    ASSERT_TRUE(append_nested_component_lowered_core_caller_sections_for_func(
+        target_component_module, (uint32_t)source_func_idx, source_func_type,
+        wrapper_type, "lowered_core_string_result_caller.wasm", "source",
+        "call-source-len", &nested_lower_canon));
+    ASSERT_NE(nested_lower_canon, nullptr);
+    ASSERT_TRUE(ensure_canon_lower_memory_opt(nested_lower_canon, 0));
+    ASSERT_TRUE(ensure_canon_lower_string_utf8_opt(nested_lower_canon));
+
+    struct InstantiationArgs2 *inst_args = nullptr;
+    ASSERT_TRUE(wasm_runtime_instantiation_args_create(&inst_args));
+    wasm_runtime_instantiation_args_set_default_stack_size(inst_args,
+                                                           helper->stack_size);
+    wasm_runtime_instantiation_args_set_host_managed_heap_size(inst_args,
+                                                               helper->heap_size);
+    wasm_runtime_instantiation_args_set_wasi_stdio(inst_args, 0, 1, 2);
+    wasm_runtime_instantiation_args_set_wasi_dir(inst_args, nullptr, 0, nullptr,
+                                                 0);
+    wasm_component_import_binding_t import_binding = {};
+    import_binding.name = "source";
+    import_binding.kind = WASM_COMPONENT_EXTERN_KIND_INSTANCE;
+    import_binding.value.instance = &imported_instance;
+    wasm_runtime_instantiation_args_set_component_imports(inst_args,
+                                                          &import_binding, 1);
+
+    wasm_module_inst_t target_inst = wasm_runtime_instantiate_ex2(
+        target_module, inst_args, helper->error_buf,
+        (uint32_t)sizeof(helper->error_buf));
+    wasm_runtime_instantiation_args_destroy(inst_args);
+    ASSERT_NE(target_inst, nullptr) << helper->error_buf;
+
+    wasm_component_instance_t nested_instance =
+        wasm_runtime_lookup_component_instance(target_inst, "nested-lowered-instance");
+    ASSERT_NE(nested_instance, nullptr);
+
+    wasm_component_func_t func =
+        wasm_component_instance_lookup_function(nested_instance, "wrapped");
+    ASSERT_NE(func, nullptr);
+
+    wasm_val_t result = {};
+    ASSERT_TRUE(wasm_runtime_call_component(target_inst, func, 1, &result, 0,
+                                            nullptr))
+        << wasm_runtime_get_exception(target_inst);
+    ASSERT_EQ(result.kind, WASM_I32);
+    ASSERT_EQ(result.of.i32, 5);
 
     wasm_runtime_deinstantiate(target_inst);
     wasm_runtime_unload(target_module);
