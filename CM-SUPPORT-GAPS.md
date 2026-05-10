@@ -334,8 +334,8 @@ The executable Canonical ABI surface is currently limited to:
     from another component instance
   - no lower-side canon options beyond tested `(string-utf8)` / `(memory ...)`
     for the direct string, direct `list<string>`, and direct tuple/record
-    `list<string>`-leaf parameter/result paths, and `(memory ...)` for the
-    `list<scalar>` parameter/result path
+    `list<scalar>` / `list<string>`-leaf parameter/result paths, and
+    `(memory ...)` for the `list<scalar>` parameter/result path
   - positive top-level and nested direct child-core witnesses plus explicit
     failures for invalid UTF-8 input, omitted lower-side memory, and malformed
     result areas on the tested memory-backed paths
