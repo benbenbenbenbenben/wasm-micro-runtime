@@ -13342,6 +13342,88 @@ TEST_F(BinaryParserTest,
     wasm_runtime_unload(module);
 }
 
+TEST_F(BinaryParserTest,
+       TestPublicCompositeListCharValueExportLookupReturnsOwnedCopy)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "public-component-composite-list-char-value-export";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    const int32_t record_type_idx =
+        append_component_record_string_list_value_type_with_element(
+            (WASMComponentModule *)module, WASM_COMP_PRIMVAL_CHAR, false, 0,
+            nullptr);
+    ASSERT_GE(record_type_idx, 0);
+
+    const uint32_t nested_values[] = { 0x41u, 0x1F642u };
+    std::vector<uint8_t> payload;
+    append_component_record_string_list_scalar_payload(
+        &payload, 42, "root", 2, nested_values, (uint32_t)sizeof(nested_values));
+
+    ASSERT_TRUE(append_public_top_level_value_export_sections_with_type_and_bytes(
+        (WASMComponentModule *)module,
+        make_component_type_index_value_type((uint32_t)record_type_idx),
+        payload.data(), (uint32_t)payload.size()));
+
+    wasm_module_inst_t module_inst =
+        instantiate_component_with_default_wasi(module, helper.get());
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    auto *component_inst = (WASMComponentInstance *)module_inst;
+    const void *internal_data = wasm_component_runtime_value_get_data(
+        &component_inst->component_values[0]);
+    wasm_component_export_t export_type = {};
+    wasm_component_value_t lookup_value = {};
+    wasm_component_value_t indexed_value = {};
+
+    ASSERT_EQ(wasm_runtime_get_component_export_count(module_inst), 2);
+    ASSERT_TRUE(
+        wasm_runtime_get_component_export_type(module_inst, 1, &export_type));
+    ASSERT_EQ(std::string(export_type.name), "exported-value");
+    ASSERT_EQ(export_type.kind, WASM_COMPONENT_EXTERN_KIND_VALUE);
+
+    ASSERT_TRUE(wasm_runtime_lookup_component_value(module_inst, "exported-value",
+                                                    &lookup_value));
+    ASSERT_EQ(lookup_value.type.kind, WASM_COMPONENT_VALUE_TYPE_DEFINED);
+    ASSERT_EQ(lookup_value.storage_kind, WASM_COMPONENT_VALUE_STORAGE_INLINE);
+    ASSERT_EQ(lookup_value.byte_size, payload.size());
+    ASSERT_NE(wasm_component_value_get_data(&lookup_value), internal_data);
+    ASSERT_EQ(memcmp(wasm_component_value_get_data(&lookup_value), payload.data(),
+                     payload.size()),
+              0);
+
+    ASSERT_TRUE(
+        wasm_runtime_get_component_export_value(module_inst, 1, &indexed_value));
+    ASSERT_EQ(indexed_value.type.kind, WASM_COMPONENT_VALUE_TYPE_DEFINED);
+    ASSERT_EQ(indexed_value.storage_kind, WASM_COMPONENT_VALUE_STORAGE_INLINE);
+    ASSERT_EQ(indexed_value.byte_size, payload.size());
+    ASSERT_NE(wasm_component_value_get_data(&indexed_value), internal_data);
+    ASSERT_EQ(memcmp(wasm_component_value_get_data(&indexed_value), payload.data(),
+                     payload.size()),
+              0);
+
+    wasm_runtime_deinstantiate(module_inst);
+
+    ASSERT_EQ(memcmp(wasm_component_value_get_data(&lookup_value), payload.data(),
+                     payload.size()),
+              0);
+    ASSERT_EQ(memcmp(wasm_component_value_get_data(&indexed_value), payload.data(),
+                     payload.size()),
+              0);
+
+    wasm_component_value_destroy(&lookup_value);
+    wasm_component_value_destroy(&indexed_value);
+    wasm_runtime_unload(module);
+}
+
 TEST_F(BinaryParserTest, TestPublicComponentCallInvokesNestedScalarCanonLiftHandle)
 {
     bool ret = helper->read_wasm_file("add.wasm");
@@ -39565,6 +39647,58 @@ TEST_F(BinaryParserTest,
     wasm_runtime_unload(module);
 }
 
+TEST_F(BinaryParserTest,
+       TestRuntimeInstantiatesTopLevelCompositeListCharValueSections)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "runtime-top-level-composite-list-char-value-sections";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    const int32_t record_type_idx =
+        append_component_record_string_list_value_type_with_element(
+            (WASMComponentModule *)module, WASM_COMP_PRIMVAL_CHAR, false, 0,
+            nullptr);
+    ASSERT_GE(record_type_idx, 0);
+
+    const uint32_t nested_values[] = { 0x41u, 0x1F642u };
+    std::vector<uint8_t> payload;
+    append_component_record_string_list_scalar_payload(
+        &payload, 42, "root", 2, nested_values, (uint32_t)sizeof(nested_values));
+    ASSERT_TRUE(append_top_level_value_section_with_type_and_bytes(
+        (WASMComponentModule *)module,
+        make_component_type_index_value_type((uint32_t)record_type_idx),
+        payload.data(), (uint32_t)payload.size()));
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    auto *component_inst = (WASMComponentInstance *)module_inst;
+    ASSERT_EQ(component_inst->component_value_count, 1u);
+    ASSERT_EQ(component_inst->component_values[0].type.kind,
+              WASM_COMP_RUNTIME_VALUE_TYPE_DEFINED);
+    ASSERT_EQ(component_inst->component_values[0].storage_kind,
+              WASM_COMP_RUNTIME_VALUE_STORAGE_BORROWED);
+    ASSERT_EQ(component_inst->component_values[0].byte_size, payload.size());
+    ASSERT_EQ(memcmp(wasm_component_runtime_value_get_data(
+                         &component_inst->component_values[0]),
+                     payload.data(), payload.size()),
+              0);
+
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
 TEST_F(BinaryParserTest, TestRuntimeInstantiatesNestedValueSections)
 {
     bool ret = helper->read_wasm_file("add.wasm");
@@ -40243,6 +40377,62 @@ TEST_F(BinaryParserTest,
     ASSERT_GE(record_type_idx, 0);
 
     const uint8_t nested_values[] = { 1, 0 };
+    std::vector<uint8_t> payload;
+    append_component_record_string_list_scalar_payload(
+        &payload, 42, "root", 2, nested_values, (uint32_t)sizeof(nested_values));
+    ASSERT_TRUE(append_nested_value_section_with_type_and_bytes(
+        (WASMComponentModule *)module,
+        make_component_type_index_value_type((uint32_t)record_type_idx),
+        payload.data(), (uint32_t)payload.size()));
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    auto *component_inst = (WASMComponentInstance *)module_inst;
+    ASSERT_GE(component_inst->component_instance_count, 1u);
+    const WASMComponentRuntimeInstance &nested_instance =
+        component_inst->component_instances[component_inst->component_instance_count
+                                            - 1];
+    ASSERT_EQ(nested_instance.owned_value_count, 1u);
+    ASSERT_EQ(nested_instance.owned_values[0].type.kind,
+              WASM_COMP_RUNTIME_VALUE_TYPE_DEFINED);
+    ASSERT_EQ(nested_instance.owned_values[0].storage_kind,
+              WASM_COMP_RUNTIME_VALUE_STORAGE_BORROWED);
+    ASSERT_EQ(nested_instance.owned_values[0].byte_size, payload.size());
+    ASSERT_EQ(memcmp(wasm_component_runtime_value_get_data(
+                         &nested_instance.owned_values[0]),
+                     payload.data(), payload.size()),
+              0);
+
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestRuntimeInstantiatesNestedCompositeListCharValueSections)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "runtime-nested-composite-list-char-value-sections";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    const int32_t record_type_idx =
+        append_component_record_string_list_value_type_with_element(
+            (WASMComponentModule *)module, WASM_COMP_PRIMVAL_CHAR, false, 0,
+            nullptr);
+    ASSERT_GE(record_type_idx, 0);
+
+    const uint32_t nested_values[] = { 0x41u, 0x1F642u };
     std::vector<uint8_t> payload;
     append_component_record_string_list_scalar_payload(
         &payload, 42, "root", 2, nested_values, (uint32_t)sizeof(nested_values));
