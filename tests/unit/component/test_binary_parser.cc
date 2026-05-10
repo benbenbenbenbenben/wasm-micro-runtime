@@ -1504,6 +1504,29 @@ resource_handle_test_finalizer(void *data, void *ctx)
     wasm_runtime_free(data);
 }
 
+static uint32_t g_recorded_resource_dtor_sum = 0;
+
+static void
+record_resource_dtor_native(wasm_exec_env_t exec_env, int32_t rep)
+{
+    (void)exec_env;
+    g_recorded_resource_dtor_sum += (uint32_t)rep;
+}
+
+struct NativeRegistrationGuard {
+    const char *module_name;
+    NativeSymbol *symbols;
+    uint32_t count;
+    bool registered;
+
+    ~NativeRegistrationGuard()
+    {
+        if (registered) {
+            wasm_runtime_unregister_natives(module_name, symbols);
+        }
+    }
+};
+
 static bool
 init_scalar_value_section_with_bytes(WASMComponentValueSection *value_section,
                                      const uint8_t *bytes, uint32_t byte_len)
@@ -45494,6 +45517,90 @@ TEST_F(BinaryParserTest, TestCoreWasmDropsResourceHandlesWhenDtorsTrap)
     ASSERT_EQ(resource_type->handle_table.owned_handle_count, 0u);
 
     wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest, TestRuntimeRunsResourceDtorsDuringDeinstantiate)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    static NativeSymbol native_symbols[] = {
+        { "record_dtor", (void *)record_resource_dtor_native, "(i)", NULL }
+    };
+    NativeRegistrationGuard native_guard = { "env", native_symbols, 1, false };
+    g_recorded_resource_dtor_sum = 0;
+    ASSERT_TRUE(wasm_runtime_register_natives(
+        native_guard.module_name, native_guard.symbols, native_guard.count));
+    native_guard.registered = true;
+
+    LoadArgs load_args = {};
+    char module_name[] = "runtime-resource-dtor-deinstantiate";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    uint32_t dtor_core_instance_idx = 0;
+    uint32_t dtor_core_func_idx = 0;
+    ASSERT_TRUE(append_top_level_core_module_instance_sections(
+        (WASMComponentModule *)module, "resource_dtor_host_recorder.wasm",
+        "resource-dtor-host-recorder", &dtor_core_instance_idx));
+    ASSERT_TRUE(append_top_level_core_export_alias_section(
+        (WASMComponentModule *)module, dtor_core_instance_idx, "resource-dtor",
+        &dtor_core_func_idx));
+    ASSERT_TRUE(append_top_level_resource_type_section_with_dtor(
+        (WASMComponentModule *)module, true, dtor_core_func_idx));
+    WASMComponentRuntimeResourceState *resource_state =
+        wasm_component_resource_state_create(
+            &((WASMComponentModule *)module)->component, helper->error_buf,
+            (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(resource_state, nullptr) << helper->error_buf;
+    const uint32_t resource_type_idx = resource_state->type_count - 1;
+    wasm_component_resource_state_destroy(resource_state);
+    ASSERT_TRUE(append_top_level_resource_core_caller_sections(
+        (WASMComponentModule *)module, resource_type_idx,
+        "resource_core_caller.wasm"));
+
+    const int32_t wrapper_type_idx = append_component_scalar_func_type(
+        (WASMComponentModule *)module, {}, WASM_COMP_PRIMVAL_S32);
+    ASSERT_GE(wrapper_type_idx, 0);
+    WASMComponentFuncType *wrapper_type = lookup_local_component_func_type(
+        (WASMComponentModule *)module, (uint32_t)wrapper_type_idx);
+    ASSERT_NE(wrapper_type, nullptr);
+    if (!wrapper_type->params) {
+        wrapper_type->params = (WASMComponentParamList *)wasm_runtime_malloc(
+            sizeof(WASMComponentParamList));
+        ASSERT_NE(wrapper_type->params, nullptr);
+        memset(wrapper_type->params, 0, sizeof(WASMComponentParamList));
+    }
+    ASSERT_TRUE(append_top_level_core_export_lift_sections(
+        (WASMComponentModule *)module,
+        count_top_level_core_instance_entries(&((WASMComponentModule *)module)
+                                                   ->component)
+            - 1,
+        "create-handle-const", (uint32_t)wrapper_type_idx,
+        "resource-create-handle"));
+
+    wasm_module_inst_t module_inst =
+        instantiate_component_with_default_wasi(module, helper.get());
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t create_func =
+        wasm_runtime_lookup_component_function(module_inst, "resource-create-handle");
+    ASSERT_NE(create_func, nullptr);
+
+    wasm_val_t result = {};
+    ASSERT_TRUE(wasm_runtime_call_component(module_inst, create_func, 1, &result,
+                                            0, nullptr))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(result.kind, WASM_I32);
+    ASSERT_EQ(result.of.i32, 1);
+    ASSERT_EQ(g_recorded_resource_dtor_sum, 0u);
+
+    wasm_runtime_deinstantiate(module_inst);
+    ASSERT_EQ(g_recorded_resource_dtor_sum, 42u);
     wasm_runtime_unload(module);
 }
 

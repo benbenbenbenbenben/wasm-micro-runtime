@@ -64,6 +64,13 @@ typedef struct WASMComponentLoweredImportAttachment {
     WASMComponentCoreRuntimeRef canon_memory_ref;
 } WASMComponentLoweredImportAttachment;
 
+static bool
+call_core_function_from_resource_builtin(
+    WASMModuleInstanceCommon *exception_target,
+    const WASMComponentCoreRuntimeRef *core_func_ref, const char *acquire_error,
+    const char *call_error, uint32 num_results, wasm_val_t *results,
+    uint32 num_args, wasm_val_t *args);
+
 typedef enum WASMComponentCanonLiftValueKind {
     WASM_COMP_CANON_LIFT_VALUE_SCALAR = 0,
     WASM_COMP_CANON_LIFT_VALUE_STRING,
@@ -617,12 +624,98 @@ destroy_component_runtime_instance(WASMComponentRuntimeInstance *component_inst)
 }
 
 static void
+release_component_resource_handle_entry(WASMComponentResourceHandleEntry *entry)
+{
+    if (!entry || !entry->is_live || !entry->is_owned)
+        return;
+
+    if (entry->data) {
+        if (entry->finalizer)
+            entry->finalizer(entry->data, entry->finalizer_ctx);
+        else
+            wasm_runtime_free(entry->data);
+    }
+
+    memset(entry, 0, sizeof(*entry));
+}
+
+static void
+destroy_component_resource_state_for_instance(WASMComponentInstance *inst)
+{
+    uint32 i;
+    WASMComponentRuntimeResourceState *resource_state;
+
+    if (!inst || !inst->resource_state)
+        return;
+
+    resource_state = inst->resource_state;
+    for (i = 0; i < resource_state->owned_handle_count; i++) {
+        WASMComponentOwnedResourceHandle *owned_handle =
+            &resource_state->owned_handles[i];
+        WASMComponentRuntimeResourceType *resource_type, *canonical_type;
+        WASMComponentResourceHandleEntry *entry;
+        uint32 handle_index;
+
+        if (owned_handle->handle == 0)
+            continue;
+
+        resource_type = wasm_component_resource_lookup_runtime_type(
+            resource_state, owned_handle->type_idx);
+        if (!resource_type)
+            continue;
+
+        canonical_type = wasm_component_resource_lookup_runtime_type(
+            resource_state, resource_type->canonical_type_idx);
+        if (!canonical_type)
+            continue;
+
+        handle_index = owned_handle->handle - 1;
+        if (handle_index >= canonical_type->handle_table.entry_count)
+            continue;
+
+        entry = &canonical_type->handle_table.entries[handle_index];
+        if (!entry->is_live || !entry->is_owned)
+            continue;
+
+        if (canonical_type->kind == WASM_COMP_RUNTIME_RESOURCE_TYPE_LOCAL
+            && canonical_type->has_dtor && inst->core_funcs
+            && canonical_type->dtor_func_idx < inst->core_func_count
+            && inst->core_funcs[canonical_type->dtor_func_idx].type
+                   == WASM_COMP_CORE_RUNTIME_REF_FUNC
+            && inst->core_funcs[canonical_type->dtor_func_idx].of.function) {
+            wasm_val_t dtor_arg = { 0 };
+            dtor_arg.kind = WASM_I32;
+            dtor_arg.of.i32 = (int32)(uint32)(uintptr_t)entry->data;
+            (void)call_core_function_from_resource_builtin(
+                (WASMModuleInstanceCommon *)inst,
+                &inst->core_funcs[canonical_type->dtor_func_idx],
+                "component resource cleanup could not acquire a destructor "
+                "execution environment",
+                "component resource destructor failed during deinstantiate", 0,
+                NULL, 1, &dtor_arg);
+        }
+
+        release_component_resource_handle_entry(entry);
+        if (canonical_type->handle_table.live_handle_count > 0)
+            canonical_type->handle_table.live_handle_count--;
+        if (canonical_type->handle_table.owned_handle_count > 0)
+            canonical_type->handle_table.owned_handle_count--;
+    }
+
+    wasm_component_resource_state_destroy(resource_state);
+    inst->resource_state = NULL;
+}
+
+static void
 destroy_component_instance_graph(WASMComponentInstance *inst)
 {
     uint32 i;
 
     if (!inst)
         return;
+
+    if (inst->resource_state)
+        destroy_component_resource_state_for_instance(inst);
 
     if (inst->core_instances) {
         for (i = 0; i < inst->core_instance_count; i++)
@@ -690,10 +783,6 @@ destroy_component_instance_graph(WASMComponentInstance *inst)
             wasm_component_runtime_value_clear(&inst->component_values[i]);
         wasm_runtime_free(inst->component_values);
         inst->component_values = NULL;
-    }
-    if (inst->resource_state) {
-        wasm_component_resource_state_destroy(inst->resource_state);
-        inst->resource_state = NULL;
     }
 
     inst->core_module_count = 0;
