@@ -10650,12 +10650,32 @@ count_nested_component_local_bindings(const WASMComponent *nested_component,
                     const WASMComponentAliasDefinition *alias_def =
                         &alias_section->aliases[j];
 
-                    if (!alias_def->sort
-                        || alias_def->sort->sort == WASM_COMP_SORT_CORE_SORT)
+                    if (!alias_def->sort)
                         return set_component_runtime_error_fmt(
                             error_buf, error_buf_size,
-                            "nested component aliases must use component "
-                            "func/value/instance/component sorts");
+                            "nested component alias is missing a sort");
+
+                    if (alias_def->sort->sort == WASM_COMP_SORT_CORE_SORT) {
+                        if (alias_def->alias_target_type
+                            != WASM_COMP_ALIAS_TARGET_CORE_EXPORT)
+                            return set_component_runtime_error_fmt(
+                                error_buf, error_buf_size,
+                                "nested core aliases other than core export are "
+                                "not supported yet");
+
+                        switch (alias_def->sort->core_sort) {
+                            case WASM_COMP_CORE_SORT_FUNC:
+                                (*core_func_count)++;
+                                break;
+                            default:
+                                return set_component_runtime_error_fmt(
+                                    error_buf, error_buf_size,
+                                    "nested core alias sort 0x%02x is not "
+                                    "supported yet",
+                                    (unsigned)alias_def->sort->core_sort);
+                        }
+                        continue;
+                    }
 
                     switch (alias_def->sort->sort) {
                         case WASM_COMP_SORT_FUNC:
@@ -13330,6 +13350,46 @@ resolve_nested_component_alias_section(
                     error_buf_size)
                 || !append_nested_component_local_component(
                     bindings, component_ref, error_buf, error_buf_size))
+                return false;
+            continue;
+        }
+
+        if (alias_def->alias_target_type == WASM_COMP_ALIAS_TARGET_CORE_EXPORT) {
+            const WASMComponentCoreRuntimeInstance *core_instance;
+            WASMComponentCoreRuntimeRef core_ref;
+            WASMComponentCoreRuntimeRefType expected_core_type;
+
+            if (!alias_def->sort
+                || alias_def->sort->sort != WASM_COMP_SORT_CORE_SORT)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "nested core aliases must use core sort encoding");
+
+            if (alias_def->target.core_exported.instance_idx
+                >= bindings->core_instance_count)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "nested core alias instance index %u is out of bounds",
+                    alias_def->target.core_exported.instance_idx);
+
+            switch (alias_def->sort->core_sort) {
+                case WASM_COMP_CORE_SORT_FUNC:
+                    expected_core_type = WASM_COMP_CORE_RUNTIME_REF_FUNC;
+                    break;
+                default:
+                    return set_component_runtime_error_fmt(
+                        error_buf, error_buf_size,
+                        "nested core alias sort 0x%02x is not supported yet",
+                        (unsigned)alias_def->sort->core_sort);
+            }
+
+            core_instance =
+                bindings->core_instances[alias_def->target.core_exported.instance_idx];
+            name = alias_def->target.core_exported.name->name;
+            if (!lookup_core_instance_export(core_instance, name, expected_core_type,
+                                             &core_ref, error_buf, error_buf_size)
+                || !append_nested_component_local_core_func(
+                    bindings, core_ref, error_buf, error_buf_size))
                 return false;
             continue;
         }

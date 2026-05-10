@@ -2283,7 +2283,7 @@ clone_component_func_type(const WASMComponent *source_component,
     }
     memset(func_type, 0, sizeof(WASMComponentFuncType));
 
-    if (src && src->params && src->params->count > 0) {
+    if (src && src->params) {
         func_type->params = (WASMComponentParamList *)wasm_runtime_malloc(
             sizeof(WASMComponentParamList));
         if (!func_type->params) {
@@ -2291,30 +2291,33 @@ clone_component_func_type(const WASMComponent *source_component,
         }
         memset(func_type->params, 0, sizeof(WASMComponentParamList));
         func_type->params->count = src->params->count;
-        func_type->params->params = (WASMComponentLabelValType *)wasm_runtime_malloc(
-            sizeof(WASMComponentLabelValType) * func_type->params->count);
-        if (!func_type->params->params) {
-            return nullptr;
-        }
-        memset(func_type->params->params, 0,
-               sizeof(WASMComponentLabelValType) * func_type->params->count);
-        for (uint32_t i = 0; i < func_type->params->count; i++) {
-            const char *label = src->params->params[i].label
-                                    ? src->params->params[i].label->name
-                                    : "p";
-            func_type->params->params[i].label = clone_core_name(label);
-            func_type->params->params[i].value_type =
-                (WASMComponentValueType *)wasm_runtime_malloc(
-                    sizeof(WASMComponentValueType));
-            if (!func_type->params->params[i].label
-                || !func_type->params->params[i].value_type) {
+        if (func_type->params->count > 0) {
+            func_type->params->params =
+                (WASMComponentLabelValType *)wasm_runtime_malloc(
+                    sizeof(WASMComponentLabelValType) * func_type->params->count);
+            if (!func_type->params->params) {
                 return nullptr;
             }
-            if (!clone_supported_value_type_into_component(
-                    target_component, source_component,
-                    src->params->params[i].value_type,
-                    func_type->params->params[i].value_type)) {
-                return nullptr;
+            memset(func_type->params->params, 0,
+                   sizeof(WASMComponentLabelValType) * func_type->params->count);
+            for (uint32_t i = 0; i < func_type->params->count; i++) {
+                const char *label = src->params->params[i].label
+                                        ? src->params->params[i].label->name
+                                        : "p";
+                func_type->params->params[i].label = clone_core_name(label);
+                func_type->params->params[i].value_type =
+                    (WASMComponentValueType *)wasm_runtime_malloc(
+                        sizeof(WASMComponentValueType));
+                if (!func_type->params->params[i].label
+                    || !func_type->params->params[i].value_type) {
+                    return nullptr;
+                }
+                if (!clone_supported_value_type_into_component(
+                        target_component, source_component,
+                        src->params->params[i].value_type,
+                        func_type->params->params[i].value_type)) {
+                    return nullptr;
+                }
             }
         }
     }
@@ -4683,6 +4686,371 @@ append_nested_component_lower_relift_sections(
 
     return append_nested_component_lower_relift_sections_for_func(
         component_module, 0, source_func_type);
+}
+
+static bool
+append_nested_component_lowered_core_caller_sections_for_func(
+    WASMComponentModule *component_module, uint32_t source_func_idx,
+    const WASMComponentFuncType *source_func_type,
+    const WASMComponentFuncType *wrapped_func_type, const char *core_module_path,
+    const char *core_import_name, const char *core_export_name,
+    WASMComponentCanon **out_lower_canon)
+{
+    WASMComponent *component = &component_module->component;
+    const uint32_t new_component_idx =
+        count_top_level_sort_entries(component, WASM_COMP_SORT_COMPONENT);
+    const uint32_t new_instance_idx =
+        count_top_level_sort_entries(component, WASM_COMP_SORT_INSTANCE);
+    const uint32_t old_count = component->section_count;
+    const uint32_t new_count = old_count + 3;
+    char error_buf[128] = {};
+    auto *new_sections = (WASMComponentSection *)wasm_runtime_malloc(
+        sizeof(WASMComponentSection) * new_count);
+    WASMComponentSection *component_section;
+    WASMComponentSection *instance_section;
+    WASMComponentSection *export_section;
+    WASMComponentTypeSection *type_section;
+    WASMComponentFuncType *nested_import_func_type;
+    WASMComponentFuncType *nested_wrapped_func_type;
+    uint32_t nested_import_type_idx;
+    uint32_t nested_wrapped_type_idx;
+    WASMComponent *nested_component;
+
+    if (!source_func_type || !wrapped_func_type || !core_module_path || !core_import_name
+        || !core_export_name || !new_sections) {
+        return false;
+    }
+
+    memset(new_sections, 0, sizeof(WASMComponentSection) * new_count);
+    memcpy(new_sections, component->sections,
+           sizeof(WASMComponentSection) * old_count);
+    wasm_runtime_free(component->sections);
+    component->sections = new_sections;
+    component->section_count = new_count;
+
+    component_section = &component->sections[old_count];
+    instance_section = &component->sections[old_count + 1];
+    export_section = &component->sections[old_count + 2];
+
+    component_section->id = WASM_COMP_SECTION_COMPONENT;
+    component_section->parsed.component = create_empty_component();
+    if (!component_section->parsed.component) {
+        return false;
+    }
+    nested_component = component_section->parsed.component;
+    nested_component->section_count = 8;
+    nested_component->sections =
+        (WASMComponentSection *)wasm_runtime_malloc(sizeof(WASMComponentSection) * 8);
+    if (!nested_component->sections) {
+        return false;
+    }
+    memset(nested_component->sections, 0, sizeof(WASMComponentSection) * 8);
+
+    nested_component->sections[0].id = WASM_COMP_SECTION_TYPE;
+    nested_component->sections[0].parsed.type_section =
+        (WASMComponentTypeSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentTypeSection));
+    if (!nested_component->sections[0].parsed.type_section) {
+        return false;
+    }
+    memset(nested_component->sections[0].parsed.type_section, 0,
+           sizeof(WASMComponentTypeSection));
+    type_section = nested_component->sections[0].parsed.type_section;
+    nested_import_func_type = clone_component_func_type(&component_module->component,
+                                                        nested_component,
+                                                        source_func_type);
+    nested_import_type_idx =
+        append_func_type_to_type_section(type_section, nested_import_func_type);
+    nested_wrapped_func_type = clone_component_func_type(
+        &component_module->component, nested_component, wrapped_func_type);
+    nested_wrapped_type_idx =
+        append_func_type_to_type_section(type_section, nested_wrapped_func_type);
+    if (!nested_import_func_type || nested_import_type_idx == UINT32_MAX
+        || !nested_wrapped_func_type || nested_wrapped_type_idx == UINT32_MAX) {
+        return false;
+    }
+
+    nested_component->sections[1].id = WASM_COMP_SECTION_IMPORTS;
+    nested_component->sections[1].parsed.import_section =
+        (WASMComponentImportSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentImportSection));
+    if (!nested_component->sections[1].parsed.import_section) {
+        return false;
+    }
+    memset(nested_component->sections[1].parsed.import_section, 0,
+           sizeof(WASMComponentImportSection));
+    nested_component->sections[1].parsed.import_section->count = 1;
+    nested_component->sections[1].parsed.import_section->imports =
+        (WASMComponentImport *)wasm_runtime_malloc(sizeof(WASMComponentImport));
+    if (!nested_component->sections[1].parsed.import_section->imports) {
+        return false;
+    }
+    memset(nested_component->sections[1].parsed.import_section->imports, 0,
+           sizeof(WASMComponentImport));
+    nested_component->sections[1].parsed.import_section->imports[0].import_name =
+        create_import_name("source");
+    nested_component->sections[1].parsed.import_section->imports[0].extern_desc =
+        create_func_extern_desc(nested_import_type_idx);
+    if (!nested_component->sections[1].parsed.import_section->imports[0].import_name
+        || !nested_component->sections[1]
+                .parsed.import_section->imports[0]
+                .extern_desc) {
+        return false;
+    }
+
+    nested_component->sections[2].id = WASM_COMP_SECTION_CANONS;
+    nested_component->sections[2].parsed.canon_section =
+        (WASMComponentCanonSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentCanonSection));
+    if (!nested_component->sections[2].parsed.canon_section) {
+        return false;
+    }
+    memset(nested_component->sections[2].parsed.canon_section, 0,
+           sizeof(WASMComponentCanonSection));
+    nested_component->sections[2].parsed.canon_section->count = 1;
+    nested_component->sections[2].parsed.canon_section->canons =
+        (WASMComponentCanon *)wasm_runtime_malloc(sizeof(WASMComponentCanon));
+    if (!nested_component->sections[2].parsed.canon_section->canons) {
+        return false;
+    }
+    memset(nested_component->sections[2].parsed.canon_section->canons, 0,
+           sizeof(WASMComponentCanon));
+    nested_component->sections[2].parsed.canon_section->canons[0].tag =
+        WASM_COMP_CANON_LOWER;
+    nested_component->sections[2].parsed.canon_section->canons[0]
+        .canon_data.lower.func_idx = 0;
+
+    nested_component->sections[3].id = WASM_COMP_SECTION_CORE_MODULE;
+    nested_component->sections[3].parsed.core_module =
+        create_core_module_wrapper_from_file(core_module_path,
+                                            "nested-lowered-core-caller",
+                                            error_buf,
+                                            (uint32_t)sizeof(error_buf));
+    if (!nested_component->sections[3].parsed.core_module) {
+        return false;
+    }
+
+    nested_component->sections[4].id = WASM_COMP_SECTION_CORE_INSTANCE;
+    nested_component->sections[4].parsed.core_instance_section =
+        (WASMComponentCoreInstSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentCoreInstSection));
+    if (!nested_component->sections[4].parsed.core_instance_section) {
+        return false;
+    }
+    memset(nested_component->sections[4].parsed.core_instance_section, 0,
+           sizeof(WASMComponentCoreInstSection));
+    nested_component->sections[4].parsed.core_instance_section->count = 1;
+    nested_component->sections[4].parsed.core_instance_section->instances =
+        (WASMComponentCoreInst *)wasm_runtime_malloc(sizeof(WASMComponentCoreInst));
+    if (!nested_component->sections[4].parsed.core_instance_section->instances) {
+        return false;
+    }
+    memset(nested_component->sections[4].parsed.core_instance_section->instances, 0,
+           sizeof(WASMComponentCoreInst));
+    nested_component->sections[4].parsed.core_instance_section->instances[0]
+        .instance_expression_tag = WASM_COMP_INSTANCE_EXPRESSION_WITH_ARGS;
+    nested_component->sections[4].parsed.core_instance_section->instances[0]
+        .expression.with_args.idx = 0;
+    nested_component->sections[4].parsed.core_instance_section->instances[0]
+        .expression.with_args.arg_len = 1;
+    nested_component->sections[4].parsed.core_instance_section->instances[0]
+        .expression.with_args.args =
+        (WASMComponentInstArg *)wasm_runtime_malloc(sizeof(WASMComponentInstArg));
+    if (!nested_component->sections[4]
+             .parsed.core_instance_section->instances[0]
+             .expression.with_args.args) {
+        return false;
+    }
+    memset(nested_component->sections[4]
+               .parsed.core_instance_section->instances[0]
+               .expression.with_args.args,
+           0, sizeof(WASMComponentInstArg));
+    nested_component->sections[4].parsed.core_instance_section->instances[0]
+        .expression.with_args.args[0].name = clone_core_name(core_import_name);
+    nested_component->sections[4].parsed.core_instance_section->instances[0]
+        .expression.with_args.args[0]
+        .idx.sort_idx = create_core_sort_idx(WASM_COMP_CORE_SORT_FUNC, 0);
+    if (!nested_component->sections[4]
+             .parsed.core_instance_section->instances[0]
+             .expression.with_args.args[0]
+             .name
+        || !nested_component->sections[4]
+                .parsed.core_instance_section->instances[0]
+                .expression.with_args.args[0]
+                .idx.sort_idx) {
+        return false;
+    }
+
+    nested_component->sections[5].id = WASM_COMP_SECTION_ALIASES;
+    nested_component->sections[5].parsed.alias_section =
+        (WASMComponentAliasSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentAliasSection));
+    if (!nested_component->sections[5].parsed.alias_section) {
+        return false;
+    }
+    memset(nested_component->sections[5].parsed.alias_section, 0,
+           sizeof(WASMComponentAliasSection));
+    nested_component->sections[5].parsed.alias_section->count = 1;
+    nested_component->sections[5].parsed.alias_section->aliases =
+        (WASMComponentAliasDefinition *)wasm_runtime_malloc(
+            sizeof(WASMComponentAliasDefinition));
+    if (!nested_component->sections[5].parsed.alias_section->aliases) {
+        return false;
+    }
+    memset(nested_component->sections[5].parsed.alias_section->aliases, 0,
+           sizeof(WASMComponentAliasDefinition));
+    nested_component->sections[5].parsed.alias_section->aliases[0].sort =
+        create_sort(WASM_COMP_SORT_CORE_SORT);
+    if (!nested_component->sections[5].parsed.alias_section->aliases[0].sort) {
+        return false;
+    }
+    nested_component->sections[5].parsed.alias_section->aliases[0].sort->core_sort =
+        WASM_COMP_CORE_SORT_FUNC;
+    nested_component->sections[5].parsed.alias_section->aliases[0].alias_target_type =
+        WASM_COMP_ALIAS_TARGET_CORE_EXPORT;
+    nested_component->sections[5].parsed.alias_section->aliases[0]
+        .target.core_exported.instance_idx = 0;
+    nested_component->sections[5].parsed.alias_section->aliases[0]
+        .target.core_exported.name = clone_core_name(core_export_name);
+    if (!nested_component->sections[5]
+             .parsed.alias_section->aliases[0]
+             .target.core_exported.name) {
+        return false;
+    }
+
+    nested_component->sections[6].id = WASM_COMP_SECTION_CANONS;
+    nested_component->sections[6].parsed.canon_section =
+        (WASMComponentCanonSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentCanonSection));
+    if (!nested_component->sections[6].parsed.canon_section) {
+        return false;
+    }
+    memset(nested_component->sections[6].parsed.canon_section, 0,
+           sizeof(WASMComponentCanonSection));
+    nested_component->sections[6].parsed.canon_section->count = 1;
+    nested_component->sections[6].parsed.canon_section->canons =
+        (WASMComponentCanon *)wasm_runtime_malloc(sizeof(WASMComponentCanon));
+    if (!nested_component->sections[6].parsed.canon_section->canons) {
+        return false;
+    }
+    memset(nested_component->sections[6].parsed.canon_section->canons, 0,
+           sizeof(WASMComponentCanon));
+    nested_component->sections[6].parsed.canon_section->canons[0].tag =
+        WASM_COMP_CANON_LIFT;
+    nested_component->sections[6].parsed.canon_section->canons[0]
+        .canon_data.lift.core_func_idx = 1;
+    nested_component->sections[6].parsed.canon_section->canons[0]
+        .canon_data.lift.type_idx = nested_wrapped_type_idx;
+
+    nested_component->sections[7].id = WASM_COMP_SECTION_EXPORTS;
+    nested_component->sections[7].parsed.export_section =
+        (WASMComponentExportSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentExportSection));
+    if (!nested_component->sections[7].parsed.export_section) {
+        return false;
+    }
+    memset(nested_component->sections[7].parsed.export_section, 0,
+           sizeof(WASMComponentExportSection));
+    nested_component->sections[7].parsed.export_section->count = 1;
+    nested_component->sections[7].parsed.export_section->exports =
+        (WASMComponentExport *)wasm_runtime_malloc(sizeof(WASMComponentExport));
+    if (!nested_component->sections[7].parsed.export_section->exports) {
+        return false;
+    }
+    memset(nested_component->sections[7].parsed.export_section->exports, 0,
+           sizeof(WASMComponentExport));
+    nested_component->sections[7].parsed.export_section->exports[0].export_name =
+        create_export_name("wrapped");
+    nested_component->sections[7].parsed.export_section->exports[0].sort_idx =
+        create_sort_idx(WASM_COMP_SORT_FUNC, 1);
+    if (!nested_component->sections[7]
+             .parsed.export_section->exports[0]
+             .export_name
+        || !nested_component->sections[7]
+                .parsed.export_section->exports[0]
+                .sort_idx) {
+        return false;
+    }
+
+    instance_section->id = WASM_COMP_SECTION_INSTANCES;
+    instance_section->parsed.instance_section =
+        (WASMComponentInstSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentInstSection));
+    if (!instance_section->parsed.instance_section) {
+        return false;
+    }
+    memset(instance_section->parsed.instance_section, 0,
+           sizeof(WASMComponentInstSection));
+    instance_section->parsed.instance_section->count = 1;
+    instance_section->parsed.instance_section->instances =
+        (WASMComponentInst *)wasm_runtime_malloc(sizeof(WASMComponentInst));
+    if (!instance_section->parsed.instance_section->instances) {
+        return false;
+    }
+    memset(instance_section->parsed.instance_section->instances, 0,
+           sizeof(WASMComponentInst));
+    instance_section->parsed.instance_section->instances[0]
+        .instance_expression_tag = WASM_COMP_INSTANCE_EXPRESSION_WITH_ARGS;
+    instance_section->parsed.instance_section->instances[0].expression.with_args.idx =
+        new_component_idx;
+    instance_section->parsed.instance_section->instances[0]
+        .expression.with_args.arg_len = 1;
+    instance_section->parsed.instance_section->instances[0]
+        .expression.with_args.args =
+        (WASMComponentInstArg *)wasm_runtime_malloc(sizeof(WASMComponentInstArg));
+    if (!instance_section->parsed.instance_section->instances[0]
+             .expression.with_args.args) {
+        return false;
+    }
+    memset(instance_section->parsed.instance_section->instances[0]
+               .expression.with_args.args,
+           0, sizeof(WASMComponentInstArg));
+    instance_section->parsed.instance_section->instances[0]
+        .expression.with_args.args[0]
+        .name = clone_core_name("source");
+    instance_section->parsed.instance_section->instances[0]
+        .expression.with_args.args[0]
+        .idx.sort_idx = create_sort_idx(WASM_COMP_SORT_FUNC, source_func_idx);
+    if (!instance_section->parsed.instance_section->instances[0]
+             .expression.with_args.args[0]
+             .name
+        || !instance_section->parsed.instance_section->instances[0]
+                .expression.with_args.args[0]
+                .idx.sort_idx) {
+        return false;
+    }
+
+    export_section->id = WASM_COMP_SECTION_EXPORTS;
+    export_section->parsed.export_section =
+        (WASMComponentExportSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentExportSection));
+    if (!export_section->parsed.export_section) {
+        return false;
+    }
+    memset(export_section->parsed.export_section, 0,
+           sizeof(WASMComponentExportSection));
+    export_section->parsed.export_section->count = 1;
+    export_section->parsed.export_section->exports =
+        (WASMComponentExport *)wasm_runtime_malloc(sizeof(WASMComponentExport));
+    if (!export_section->parsed.export_section->exports) {
+        return false;
+    }
+    memset(export_section->parsed.export_section->exports, 0,
+           sizeof(WASMComponentExport));
+    export_section->parsed.export_section->exports[0].export_name =
+        create_export_name("nested-lowered-instance");
+    export_section->parsed.export_section->exports[0].sort_idx =
+        create_sort_idx(WASM_COMP_SORT_INSTANCE, new_instance_idx);
+    if (!export_section->parsed.export_section->exports[0].export_name
+        || !export_section->parsed.export_section->exports[0].sort_idx) {
+        return false;
+    }
+
+    if (out_lower_canon) {
+        *out_lower_canon =
+            &nested_component->sections[2].parsed.canon_section->canons[0];
+    }
+    return true;
 }
 
 static bool
@@ -12858,6 +13226,125 @@ TEST_F(BinaryParserTest,
               nullptr);
 
     wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestNestedCoreWasmCanCallLoweredMixedCompositeResultComponentFunctionDirectly)
+{
+    bool ret = helper->read_wasm_file("composite_string_results.component.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "nested-core-wasm-calls-lowered-mixed-composite-result";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    const int32_t source_func_idx = find_top_level_export_sort_index(
+        (WASMComponentModule *)module, "mixed-list-result", WASM_COMP_SORT_FUNC);
+    WASMComponentFuncType *source_func_type =
+        lookup_top_level_exported_canon_func_type((WASMComponentModule *)module,
+                                                  "mixed-list-result");
+    const int32_t wrapper_type_idx = append_component_scalar_func_type(
+        (WASMComponentModule *)module, {}, WASM_COMP_PRIMVAL_S32);
+    WASMComponentFuncType *wrapper_type = lookup_local_component_func_type(
+        (WASMComponentModule *)module, (uint32_t)wrapper_type_idx);
+    ASSERT_GE(source_func_idx, 0);
+    ASSERT_NE(source_func_type, nullptr);
+    ASSERT_GE(wrapper_type_idx, 0);
+    ASSERT_NE(wrapper_type, nullptr);
+    if (!wrapper_type->params) {
+        wrapper_type->params = (WASMComponentParamList *)wasm_runtime_malloc(
+            sizeof(WASMComponentParamList));
+        ASSERT_NE(wrapper_type->params, nullptr);
+        memset(wrapper_type->params, 0, sizeof(WASMComponentParamList));
+    }
+
+    WASMComponentCanon *nested_lower_canon = nullptr;
+    ASSERT_TRUE(append_nested_component_lowered_core_caller_sections_for_func(
+        (WASMComponentModule *)module, (uint32_t)source_func_idx, source_func_type,
+        wrapper_type, "lowered_core_mixed_list_result_caller.wasm", "source",
+        "call-source-sum", &nested_lower_canon));
+    ASSERT_NE(nested_lower_canon, nullptr);
+    ASSERT_TRUE(ensure_canon_lower_memory_opt(nested_lower_canon, 0));
+    ASSERT_TRUE(ensure_canon_lower_string_utf8_opt(nested_lower_canon));
+
+    wasm_module_inst_t module_inst =
+        instantiate_component_with_default_wasi(module, helper.get());
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_instance_t nested_instance =
+        wasm_runtime_lookup_component_instance(module_inst, "nested-lowered-instance");
+    ASSERT_NE(nested_instance, nullptr);
+
+    wasm_component_func_t func =
+        wasm_component_instance_lookup_function(nested_instance, "wrapped");
+    ASSERT_NE(func, nullptr);
+
+    wasm_val_t results[1] = {};
+    ASSERT_TRUE(wasm_runtime_call_component(module_inst, func, 1, results, 0,
+                                            nullptr))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(results[0].kind, WASM_I32);
+    ASSERT_EQ(results[0].of.i32, 16);
+
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestNestedCoreWasmLoweredMixedCompositeResultDirectCallRequiresLowerMemory)
+{
+    bool ret = helper->read_wasm_file("composite_string_results.component.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "nested-core-wasm-calls-lowered-mixed-composite-no-memory";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    const int32_t source_func_idx = find_top_level_export_sort_index(
+        (WASMComponentModule *)module, "mixed-list-result", WASM_COMP_SORT_FUNC);
+    WASMComponentFuncType *source_func_type =
+        lookup_top_level_exported_canon_func_type((WASMComponentModule *)module,
+                                                  "mixed-list-result");
+    const int32_t wrapper_type_idx = append_component_scalar_func_type(
+        (WASMComponentModule *)module, {}, WASM_COMP_PRIMVAL_S32);
+    WASMComponentFuncType *wrapper_type = lookup_local_component_func_type(
+        (WASMComponentModule *)module, (uint32_t)wrapper_type_idx);
+    ASSERT_GE(source_func_idx, 0);
+    ASSERT_NE(source_func_type, nullptr);
+    ASSERT_GE(wrapper_type_idx, 0);
+    ASSERT_NE(wrapper_type, nullptr);
+    if (!wrapper_type->params) {
+        wrapper_type->params = (WASMComponentParamList *)wasm_runtime_malloc(
+            sizeof(WASMComponentParamList));
+        ASSERT_NE(wrapper_type->params, nullptr);
+        memset(wrapper_type->params, 0, sizeof(WASMComponentParamList));
+    }
+
+    WASMComponentCanon *nested_lower_canon = nullptr;
+    ASSERT_TRUE(append_nested_component_lowered_core_caller_sections_for_func(
+        (WASMComponentModule *)module, (uint32_t)source_func_idx, source_func_type,
+        wrapper_type, "lowered_core_mixed_list_result_caller.wasm", "source",
+        "call-source-sum", &nested_lower_canon));
+    ASSERT_NE(nested_lower_canon, nullptr);
+    ASSERT_TRUE(ensure_canon_lower_string_utf8_opt(nested_lower_canon));
+
+    wasm_module_inst_t module_inst =
+        instantiate_component_with_default_wasi(module, helper.get());
+    ASSERT_EQ(module_inst, nullptr);
+    ASSERT_NE(strstr(helper->error_buf, "require memory for string Canonical ABI"),
+              nullptr);
+
     wasm_runtime_unload(module);
 }
 
