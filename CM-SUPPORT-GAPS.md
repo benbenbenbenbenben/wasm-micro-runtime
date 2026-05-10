@@ -297,9 +297,10 @@ The executable Canonical ABI surface is currently limited to:
   - tuple/record parameter signatures over the current scalar / UTF-8 string /
     nested `list<scalar>` / `list<string>` leaf subset
   - record-result signatures
-  - tuple-result and mixed tuple/record-result signatures through the component
-    value API over that same supported leaf subset, including nested
-    `list<string>` leaves on the mixed composite param/result paths
+- tuple-result and mixed tuple/record-result signatures through the component
+  value API over that same supported leaf subset, including nested
+  `list<scalar>` / `list<string>` leaves on the mixed composite param/result
+  paths
   - explicit rejection of lower-side canon options and outer synthetic-lift
     canon options on this synthetic path
 - direct core-wasm invocation of lowered component functions for the currently
