@@ -127,7 +127,7 @@ instance bindings, and currently covers:
   leaf subset, with at most one result
 - exported `core module` members
 - exported scalar `value` members
-- exported variable-length `list<u8>` `value` members
+- exported variable-length `list<u8>` / `list<string>` `value` members
 - exported tuple/record `value` members in the current scalar / UTF-8 string /
   nested `list<u8>` / `list<string>` leaf subset
 - exported nested `instance` members, including recursive validation
@@ -421,6 +421,7 @@ Current limitations include:
   members for the current scalar / UTF-8 string / variable-length `list<u8>` /
   `list<string>` / tuple-record leaf subset; typed `instance` import matching is otherwise
   limited to exported `core module`, scalar / variable-length `list<u8>` /
+  `list<string>` /
   current tuple-record-subset `value`, nested `instance` members, and the first
   typed `component` subset: top-level component imports plus typed `instance`
   component members whose expected component types have no imports and only
