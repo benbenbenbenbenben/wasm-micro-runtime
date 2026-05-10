@@ -1661,6 +1661,19 @@ lookup_top_level_exported_canon_func_type_idx(WASMComponentModule *component_mod
     return (int32_t)canon->canon_data.lift.type_idx;
 }
 
+static WASMComponentCanon *
+lookup_top_level_exported_canon(WASMComponentModule *component_module,
+                                const char *export_name)
+{
+    const int32_t func_idx = find_top_level_export_sort_index(
+        component_module, export_name, WASM_COMP_SORT_FUNC);
+
+    return func_idx >= 0
+               ? (WASMComponentCanon *)lookup_top_level_canon_by_func_index(
+                     component_module, (uint32_t)func_idx)
+               : nullptr;
+}
+
 static bool
 append_top_level_canon_lower_relift_export_sections_for_func(
     WASMComponentModule *component_module, uint32_t source_func_idx,
@@ -11969,6 +11982,409 @@ TEST_F(BinaryParserTest,
     ASSERT_NE(strstr(helper->error_buf,
                      "synthetic lift(lower(f)) does not support lower-side canon "
                      "options"),
+              nullptr);
+
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestPublicComponentCallInvokesLowerReliftedMixedCompositeParamHandle)
+{
+    bool ret = helper->read_wasm_file("composite_string_params.component.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "public-component-call-lower-relift-mixed-composite-param";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    const int32_t source_func_idx = find_top_level_export_sort_index(
+        (WASMComponentModule *)module, "mixed-list-param", WASM_COMP_SORT_FUNC);
+    const int32_t source_type_idx = lookup_top_level_exported_canon_func_type_idx(
+        (WASMComponentModule *)module, "mixed-list-param");
+    ASSERT_GE(source_func_idx, 0);
+    ASSERT_GE(source_type_idx, 0);
+    ASSERT_TRUE(append_top_level_canon_lower_relift_export_sections_for_func(
+        (WASMComponentModule *)module, (uint32_t)source_func_idx,
+        (uint32_t)source_type_idx, "lowered-mixed-list-param"));
+
+    wasm_module_inst_t module_inst =
+        instantiate_component_with_default_wasi(module, helper.get());
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func = wasm_runtime_lookup_component_function(
+        module_inst, "lowered-mixed-list-param");
+    ASSERT_NE(func, nullptr);
+
+    const uint8_t nested_bytes[] = { 0xaa, 0xbb, 0xcc };
+    std::vector<uint8_t> payload;
+    wasm_component_value_t result = {};
+    int32_t decoded_result = 0;
+
+    append_component_s32_payload(&payload, 37);
+    append_component_string_payload(&payload, "abcde");
+    append_component_list_u8_payload(&payload, nested_bytes,
+                                     (uint32_t)sizeof(nested_bytes));
+
+    wasm_component_value_t arg =
+        make_component_list_u8_value(payload.data(), (uint32_t)payload.size());
+
+    ASSERT_TRUE(
+        wasm_runtime_call_component_values(module_inst, func, 1, &result, 1, &arg))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_TRUE(decode_component_s32_arg(&result, &decoded_result));
+    ASSERT_EQ(decoded_result, 45);
+
+    wasm_component_value_destroy(&result);
+    wasm_component_value_destroy(&arg);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestPublicComponentCallInvokesNestedLowerReliftedMixedCompositeParamHandle)
+{
+    bool ret = helper->read_wasm_file("composite_string_params.component.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] =
+        "public-component-call-nested-lower-relift-mixed-composite-param";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    const int32_t source_func_idx = find_top_level_export_sort_index(
+        (WASMComponentModule *)module, "mixed-list-param", WASM_COMP_SORT_FUNC);
+    WASMComponentFuncType *source_func_type = lookup_top_level_exported_canon_func_type(
+        (WASMComponentModule *)module, "mixed-list-param");
+    ASSERT_GE(source_func_idx, 0);
+    ASSERT_NE(source_func_type, nullptr);
+    ASSERT_TRUE(append_nested_component_lower_relift_sections_for_func(
+        (WASMComponentModule *)module, (uint32_t)source_func_idx, source_func_type));
+
+    wasm_module_inst_t module_inst =
+        instantiate_component_with_default_wasi(module, helper.get());
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_instance_t nested_instance =
+        wasm_runtime_lookup_component_instance(module_inst, "nested-lowered-instance");
+    ASSERT_NE(nested_instance, nullptr);
+
+    wasm_component_instance_t wrapped_instance =
+        wasm_component_instance_lookup_instance(nested_instance, "wrapped-instance");
+    ASSERT_NE(wrapped_instance, nullptr);
+
+    wasm_component_func_t func =
+        wasm_component_instance_lookup_function(wrapped_instance, "wrapped");
+    ASSERT_NE(func, nullptr);
+
+    const uint8_t nested_bytes[] = { 0xaa, 0xbb, 0xcc };
+    std::vector<uint8_t> payload;
+    wasm_component_value_t result = {};
+    int32_t decoded_result = 0;
+
+    append_component_s32_payload(&payload, 37);
+    append_component_string_payload(&payload, "abcde");
+    append_component_list_u8_payload(&payload, nested_bytes,
+                                     (uint32_t)sizeof(nested_bytes));
+
+    wasm_component_value_t arg =
+        make_component_list_u8_value(payload.data(), (uint32_t)payload.size());
+
+    ASSERT_TRUE(
+        wasm_runtime_call_component_values(module_inst, func, 1, &result, 1, &arg))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_TRUE(decode_component_s32_arg(&result, &decoded_result));
+    ASSERT_EQ(decoded_result, 45);
+
+    wasm_component_value_destroy(&result);
+    wasm_component_value_destroy(&arg);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestPublicComponentCallRejectsCompositeParamReliftOnRawApi)
+{
+    bool ret = helper->read_wasm_file("composite_string_params.component.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] =
+        "public-component-call-lower-relift-mixed-composite-param-raw-api";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    const int32_t source_func_idx = find_top_level_export_sort_index(
+        (WASMComponentModule *)module, "mixed-list-param", WASM_COMP_SORT_FUNC);
+    const int32_t source_type_idx = lookup_top_level_exported_canon_func_type_idx(
+        (WASMComponentModule *)module, "mixed-list-param");
+    ASSERT_GE(source_func_idx, 0);
+    ASSERT_GE(source_type_idx, 0);
+    ASSERT_TRUE(append_top_level_canon_lower_relift_export_sections_for_func(
+        (WASMComponentModule *)module, (uint32_t)source_func_idx,
+        (uint32_t)source_type_idx, "lowered-mixed-list-param"));
+
+    wasm_module_inst_t module_inst =
+        instantiate_component_with_default_wasi(module, helper.get());
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func = wasm_runtime_lookup_component_function(
+        module_inst, "lowered-mixed-list-param");
+    ASSERT_NE(func, nullptr);
+
+    wasm_val_t arg = {};
+    wasm_val_t result = {};
+    ASSERT_FALSE(
+        wasm_runtime_call_component(module_inst, func, 1, &result, 1, &arg));
+    ASSERT_NE(strstr(wasm_runtime_get_exception(module_inst),
+                     "call through the component value API"),
+              nullptr);
+
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestPublicComponentCallInvokesLowerReliftedMixedCompositeResultHandle)
+{
+    bool ret = helper->read_wasm_file("composite_string_results.component.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "public-component-call-lower-relift-mixed-composite-result";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    const int32_t source_func_idx = find_top_level_export_sort_index(
+        (WASMComponentModule *)module, "mixed-list-result", WASM_COMP_SORT_FUNC);
+    const int32_t source_type_idx = lookup_top_level_exported_canon_func_type_idx(
+        (WASMComponentModule *)module, "mixed-list-result");
+    ASSERT_GE(source_func_idx, 0);
+    ASSERT_GE(source_type_idx, 0);
+    ASSERT_TRUE(append_top_level_canon_lower_relift_export_sections_for_func(
+        (WASMComponentModule *)module, (uint32_t)source_func_idx,
+        (uint32_t)source_type_idx, "lowered-mixed-list-result"));
+
+    wasm_module_inst_t module_inst =
+        instantiate_component_with_default_wasi(module, helper.get());
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func = wasm_runtime_lookup_component_function(
+        module_inst, "lowered-mixed-list-result");
+    ASSERT_NE(func, nullptr);
+
+    const uint8_t payload_bytes[] = { 0xaa, 0xbb, 0xcc };
+    std::vector<uint8_t> expected_payload;
+    wasm_component_value_t first_result = {};
+    wasm_component_value_t second_result = {};
+
+    append_component_s32_payload(&expected_payload, 7);
+    append_component_string_payload(&expected_payload, "hybrid");
+    append_component_list_u8_payload(&expected_payload, payload_bytes,
+                                     (uint32_t)sizeof(payload_bytes));
+
+    ASSERT_TRUE(wasm_runtime_call_component_values(module_inst, func, 1,
+                                                   &first_result, 0, nullptr))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(first_result.type.kind, WASM_COMPONENT_VALUE_TYPE_DEFINED);
+    ASSERT_EQ(first_result.byte_size, expected_payload.size());
+    ASSERT_EQ(memcmp(wasm_component_value_get_data(&first_result),
+                     expected_payload.data(), expected_payload.size()),
+              0);
+
+    ASSERT_TRUE(wasm_runtime_call_component_values(module_inst, func, 1,
+                                                   &second_result, 0, nullptr))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(second_result.type.kind, WASM_COMPONENT_VALUE_TYPE_DEFINED);
+    ASSERT_EQ(second_result.byte_size, expected_payload.size());
+    ASSERT_EQ(memcmp(wasm_component_value_get_data(&second_result),
+                     expected_payload.data(), expected_payload.size()),
+              0);
+    ASSERT_EQ(memcmp(wasm_component_value_get_data(&first_result),
+                     expected_payload.data(), expected_payload.size()),
+              0);
+
+    wasm_component_value_destroy(&second_result);
+    wasm_component_value_destroy(&first_result);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestPublicComponentCallInvokesNestedLowerReliftedMixedCompositeResultHandle)
+{
+    bool ret = helper->read_wasm_file("composite_string_results.component.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] =
+        "public-component-call-nested-lower-relift-mixed-composite-result";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    const int32_t source_func_idx = find_top_level_export_sort_index(
+        (WASMComponentModule *)module, "mixed-list-result", WASM_COMP_SORT_FUNC);
+    WASMComponentFuncType *source_func_type = lookup_top_level_exported_canon_func_type(
+        (WASMComponentModule *)module, "mixed-list-result");
+    ASSERT_GE(source_func_idx, 0);
+    ASSERT_NE(source_func_type, nullptr);
+    ASSERT_TRUE(append_nested_component_lower_relift_sections_for_func(
+        (WASMComponentModule *)module, (uint32_t)source_func_idx, source_func_type));
+
+    wasm_module_inst_t module_inst =
+        instantiate_component_with_default_wasi(module, helper.get());
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_instance_t nested_instance =
+        wasm_runtime_lookup_component_instance(module_inst, "nested-lowered-instance");
+    ASSERT_NE(nested_instance, nullptr);
+
+    wasm_component_instance_t wrapped_instance =
+        wasm_component_instance_lookup_instance(nested_instance, "wrapped-instance");
+    ASSERT_NE(wrapped_instance, nullptr);
+
+    wasm_component_func_t func =
+        wasm_component_instance_lookup_function(wrapped_instance, "wrapped");
+    ASSERT_NE(func, nullptr);
+
+    const uint8_t payload_bytes[] = { 0xaa, 0xbb, 0xcc };
+    std::vector<uint8_t> expected_payload;
+    wasm_component_value_t result = {};
+
+    append_component_s32_payload(&expected_payload, 7);
+    append_component_string_payload(&expected_payload, "hybrid");
+    append_component_list_u8_payload(&expected_payload, payload_bytes,
+                                     (uint32_t)sizeof(payload_bytes));
+
+    ASSERT_TRUE(
+        wasm_runtime_call_component_values(module_inst, func, 1, &result, 0, nullptr))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(result.type.kind, WASM_COMPONENT_VALUE_TYPE_DEFINED);
+    ASSERT_EQ(result.byte_size, expected_payload.size());
+    ASSERT_EQ(memcmp(wasm_component_value_get_data(&result), expected_payload.data(),
+                     expected_payload.size()),
+              0);
+
+    wasm_component_value_destroy(&result);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestPublicComponentCallRejectsLowerReliftWithOuterLiftCanonOptions)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "public-component-call-lower-relift-outer-lift-opts";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(
+        append_component_export_alias_sections((WASMComponentModule *)module));
+    ASSERT_TRUE(append_top_level_canon_lower_relift_export_sections(
+        (WASMComponentModule *)module, "lowered-add-with-outer-opts"));
+
+    auto *canon_section =
+        &((WASMComponentModule *)module)
+             ->component.sections[((WASMComponentModule *)module)
+                                      ->component.section_count
+                                  - 2];
+    WASMComponentCanon *relift_canon =
+        canon_section->id == WASM_COMP_SECTION_CANONS
+                && canon_section->parsed.canon_section
+                && canon_section->parsed.canon_section->count >= 2
+            ? &canon_section->parsed.canon_section->canons[1]
+            : nullptr;
+    ASSERT_NE(relift_canon, nullptr);
+    ASSERT_TRUE(ensure_canon_lift_memory_opt(relift_canon, 0));
+
+    wasm_module_inst_t module_inst =
+        instantiate_component_with_default_wasi(module, helper.get());
+    ASSERT_EQ(module_inst, nullptr);
+    ASSERT_NE(strstr(helper->error_buf,
+                     "synthetic lift(lower(f)) does not support outer lift canon "
+                     "options"),
+              nullptr);
+
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestPublicComponentCallRejectsReliftedUnsupportedCompositeResultLeaf)
+{
+    bool ret = helper->read_wasm_file("composite_string_results.component.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] =
+        "public-component-call-lower-relift-unsupported-composite-result-leaf";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    const int32_t source_func_idx = find_top_level_export_sort_index(
+        (WASMComponentModule *)module, "nested-list-result", WASM_COMP_SORT_FUNC);
+    const int32_t source_type_idx = lookup_top_level_exported_canon_func_type_idx(
+        (WASMComponentModule *)module, "nested-list-result");
+    WASMComponentFuncType *func_type = lookup_top_level_exported_canon_func_type(
+        (WASMComponentModule *)module, "nested-list-result");
+    ASSERT_GE(source_func_idx, 0);
+    ASSERT_GE(source_type_idx, 0);
+    ASSERT_NE(func_type, nullptr);
+    ASSERT_NE(func_type->results, nullptr);
+    ASSERT_NE(func_type->results->results, nullptr);
+
+    const int32_t list_type_idx = append_component_list_type(
+        (WASMComponentModule *)module, WASM_COMP_PRIMVAL_S32, false, 0);
+    ASSERT_GE(list_type_idx, 0);
+    const int32_t record_type_idx = append_component_record_type(
+        (WASMComponentModule *)module,
+        { { "payload",
+            make_component_type_index_value_type((uint32_t)list_type_idx) } });
+    ASSERT_GE(record_type_idx, 0);
+    func_type->results->results->type = WASM_COMP_VAL_TYPE_IDX;
+    func_type->results->results->type_specific.type_idx =
+        (uint32_t)record_type_idx;
+
+    ASSERT_TRUE(append_top_level_canon_lower_relift_export_sections_for_func(
+        (WASMComponentModule *)module, (uint32_t)source_func_idx,
+        (uint32_t)source_type_idx, "lowered-unsupported-nested-list-result"));
+
+    wasm_module_inst_t module_inst =
+        instantiate_component_with_default_wasi(module, helper.get());
+    ASSERT_EQ(module_inst, nullptr);
+    ASSERT_NE(strstr(helper->error_buf,
+                     "component canon lift function result 0 only supports "
+                     "variable-length list<u8> leaves inside"),
               nullptr);
 
     wasm_runtime_unload(module);

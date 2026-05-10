@@ -2829,6 +2829,11 @@ validate_synthetic_lowered_relift_opts(const WASMComponentRuntimeFunc *function,
     if (!component_canon_lift_uses_lowered_core_func(function))
         return true;
 
+    if (function->canon_opts && function->canon_opts->canon_opts_count > 0)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "synthetic lift(lower(f)) does not support outer lift canon options");
+
     lowered_function = function->core_func_ref.of.lowered_function;
     if (!lowered_function || !lowered_function->canon_opts
         || lowered_function->canon_opts->canon_opts_count == 0)
