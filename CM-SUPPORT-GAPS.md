@@ -14,7 +14,7 @@ The main remaining gaps are now centered on:
   supported tuple-record slices
 - broader canon-lower / imported component-function lowering paths
 - broader composite component values and memory-backed leaves inside composites
-- operational resource semantics
+- broader operational resource semantics
 - remaining public host API limitations
 - nested core-instance / core-type runtime support
 
@@ -22,7 +22,7 @@ The main remaining gaps are now centered on:
 
 The implementation is now best described as:
 
-> **A partial but executable component runtime: top-level component loading/instantiation, public import/export APIs, scalar / UTF-8 string / `list<scalar>` / limited tuple-record canon-lift calls, a narrow direct-core-call `canon lower` seam for scalar signatures plus top-level UTF-8 string / `list<scalar>` params/results on the specifically tested memory-backed path, host-provided component-function imports for the currently supported subset, runtime values, value imports/exports, start execution slices, and resource bookkeeping foundations are all present.**
+> **A partial but executable component runtime: top-level component loading/instantiation, public import/export APIs, scalar / UTF-8 string / `list<scalar>` / limited tuple-record canon-lift calls, a narrow direct-core-call `canon lower` seam for scalar signatures plus top-level UTF-8 string / `list<scalar>` params/results on the specifically tested memory-backed path, host-provided component-function imports for the currently supported subset, runtime values, value imports/exports, start execution slices, and a narrow executable resource-builtin seam are all present.**
 
 ### 1.1 Top-level component loading, instantiation, and teardown
 
@@ -237,7 +237,7 @@ This support is still intentionally narrow:
 - at most one result
 - execution routes through supported canon-lift function shapes
 
-### 1.8 Resource bookkeeping foundations exist
+### 1.8 Narrow executable resource builtin support exists
 
 Resources are no longer only parser/validator structure.
 
@@ -248,9 +248,14 @@ The runtime now includes:
 - canonical resource-type bookkeeping
 - owned handle tables
 - owned-handle creation/drop helpers
+- executable `canon resource.new` / `canon resource.drop` / `canon resource.rep`
+  when a child core module imports those builtins
+- the first proven operational subset for those builtins:
+  locally-defined resource types only, `rep i32` only, no declared destructors,
+  no async drop, no imported/aliased resource types
 - finalizer cleanup during deinstantiation
 
-This is a real runtime substrate, but not yet full resource semantics.
+This is now a real but narrow operational slice, not yet full resource semantics.
 
 ### 1.9 Test coverage reflects the runtime work
 
@@ -272,6 +277,8 @@ This is a real runtime substrate, but not yet full resource semantics.
   supported tuple-record parameter and result slices with scalar, UTF-8 string,
   and nested `list<scalar>` leaves
 - resource-state and owned-handle cleanup foundations
+- direct child-core execution of the narrow `canon resource.new` /
+  `canon resource.rep` / `canon resource.drop` subset
 
 ## 2. What is still missing for full component-model support
 
@@ -433,7 +440,8 @@ Current limitations include:
   metadata; broader componenttype matching is still unsupported
 - host-import tuple/record values are still limited to the current scalar /
   UTF-8 string / nested `list<scalar>` / `list<string>` subset
-- there is still no public resource import/export contract comparable to the current function/value/instance/component/core-module surface
+- there is still no public resource import/export contract comparable to the
+  current function/value/instance/component/core-module surface
 
 ## 5. Broader component values are still missing
 
@@ -477,15 +485,17 @@ Still missing:
 - Canonical ABI beyond the current supported public-value subset
 - the more complete execution space needed for start-heavy real-world components
 
-## 7. Resources are structural/bookkeeping-heavy, not operational
+## 7. Resources now have a narrow operational slice, not full semantics
 
-Resource support has meaningful runtime foundations now, but the operational model is still incomplete.
+Resource support is no longer purely structural, but the operational model is still incomplete.
 
 What exists:
 
 - resource type bookkeeping
 - alias/import tracking
 - owned handle allocation/drop helpers
+- executable child-core `canon resource.new` / `canon resource.rep` /
+  `canon resource.drop` for the tested locally-defined `rep i32` subset
 - deinstantiate-time cleanup/finalization
 
 What is still missing:
@@ -494,10 +504,10 @@ What is still missing:
 - live Canonical ABI resource lowering/lifting
 - resource imports/exports as a complete public host feature
 - runtime enforcement of richer resource lifecycle rules
-- integration with callable component APIs
+- public resource-aware callable component APIs
 - full trap/failure-path operational cleanup semantics
 
-So resources have a foundation, not a finished runtime.
+So resources now have a narrow executable seam, not a finished runtime.
 
 ## 8. Nested core runtime support is still incomplete
 

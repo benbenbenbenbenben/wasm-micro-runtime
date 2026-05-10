@@ -498,6 +498,7 @@ collect_component_runtime_alloc_counts(const WASMComponent *component,
                         case WASM_COMP_CANON_RESOURCE_DROP_ASYNC:
                         case WASM_COMP_CANON_RESOURCE_REP:
                             counts->core_func_count++;
+                            counts->lowered_func_count++;
                             break;
                         default:
                             break;
@@ -1970,9 +1971,9 @@ component_valkind_matches_core_type(wasm_valkind_t kind, uint8 core_type)
 
 static bool
 set_component_runtime_error_from_exception(WASMComponentInstance *inst,
-                                          char *error_buf,
-                                          uint32 error_buf_size,
-                                          const char *fallback)
+                                           char *error_buf,
+                                           uint32 error_buf_size,
+                                           const char *fallback)
 {
     const char *exception =
         inst ? wasm_runtime_get_exception((WASMModuleInstanceCommon *)inst) : NULL;
@@ -1982,6 +1983,71 @@ set_component_runtime_error_from_exception(WASMComponentInstance *inst,
     if (inst)
         wasm_runtime_clear_exception((WASMModuleInstanceCommon *)inst);
     return false;
+}
+
+static void
+resource_builtin_rep_noop_finalizer(void *data, void *ctx)
+{
+    (void)data;
+    (void)ctx;
+}
+
+static bool
+prepare_resource_builtin_function(
+    WASMComponentRuntimeFunc *func, WASMComponentCanonType canon_tag,
+    uint32 resource_type_idx, WASMComponentRuntimeResourceState *resource_state,
+    WASMComponentInstance *owner_instance,
+    const WASMComponent *type_owner_component, char *error_buf,
+    uint32 error_buf_size)
+{
+    const WASMComponentRuntimeResourceType *resource_type =
+        wasm_component_resource_lookup_runtime_type_const(resource_state,
+                                                         resource_type_idx);
+
+    if (!func || !resource_state)
+    {
+        set_component_runtime_error(
+            error_buf, error_buf_size,
+            "component resource builtin is missing its runtime resource state");
+        return false;
+    }
+
+    if (canon_tag == WASM_COMP_CANON_RESOURCE_DROP_ASYNC)
+    {
+        set_component_runtime_error(
+            error_buf, error_buf_size,
+            "component canon resource.drop async is not supported");
+        return false;
+    }
+
+    if (!resource_type)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "component resource builtin uses unresolved resource type index %u",
+            resource_type_idx);
+
+    if (resource_type->kind != WASM_COMP_RUNTIME_RESOURCE_TYPE_LOCAL)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "component resource builtins currently only support locally-defined "
+            "resource types (type index %u)",
+            resource_type_idx);
+
+    if (resource_type->has_dtor)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "component resource builtins currently do not support destructors "
+            "(type index %u)",
+            resource_type_idx);
+
+    memset(func, 0, sizeof(*func));
+    func->kind = WASM_COMP_RUNTIME_FUNC_RESOURCE_BUILTIN;
+    func->canon_tag = canon_tag;
+    func->resource_type_idx = resource_type_idx;
+    func->owner_instance = owner_instance;
+    func->resource_state = resource_state;
+    func->type_owner_component = type_owner_component;
+    return true;
 }
 
 static bool
@@ -2023,6 +2089,53 @@ validate_lowered_import_signature(
     bool has_memory_opt = false;
     WASMComponentRuntimeStringEncoding string_encoding =
         WASM_COMP_RUNTIME_STRING_ENCODING_NONE;
+
+    if (lowered_function
+        && lowered_function->kind == WASM_COMP_RUNTIME_FUNC_RESOURCE_BUILTIN) {
+        if (!expected_type)
+        {
+            set_component_runtime_error(
+                error_buf, error_buf_size,
+                "component resource builtin could not resolve the active import "
+                "signature");
+            return false;
+        }
+
+        switch (lowered_function->canon_tag) {
+            case WASM_COMP_CANON_RESOURCE_NEW:
+            case WASM_COMP_CANON_RESOURCE_REP:
+                if (expected_type->param_count != 1 || expected_type->result_count != 1
+                    || expected_type->types[0] != VALUE_TYPE_I32
+                    || expected_type->types[1] != VALUE_TYPE_I32)
+                    return set_component_runtime_error_fmt(
+                        error_buf, error_buf_size,
+                        "component resource builtin %u requires an i32 -> i32 "
+                        "core import signature",
+                        (uint32)lowered_function->canon_tag);
+                return true;
+            case WASM_COMP_CANON_RESOURCE_DROP:
+                if (expected_type->param_count != 1 || expected_type->result_count != 0
+                    || expected_type->types[0] != VALUE_TYPE_I32)
+                {
+                    set_component_runtime_error(
+                        error_buf, error_buf_size,
+                        "component canon resource.drop requires an i32 -> () "
+                        "core import signature");
+                    return false;
+                }
+                return true;
+            case WASM_COMP_CANON_RESOURCE_DROP_ASYNC:
+                set_component_runtime_error(
+                    error_buf, error_buf_size,
+                    "component canon resource.drop async is not supported");
+                return false;
+            default:
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "unsupported component resource builtin tag %u",
+                    (uint32)lowered_function->canon_tag);
+        }
+    }
 
     if (!lowered_function || !lowered_function->lowered_target)
         return set_component_runtime_error_fmt(
@@ -2529,6 +2642,78 @@ validate_lowered_import_composite_param_signature(
 }
 
 static void
+component_resource_builtin_trampoline(WASMModuleInstanceCommon *caller_module_inst,
+                                      WASMComponentRuntimeFunc *resource_function,
+                                      const WASMFuncType *func_type,
+                                      uint64 *raw_args)
+{
+    const WASMComponentRuntimeResourceType *resource_type;
+    WASMComponentResourceHandleEntry *entry;
+    uint32 handle = 0;
+    uint32 rep = 0;
+    char error_buf[128] = { 0 };
+
+    if (!caller_module_inst || !resource_function || !func_type || !raw_args)
+        return;
+    (void)func_type;
+
+    resource_type = wasm_component_resource_lookup_runtime_type_const(
+        resource_function->resource_state, resource_function->resource_type_idx);
+    if (!resource_type || resource_type->kind != WASM_COMP_RUNTIME_RESOURCE_TYPE_LOCAL) {
+        wasm_runtime_set_exception(
+            caller_module_inst,
+            "component resource builtin could not resolve a supported local "
+            "resource type");
+        return;
+    }
+
+    switch (resource_function->canon_tag) {
+        case WASM_COMP_CANON_RESOURCE_NEW:
+            rep = (uint32)raw_args[0];
+            if (!wasm_component_resource_create_owned_handle(
+                    resource_function->resource_state,
+                    resource_function->resource_type_idx, (void *)(uintptr_t)rep,
+                    resource_builtin_rep_noop_finalizer, NULL, &handle, error_buf,
+                    (uint32)sizeof(error_buf))) {
+                wasm_runtime_set_exception(caller_module_inst, error_buf);
+                return;
+            }
+            raw_args[0] = handle;
+            return;
+        case WASM_COMP_CANON_RESOURCE_DROP:
+            handle = (uint32)raw_args[0];
+            if (!wasm_component_resource_drop_owned_handle(
+                    resource_function->resource_state,
+                    resource_function->resource_type_idx, handle, error_buf,
+                    (uint32)sizeof(error_buf))) {
+                wasm_runtime_set_exception(caller_module_inst, error_buf);
+                return;
+            }
+            return;
+        case WASM_COMP_CANON_RESOURCE_REP:
+            handle = (uint32)raw_args[0];
+            if (handle == 0 || handle - 1 >= resource_type->handle_table.entry_count) {
+                wasm_runtime_set_exception(
+                    caller_module_inst, "component resource handle is invalid");
+                return;
+            }
+            entry = &resource_type->handle_table.entries[handle - 1];
+            if (!entry->is_live || !entry->is_owned) {
+                wasm_runtime_set_exception(
+                    caller_module_inst,
+                    "component resource handle is not an owned live handle");
+                return;
+            }
+            raw_args[0] = (uint32)(uintptr_t)entry->data;
+            return;
+        default:
+            wasm_runtime_set_exception(caller_module_inst,
+                                       "unsupported component resource builtin");
+            return;
+    }
+}
+
+static void
 component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
 {
     WASMModuleInstanceCommon *caller_module_inst;
@@ -2558,7 +2743,7 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
         wasm_runtime_get_function_attachment(exec_env);
     lowered_function = attachment ? attachment->lowered_function : NULL;
     func_type = attachment ? attachment->func_type : NULL;
-    if (!caller_module_inst || !lowered_function || !lowered_function->lowered_target)
+    if (!caller_module_inst || !lowered_function)
         return;
     if (!func_type) {
         wasm_runtime_set_exception(
@@ -2567,6 +2752,13 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
             "active import signature");
         return;
     }
+    if (lowered_function->kind == WASM_COMP_RUNTIME_FUNC_RESOURCE_BUILTIN) {
+        component_resource_builtin_trampoline(caller_module_inst, lowered_function,
+                                             func_type, raw_args);
+        return;
+    }
+    if (!lowered_function->lowered_target)
+        return;
     lower_string_encoding = resolve_lowered_import_string_encoding(lowered_function);
 
     component_inst = lowered_function->owner_instance;
@@ -3676,11 +3868,18 @@ bind_component_core_instance_import_args(
                     ref.of.lowered_function, import->func_type, error_buf,
                     error_buf_size))
                 return false;
-            if (!resolve_lowered_import_canon_memory(ref.of.lowered_function,
-                                                     module_inst,
-                                                     &attachment->canon_memory_ref,
-                                                     error_buf, error_buf_size))
-                return false;
+            if (ref.of.lowered_function->kind
+                != WASM_COMP_RUNTIME_FUNC_RESOURCE_BUILTIN) {
+                if (!resolve_lowered_import_canon_memory(ref.of.lowered_function,
+                                                         module_inst,
+                                                         &attachment->canon_memory_ref,
+                                                         error_buf,
+                                                         error_buf_size))
+                    return false;
+            }
+            else
+                memset(&attachment->canon_memory_ref, 0,
+                       sizeof(attachment->canon_memory_ref));
 
             import->func_ptr_linked = component_lowered_import_trampoline;
             import->signature = NULL;
@@ -11403,10 +11602,29 @@ append_component_canon_function(WASMComponentInstance *inst,
              || canon->tag == WASM_COMP_CANON_RESOURCE_DROP
              || canon->tag == WASM_COMP_CANON_RESOURCE_DROP_ASYNC
              || canon->tag == WASM_COMP_CANON_RESOURCE_REP) {
+        uint32 resource_type_idx =
+            canon->tag == WASM_COMP_CANON_RESOURCE_NEW
+                ? canon->canon_data.resource_new.resource_type_idx
+                : (canon->tag == WASM_COMP_CANON_RESOURCE_REP
+                       ? canon->canon_data.resource_rep.resource_type_idx
+                       : canon->canon_data.resource_drop.resource_type_idx);
+
+        if (inst->lowered_func_count >= UINT32_MAX
+            || inst->core_func_count >= UINT32_MAX)
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size, "too many component resource builtins");
+
+        func = &inst->lowered_funcs[inst->lowered_func_count++];
+        if (!prepare_resource_builtin_function(
+                func, canon->tag, resource_type_idx, inst->resource_state, inst,
+                &inst->module->component, error_buf, error_buf_size))
+            return false;
+
         memset(&inst->core_funcs[inst->core_func_count], 0,
                sizeof(inst->core_funcs[inst->core_func_count]));
         inst->core_funcs[inst->core_func_count].type =
-            WASM_COMP_CORE_RUNTIME_REF_FUNC;
+            WASM_COMP_CORE_RUNTIME_REF_LOWERED_FUNC;
+        inst->core_funcs[inst->core_func_count].of.lowered_function = func;
         inst->core_func_count++;
     }
     else {
@@ -11498,10 +11716,32 @@ append_nested_component_canon(
         case WASM_COMP_CANON_RESOURCE_DROP:
         case WASM_COMP_CANON_RESOURCE_DROP_ASYNC:
         case WASM_COMP_CANON_RESOURCE_REP:
+        {
+            uint32 resource_type_idx =
+                canon->tag == WASM_COMP_CANON_RESOURCE_NEW
+                    ? canon->canon_data.resource_new.resource_type_idx
+                    : (canon->tag == WASM_COMP_CANON_RESOURCE_REP
+                           ? canon->canon_data.resource_rep.resource_type_idx
+                           : canon->canon_data.resource_drop.resource_type_idx);
+
+            if (runtime_inst->owned_lowered_func_count >= UINT32_MAX)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "too many nested component resource builtins");
+
+            func = &runtime_inst->owned_lowered_funcs
+                        [runtime_inst->owned_lowered_func_count++];
+            if (!prepare_resource_builtin_function(
+                    func, canon->tag, resource_type_idx, runtime_inst->resource_state,
+                    inst, component, error_buf, error_buf_size))
+                return false;
+
             memset(&core_ref, 0, sizeof(core_ref));
-            core_ref.type = WASM_COMP_CORE_RUNTIME_REF_FUNC;
+            core_ref.type = WASM_COMP_CORE_RUNTIME_REF_LOWERED_FUNC;
+            core_ref.of.lowered_function = func;
             return append_nested_component_local_core_func(bindings, core_ref, error_buf,
                                                            error_buf_size);
+        }
         default:
             if (runtime_inst->owned_func_count >= UINT32_MAX)
                 return set_component_runtime_error_fmt(
@@ -11709,6 +11949,7 @@ count_nested_component_local_bindings(const WASMComponent *nested_component,
                         case WASM_COMP_CANON_RESOURCE_DROP_ASYNC:
                         case WASM_COMP_CANON_RESOURCE_REP:
                             (*core_func_count)++;
+                            (*owned_lowered_func_count)++;
                             break;
                         default:
                             (*func_count)++;

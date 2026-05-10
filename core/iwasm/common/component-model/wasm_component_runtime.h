@@ -64,6 +64,7 @@ typedef enum WASMComponentRuntimeFuncKind {
     WASM_COMP_RUNTIME_FUNC_LIFT = 0,
     WASM_COMP_RUNTIME_FUNC_HOST_IMPORT,
     WASM_COMP_RUNTIME_FUNC_LOWER,
+    WASM_COMP_RUNTIME_FUNC_RESOURCE_BUILTIN,
     WASM_COMP_RUNTIME_FUNC_UNSUPPORTED_CANON
 } WASMComponentRuntimeFuncKind;
 
@@ -85,7 +86,9 @@ typedef struct WASMComponentRuntimeFunc {
     WASMComponentRuntimeFuncKind kind;
     WASMComponentCanonType canon_tag;
     uint32 type_idx;
+    uint32 resource_type_idx;
     struct WASMComponentInstance *owner_instance;
+    WASMComponentRuntimeResourceState *resource_state;
     const WASMComponent *type_owner_component;
     struct WASMComponentRuntimeFunc *lowered_target;
     WASMComponentCanonOpts *canon_opts;
