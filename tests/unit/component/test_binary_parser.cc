@@ -12730,6 +12730,138 @@ TEST_F(BinaryParserTest,
 }
 
 TEST_F(BinaryParserTest,
+       TestCoreWasmCanCallLoweredMixedCompositeResultComponentFunctionDirectly)
+{
+    bool ret = helper->read_wasm_file("composite_string_results.component.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "core-wasm-calls-lowered-mixed-composite-result";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    const int32_t source_func_idx = find_top_level_export_sort_index(
+        (WASMComponentModule *)module, "mixed-list-result", WASM_COMP_SORT_FUNC);
+    ASSERT_GE(source_func_idx, 0);
+    ASSERT_TRUE(append_top_level_lowered_core_caller_sections_for_func(
+        (WASMComponentModule *)module, (uint32_t)source_func_idx,
+        "lowered_core_mixed_list_result_caller.wasm", "source"));
+    WASMComponentCanon *lower_canon =
+        find_first_canon_lower((WASMComponentModule *)module);
+    ASSERT_NE(lower_canon, nullptr);
+    ASSERT_TRUE(ensure_canon_lower_memory_opt(lower_canon, 0));
+    ASSERT_TRUE(ensure_canon_lower_string_utf8_opt(lower_canon));
+
+    const int32_t wrapper_type_idx = append_component_scalar_func_type(
+        (WASMComponentModule *)module, {}, WASM_COMP_PRIMVAL_S32);
+    ASSERT_GE(wrapper_type_idx, 0);
+    WASMComponentFuncType *wrapper_type = lookup_local_component_func_type(
+        (WASMComponentModule *)module, (uint32_t)wrapper_type_idx);
+    ASSERT_NE(wrapper_type, nullptr);
+    if (!wrapper_type->params) {
+        wrapper_type->params = (WASMComponentParamList *)wasm_runtime_malloc(
+            sizeof(WASMComponentParamList));
+        ASSERT_NE(wrapper_type->params, nullptr);
+        memset(wrapper_type->params, 0, sizeof(WASMComponentParamList));
+    }
+    ASSERT_TRUE(append_top_level_core_export_lift_sections(
+        (WASMComponentModule *)module,
+        count_top_level_core_instance_entries(&((WASMComponentModule *)module)
+                                                   ->component)
+            - 1,
+        "call-source-sum", (uint32_t)wrapper_type_idx,
+        "core-caller-mixed-list-result"));
+
+    wasm_module_inst_t module_inst =
+        instantiate_component_with_default_wasi(module, helper.get());
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func = wasm_runtime_lookup_component_function(
+        module_inst, "core-caller-mixed-list-result");
+    ASSERT_NE(func, nullptr);
+
+    wasm_val_t results[1] = {};
+    ASSERT_TRUE(wasm_runtime_call_component(module_inst, func, 1, results, 0,
+                                            nullptr))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(results[0].kind, WASM_I32);
+    ASSERT_EQ(results[0].of.i32, 16);
+
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestCoreWasmLoweredMixedCompositeResultDirectCallRejectsOobResultArea)
+{
+    bool ret = helper->read_wasm_file("composite_string_results.component.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "core-wasm-calls-lowered-mixed-composite-result-oob";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    const int32_t source_func_idx = find_top_level_export_sort_index(
+        (WASMComponentModule *)module, "mixed-list-result", WASM_COMP_SORT_FUNC);
+    ASSERT_GE(source_func_idx, 0);
+    ASSERT_TRUE(append_top_level_lowered_core_caller_sections_for_func(
+        (WASMComponentModule *)module, (uint32_t)source_func_idx,
+        "lowered_core_mixed_list_result_caller.wasm", "source"));
+    WASMComponentCanon *lower_canon =
+        find_first_canon_lower((WASMComponentModule *)module);
+    ASSERT_NE(lower_canon, nullptr);
+    ASSERT_TRUE(ensure_canon_lower_memory_opt(lower_canon, 0));
+    ASSERT_TRUE(ensure_canon_lower_string_utf8_opt(lower_canon));
+
+    const int32_t wrapper_type_idx = append_component_scalar_func_type(
+        (WASMComponentModule *)module, {}, WASM_COMP_PRIMVAL_S32);
+    ASSERT_GE(wrapper_type_idx, 0);
+    WASMComponentFuncType *wrapper_type = lookup_local_component_func_type(
+        (WASMComponentModule *)module, (uint32_t)wrapper_type_idx);
+    ASSERT_NE(wrapper_type, nullptr);
+    if (!wrapper_type->params) {
+        wrapper_type->params = (WASMComponentParamList *)wasm_runtime_malloc(
+            sizeof(WASMComponentParamList));
+        ASSERT_NE(wrapper_type->params, nullptr);
+        memset(wrapper_type->params, 0, sizeof(WASMComponentParamList));
+    }
+    ASSERT_TRUE(append_top_level_core_export_lift_sections(
+        (WASMComponentModule *)module,
+        count_top_level_core_instance_entries(&((WASMComponentModule *)module)
+                                                   ->component)
+            - 1,
+        "call-source-oob", (uint32_t)wrapper_type_idx,
+        "core-caller-mixed-list-result-oob"));
+
+    wasm_module_inst_t module_inst =
+        instantiate_component_with_default_wasi(module, helper.get());
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func = wasm_runtime_lookup_component_function(
+        module_inst, "core-caller-mixed-list-result-oob");
+    ASSERT_NE(func, nullptr);
+
+    wasm_val_t results[1] = {};
+    ASSERT_FALSE(wasm_runtime_call_component(module_inst, func, 1, results, 0,
+                                             nullptr));
+    ASSERT_NE(strstr(wasm_runtime_get_exception(module_inst),
+                     "out of bounds memory access"),
+              nullptr);
+
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
        TestCoreWasmDirectLowerCallRejectsNonScalarLoweredComponentFunction)
 {
     bool ret = helper->read_wasm_file("composite_string_params.component.wasm");

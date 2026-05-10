@@ -153,6 +153,8 @@ What works today:
   - scalar-only parameters/results
   - top-level tuple/record parameters with scalar, nested UTF-8 string, and
     nested `list<scalar>` leaves
+  - top-level tuple/record results with scalar, nested UTF-8 string, and nested
+    `list<scalar>` leaves through the tested explicit i32 return-area pointer path
   - UTF-8 string parameters/results through i32 pointer/length pairs plus an
     explicit i32 return-area pointer
   - `list<scalar>` parameters with scalar results
@@ -294,6 +296,8 @@ The executable Canonical ABI surface is currently limited to:
   - scalar parameters/results
   - top-level tuple/record parameters over the tested scalar / UTF-8 string /
     nested `list<scalar>` leaf subset with scalar results
+  - top-level tuple/record results over that same supported leaf subset through
+    the tested `(param i32) -> ()` return-area path
   - UTF-8 string parameters/results through the tested `(param i32 i32 i32) -> ()`
     direct return-area path
   - `list<scalar>` parameters with scalar results
@@ -323,9 +327,9 @@ Major Canonical ABI gaps remain:
   `list<scalar>`-parameter / `list<scalar>`-result /
   tuple/record-parameter / record-result / tuple/mixed-composite-result
   synthetic re-lifts above
-- no executable lower path yet for direct tuple/record results; only the tested
-  direct tuple/record **parameter** subset is currently real on the non-synthetic
-  path
+- no executable lower path yet for direct tuple/record results beyond the tested
+  top-level memory-backed return-area path over the current scalar / UTF-8 string
+  / nested `list<scalar>` leaf subset
 - no executable lower path yet for broader nested composite lowering shapes beyond
   the tested scalar / UTF-8 string / nested `list<scalar>` tuple-record subset
 - no list marshalling beyond UTF-8 strings, top-level `list<scalar>`, and nested `list<scalar>` leaves in exported tuple/record values and host-import tuple/record parameters
