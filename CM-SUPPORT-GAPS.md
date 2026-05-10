@@ -418,7 +418,7 @@ Current limitations include:
 - typed function import matching now covers direct top-level bindings plus
   top-level, explicit cross-component `canon lift` runtime handles, and
   same-module plus cross-component nested typed `instance` import `func`
-  members for the current scalar / UTF-8 string / variable-length `list<u8>` /
+  members for the current scalar / UTF-8 string / variable-length `list<scalar>` /
   `list<string>` / tuple-record leaf subset; typed `instance` import matching is otherwise
   limited to exported `core module`, scalar / variable-length `list<scalar>` /
   `list<string>` /
