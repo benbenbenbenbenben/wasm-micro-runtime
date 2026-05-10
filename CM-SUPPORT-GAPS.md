@@ -349,14 +349,16 @@ Major Canonical ABI gaps remain:
   - the synthetic scalar / UTF-8 string / `list<scalar>`-parameter /
     `list<scalar>`-result / tuple/record-parameter / record-result /
     tuple/mixed-composite-result `lift(lower(f))` subset above, including
-    nested `list<string>` leaves on the mixed composite param/result paths
+    nested `list<scalar>` / `list<string>` leaves on the mixed composite
+    param/result paths
 - no general adapter/lowering path for imported component functions beyond the
   supported host-callback subset, the tested cross-component scalar / UTF-8
   string / `list<string>`-parameter / `list<string>`-result /
   `list<u8>`-parameter / `list<u8>`-result / `list<s32>`-parameter /
   `list<s32>`-result / mixed composite-param / mixed composite-result seams
-  above (including a nested `list<string>` leaf on the mixed composite param
-  and result paths), and the narrow direct core-call subset above
+  above (including nested `list<scalar>` / `list<string>` leaves on the mixed
+  composite param and result paths), and the narrow direct core-call subset
+  above
 - no executable lower path yet for memory-backed Canonical ABI shapes
   beyond the tested direct UTF-8-string parameter/result path, the tested
   direct top-level `list<string>` parameter and result paths, the tested nested
@@ -378,9 +380,9 @@ Major Canonical ABI gaps remain:
   the tested nested child-core UTF-8 string / `list<string>`-parameter /
   `list<string>`-result / `list<u8>`- and `list<s32>`-parameter /
   `list<scalar>`-result / mixed composite-param / mixed composite-result paths
-  (including a nested `list<string>` leaf on the mixed composite-param path)
-  and the tested scalar / UTF-8 string / nested `list<scalar>` tuple-record
-  subset
+  (including nested `list<scalar>` / `list<string>` leaves on the mixed
+  composite-param path) and the tested scalar / UTF-8 string / nested
+  `list<scalar>` tuple-record subset
 - no list marshalling beyond UTF-8 strings, the tested direct top-level and
   nested child-core `list<string>` parameter/result paths, the tested
   cross-component `list<string>` parameter/result seams, top-level
