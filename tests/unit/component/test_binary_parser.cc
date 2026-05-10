@@ -31011,6 +31011,188 @@ TEST_F(BinaryParserTest, TestRuntimeExecutesTopLevelStringStartSections)
     wasm_runtime_unload(module);
 }
 
+TEST_F(BinaryParserTest, TestRuntimeExecutesTopLevelListStringParamStartSections)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "runtime-top-level-list-string-param-start-sections";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    auto *component_module = (WASMComponentModule *)module;
+    ASSERT_TRUE(append_top_level_host_function_import_sections(
+        component_module, "host-list-string-param", "host-instance", "forwarded"));
+
+    const int32_t host_type_idx = append_component_scalar_func_type(
+        component_module, { WASM_COMP_PRIMVAL_S32 }, WASM_COMP_PRIMVAL_S32);
+    ASSERT_GE(host_type_idx, 0);
+    ASSERT_TRUE(configure_component_func_list_param_type(
+        component_module, (uint32_t)host_type_idx, 0, WASM_COMP_PRIMVAL_STRING,
+        false, 0, false));
+
+    auto *import_section =
+        find_component_section(component_module, WASM_COMP_SECTION_IMPORTS);
+    ASSERT_NE(import_section, nullptr);
+    ASSERT_NE(import_section->parsed.import_section, nullptr);
+    ASSERT_EQ(import_section->parsed.import_section->count, 1u);
+    ASSERT_NE(import_section->parsed.import_section->imports[0].extern_desc,
+              nullptr);
+    import_section->parsed.import_section->imports[0]
+        .extern_desc->extern_desc.func.type_idx = (uint32_t)host_type_idx;
+
+    WASMComponentFuncType *host_func_type =
+        lookup_local_component_func_type(component_module, (uint32_t)host_type_idx);
+    ASSERT_NE(host_func_type, nullptr);
+    ASSERT_NE(host_func_type->params, nullptr);
+    ASSERT_EQ(host_func_type->params->count, 1u);
+    ASSERT_NE(host_func_type->params->params[0].value_type, nullptr);
+
+    wasm_component_value_t arg_value =
+        make_component_list_string_value({ "hi", "hey" });
+    uint32_t start_args[] = { 0 };
+    ASSERT_TRUE(append_top_level_value_section_with_type_and_bytes(
+        component_module, *host_func_type->params->params[0].value_type,
+        (const uint8_t *)wasm_component_value_get_data(&arg_value),
+        arg_value.byte_size));
+    ASSERT_TRUE(append_top_level_start_section(component_module, 1, start_args, 1,
+                                               1));
+    ASSERT_TRUE(
+        append_top_level_value_export_section(component_module, "start-result", 1));
+
+    HostListStringScalarResultCallState call_state = {};
+    call_state.next_result = 2;
+    wasm_component_func_import_binding_t func_import = {};
+    func_import.name = "host-list-string-param";
+    func_import.callback = host_list_string_scalar_result_callback;
+    func_import.user_data = &call_state;
+
+    struct InstantiationArgs2 *inst_args = nullptr;
+    ASSERT_TRUE(wasm_runtime_instantiation_args_create(&inst_args));
+    wasm_runtime_instantiation_args_set_default_stack_size(inst_args,
+                                                           helper->stack_size);
+    wasm_runtime_instantiation_args_set_host_managed_heap_size(
+        inst_args, helper->heap_size);
+    wasm_runtime_instantiation_args_set_wasi_stdio(inst_args, 0, 1, 2);
+    wasm_runtime_instantiation_args_set_wasi_dir(inst_args, nullptr, 0, nullptr,
+                                                 0);
+    wasm_runtime_instantiation_args_set_component_func_imports(inst_args,
+                                                               &func_import, 1);
+
+    wasm_module_inst_t module_inst = wasm_runtime_instantiate_ex2(
+        module, inst_args, helper->error_buf,
+        (uint32_t)sizeof(helper->error_buf));
+    wasm_runtime_instantiation_args_destroy(inst_args);
+    wasm_component_value_destroy(&arg_value);
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+    ASSERT_EQ(call_state.call_count, 1);
+    ASSERT_EQ(call_state.last_arg, (std::vector<std::string>{ "hi", "hey" }));
+
+    wasm_component_value_t value = {};
+    int32_t decoded_result = 0;
+    ASSERT_TRUE(
+        wasm_runtime_lookup_component_value(module_inst, "start-result", &value));
+    ASSERT_TRUE(decode_component_s32_arg(&value, &decoded_result));
+    ASSERT_EQ(decoded_result, 2);
+
+    wasm_component_value_destroy(&value);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest, TestRuntimeExecutesTopLevelListStringResultStartSections)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "runtime-top-level-list-string-result-start-sections";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    auto *component_module = (WASMComponentModule *)module;
+    ASSERT_TRUE(append_top_level_host_function_import_sections(
+        component_module, "host-list-string-result", "host-instance",
+        "forwarded"));
+
+    const int32_t host_type_idx = append_component_scalar_func_type(
+        component_module, {}, WASM_COMP_PRIMVAL_S32);
+    ASSERT_GE(host_type_idx, 0);
+    ASSERT_TRUE(configure_component_func_list_result_type(
+        component_module, (uint32_t)host_type_idx, WASM_COMP_PRIMVAL_STRING,
+        false, 0));
+
+    auto *import_section =
+        find_component_section(component_module, WASM_COMP_SECTION_IMPORTS);
+    ASSERT_NE(import_section, nullptr);
+    ASSERT_NE(import_section->parsed.import_section, nullptr);
+    ASSERT_EQ(import_section->parsed.import_section->count, 1u);
+    ASSERT_NE(import_section->parsed.import_section->imports[0].extern_desc,
+              nullptr);
+    import_section->parsed.import_section->imports[0]
+        .extern_desc->extern_desc.func.type_idx = (uint32_t)host_type_idx;
+
+    ASSERT_TRUE(
+        append_top_level_start_section(component_module, 1, nullptr, 0, 1));
+    ASSERT_TRUE(
+        append_top_level_value_export_section(component_module, "start-result", 0));
+
+    HostListStringResultCallState call_state = {};
+    {
+        wasm_component_value_t expected_value =
+            make_component_list_string_value({ "hi", "hey" });
+        const auto *bytes =
+            (const uint8_t *)wasm_component_value_get_data(&expected_value);
+        ASSERT_NE(bytes, nullptr);
+        call_state.next_result.assign(bytes, bytes + expected_value.byte_size);
+        wasm_component_value_destroy(&expected_value);
+    }
+    wasm_component_func_import_binding_t func_import = {};
+    func_import.name = "host-list-string-result";
+    func_import.callback = host_list_string_result_only_callback;
+    func_import.user_data = &call_state;
+
+    struct InstantiationArgs2 *inst_args = nullptr;
+    ASSERT_TRUE(wasm_runtime_instantiation_args_create(&inst_args));
+    wasm_runtime_instantiation_args_set_default_stack_size(inst_args,
+                                                           helper->stack_size);
+    wasm_runtime_instantiation_args_set_host_managed_heap_size(
+        inst_args, helper->heap_size);
+    wasm_runtime_instantiation_args_set_wasi_stdio(inst_args, 0, 1, 2);
+    wasm_runtime_instantiation_args_set_wasi_dir(inst_args, nullptr, 0, nullptr,
+                                                 0);
+    wasm_runtime_instantiation_args_set_component_func_imports(inst_args,
+                                                               &func_import, 1);
+
+    wasm_module_inst_t module_inst = wasm_runtime_instantiate_ex2(
+        module, inst_args, helper->error_buf,
+        (uint32_t)sizeof(helper->error_buf));
+    wasm_runtime_instantiation_args_destroy(inst_args);
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+    ASSERT_EQ(call_state.call_count, 1);
+
+    wasm_component_value_t value = {};
+    std::vector<std::string> decoded_result;
+    ASSERT_TRUE(
+        wasm_runtime_lookup_component_value(module_inst, "start-result", &value));
+    ASSERT_EQ(value.type.kind, WASM_COMPONENT_VALUE_TYPE_DEFINED);
+    ASSERT_TRUE(decode_component_list_string_arg(&value, &decoded_result));
+    ASSERT_EQ(decoded_result, (std::vector<std::string>{ "hi", "hey" }));
+
+    wasm_component_value_destroy(&value);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
 TEST_F(BinaryParserTest, TestRuntimeExecutesTopLevelCompositeParamStartSections)
 {
     bool ret = helper->read_wasm_file("composite_string_params.component.wasm");
@@ -31280,6 +31462,102 @@ TEST_F(BinaryParserTest, TestRuntimeExecutesNestedCompositeStartSections)
                      expected_payload.data(), expected_payload.size()),
               0);
 
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest, TestRuntimeExecutesNestedListStringResultStartSections)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "runtime-nested-list-string-result-start-sections";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    auto *component_module = (WASMComponentModule *)module;
+    ASSERT_TRUE(append_top_level_host_function_import_sections(
+        component_module, "host-list-string-result", "host-instance",
+        "forwarded"));
+
+    const int32_t host_type_idx = append_component_scalar_func_type(
+        component_module, {}, WASM_COMP_PRIMVAL_S32);
+    ASSERT_GE(host_type_idx, 0);
+    ASSERT_TRUE(configure_component_func_list_result_type(
+        component_module, (uint32_t)host_type_idx, WASM_COMP_PRIMVAL_STRING,
+        false, 0));
+
+    auto *import_section =
+        find_component_section(component_module, WASM_COMP_SECTION_IMPORTS);
+    ASSERT_NE(import_section, nullptr);
+    ASSERT_NE(import_section->parsed.import_section, nullptr);
+    ASSERT_EQ(import_section->parsed.import_section->count, 1u);
+    ASSERT_NE(import_section->parsed.import_section->imports[0].extern_desc,
+              nullptr);
+    import_section->parsed.import_section->imports[0]
+        .extern_desc->extern_desc.func.type_idx = (uint32_t)host_type_idx;
+
+    ASSERT_TRUE(append_nested_result_only_start_section(component_module, 1, 1));
+
+    HostListStringResultCallState call_state = {};
+    wasm_component_value_t expected_value =
+        make_component_list_string_value({ "hi", "hey" });
+    {
+        const auto *bytes =
+            (const uint8_t *)wasm_component_value_get_data(&expected_value);
+        ASSERT_NE(bytes, nullptr);
+        call_state.next_result.assign(bytes, bytes + expected_value.byte_size);
+    }
+    wasm_component_func_import_binding_t func_import = {};
+    func_import.name = "host-list-string-result";
+    func_import.callback = host_list_string_result_only_callback;
+    func_import.user_data = &call_state;
+
+    struct InstantiationArgs2 *inst_args = nullptr;
+    ASSERT_TRUE(wasm_runtime_instantiation_args_create(&inst_args));
+    wasm_runtime_instantiation_args_set_default_stack_size(inst_args,
+                                                           helper->stack_size);
+    wasm_runtime_instantiation_args_set_host_managed_heap_size(
+        inst_args, helper->heap_size);
+    wasm_runtime_instantiation_args_set_wasi_stdio(inst_args, 0, 1, 2);
+    wasm_runtime_instantiation_args_set_wasi_dir(inst_args, nullptr, 0, nullptr,
+                                                 0);
+    wasm_runtime_instantiation_args_set_component_func_imports(inst_args,
+                                                               &func_import, 1);
+
+    wasm_module_inst_t module_inst = wasm_runtime_instantiate_ex2(
+        module, inst_args, helper->error_buf,
+        (uint32_t)sizeof(helper->error_buf));
+    wasm_runtime_instantiation_args_destroy(inst_args);
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+    ASSERT_EQ(call_state.call_count, 1);
+
+    wasm_component_instance_t exported_instance =
+        wasm_runtime_lookup_component_instance(module_inst,
+                                              "nested-start-instance");
+    ASSERT_NE(exported_instance, nullptr);
+    ASSERT_EQ(exported_instance->export_count, 1u);
+    ASSERT_EQ(std::string(exported_instance->exports[0].name), "start-result");
+    ASSERT_EQ(exported_instance->exports[0].ref.type, WASM_COMP_RUNTIME_REF_VALUE);
+    ASSERT_EQ(exported_instance->owned_value_count, 1u);
+    ASSERT_EQ(exported_instance->exports[0].ref.of.value,
+              &exported_instance->owned_values[0]);
+    ASSERT_EQ(exported_instance->owned_values[0].type.kind,
+              WASM_COMP_RUNTIME_VALUE_TYPE_DEFINED);
+    ASSERT_EQ(exported_instance->owned_values[0].byte_size,
+              expected_value.byte_size);
+    ASSERT_EQ(memcmp(wasm_component_runtime_value_get_data(
+                         &exported_instance->owned_values[0]),
+                     wasm_component_value_get_data(&expected_value),
+                     expected_value.byte_size),
+              0);
+
+    wasm_component_value_destroy(&expected_value);
     wasm_runtime_deinstantiate(module_inst);
     wasm_runtime_unload(module);
 }
