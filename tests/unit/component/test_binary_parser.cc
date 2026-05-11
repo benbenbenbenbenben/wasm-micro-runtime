@@ -746,6 +746,22 @@ append_top_level_resource_type_section(WASMComponentModule *component_module)
 
 static uint32_t
 count_top_level_sort_entries(const WASMComponent *component, uint8_t sort);
+struct TestComponentFuncParamSpec;
+static WASMComponentValueType
+make_component_primitive_value_type(WASMComponentPrimValType prim_type);
+static WASMComponentValueType
+make_component_type_index_value_type(uint32_t type_idx);
+static int32_t
+append_component_list_type(WASMComponentModule *component_module,
+                           WASMComponentPrimValType element_type,
+                           bool fixed_length, uint32_t fixed_len);
+static int32_t
+append_component_func_type(
+    WASMComponentModule *component_module,
+    const std::vector<TestComponentFuncParamSpec> &params,
+    const std::optional<WASMComponentValueType> &result_type);
+static bool
+ensure_canon_lift_string_utf8_opt(WASMComponentCanon *canon);
 static int32_t
 append_component_scalar_func_type(
     WASMComponentModule *component_module,
@@ -2794,6 +2810,36 @@ expand_func_type_to_two_results(WASMComponentFuncType *func_type)
 }
 
 static bool
+replace_func_type_results(
+    WASMComponentFuncType *func_type,
+    const std::vector<WASMComponentValueType> &result_types)
+{
+    WASMComponentValueType *new_results;
+
+    if (!func_type || !func_type->results || result_types.empty()) {
+        return false;
+    }
+
+    new_results = (WASMComponentValueType *)wasm_runtime_malloc(
+        sizeof(WASMComponentValueType) * result_types.size());
+    if (!new_results) {
+        return false;
+    }
+
+    for (uint32_t i = 0; i < result_types.size(); i++) {
+        new_results[i] = result_types[i];
+    }
+
+    if (func_type->results->results) {
+        wasm_runtime_free(func_type->results->results);
+    }
+    func_type->results->results = new_results;
+    func_type->results->count = (uint32_t)result_types.size();
+    func_type->results->tag = WASM_COMP_RESULT_LIST_WITH_TYPE;
+    return true;
+}
+
+static bool
 append_top_level_scalar_multi_result_lift(WASMComponentModule *component_module,
                                           const char *component_export_name,
                                           uint32_t *lifted_func_idx_out)
@@ -2839,27 +2885,23 @@ append_top_level_scalar_multi_result_lift(WASMComponentModule *component_module,
 }
 
 static bool
-append_top_level_scalar_multi_result_retptr_lift(
+append_top_level_retptr_multi_result_lift_from_bytes(
     WASMComponentModule *component_module, const char *component_export_name,
+    const uint8_t *multi_result_retptr_core_module,
+    uint32_t multi_result_retptr_core_module_size,
+    const std::vector<WASMComponentValueType> &result_types,
+    const char *core_module_name,
     uint32_t *lifted_func_idx_out)
 {
-    static const uint8_t multi_result_retptr_core_module[] = {
-        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x09, 0x02, 0x60,
-        0x00, 0x01, 0x7f, 0x60, 0x01, 0x7f, 0x00, 0x03, 0x03, 0x02, 0x00, 0x01,
-        0x05, 0x03, 0x01, 0x00, 0x01, 0x07, 0x22, 0x03, 0x06, 0x6d, 0x65, 0x6d,
-        0x6f, 0x72, 0x79, 0x02, 0x00, 0x04, 0x70, 0x61, 0x69, 0x72, 0x00, 0x00,
-        0x0e, 0x63, 0x61, 0x62, 0x69, 0x5f, 0x70, 0x6f, 0x73, 0x74, 0x5f, 0x70,
-        0x61, 0x69, 0x72, 0x00, 0x01, 0x0a, 0x1e, 0x02, 0x12, 0x00, 0x41, 0x00,
-        0x41, 0x02, 0x36, 0x02, 0x00, 0x41, 0x04, 0x41, 0x05, 0x36, 0x02, 0x00,
-        0x41, 0x00, 0x0b, 0x09, 0x00, 0x20, 0x00, 0x42, 0x00, 0x37, 0x03, 0x00,
-        0x0b
-    };
     WASMComponent *component = &component_module->component;
     uint32_t core_instance_idx = UINT32_MAX;
     uint32_t lifted_func_idx =
         count_top_level_sort_entries(component, WASM_COMP_SORT_FUNC);
-    int32_t lift_type_idx = append_component_scalar_func_type(
-        component_module, {}, WASM_COMP_PRIMVAL_S32);
+    int32_t lift_type_idx = append_component_func_type(
+        component_module, {},
+        result_types.empty() ? std::nullopt
+                             : std::optional<WASMComponentValueType>(
+                                   result_types.front()));
     WASMComponentFuncType *func_type;
 
     if (lift_type_idx < 0) {
@@ -2868,10 +2910,10 @@ append_top_level_scalar_multi_result_retptr_lift(
 
     func_type = lookup_local_component_func_type(component_module,
                                                  (uint32_t)lift_type_idx);
-    if (!func_type || !expand_func_type_to_two_results(func_type)
+    if (!func_type || !replace_func_type_results(func_type, result_types)
         || !append_top_level_core_module_instance_sections_from_bytes(
             component_module, multi_result_retptr_core_module,
-            (uint32_t)sizeof(multi_result_retptr_core_module), "pair-retptr-core",
+            multi_result_retptr_core_module_size, core_module_name,
             &core_instance_idx)) {
         return false;
     }
@@ -3050,6 +3092,111 @@ append_top_level_scalar_multi_result_retptr_lift(
         *lifted_func_idx_out = lifted_func_idx;
     }
     return true;
+}
+
+static bool
+append_top_level_scalar_multi_result_retptr_lift(
+    WASMComponentModule *component_module, const char *component_export_name,
+    uint32_t *lifted_func_idx_out)
+{
+    static const uint8_t multi_result_retptr_core_module[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x09, 0x02, 0x60,
+        0x00, 0x01, 0x7f, 0x60, 0x01, 0x7f, 0x00, 0x03, 0x03, 0x02, 0x00, 0x01,
+        0x05, 0x03, 0x01, 0x00, 0x01, 0x07, 0x22, 0x03, 0x06, 0x6d, 0x65, 0x6d,
+        0x6f, 0x72, 0x79, 0x02, 0x00, 0x04, 0x70, 0x61, 0x69, 0x72, 0x00, 0x00,
+        0x0e, 0x63, 0x61, 0x62, 0x69, 0x5f, 0x70, 0x6f, 0x73, 0x74, 0x5f, 0x70,
+        0x61, 0x69, 0x72, 0x00, 0x01, 0x0a, 0x1e, 0x02, 0x12, 0x00, 0x41, 0x00,
+        0x41, 0x02, 0x36, 0x02, 0x00, 0x41, 0x04, 0x41, 0x05, 0x36, 0x02, 0x00,
+        0x41, 0x00, 0x0b, 0x09, 0x00, 0x20, 0x00, 0x42, 0x00, 0x37, 0x03, 0x00,
+        0x0b
+    };
+
+    return append_top_level_retptr_multi_result_lift_from_bytes(
+        component_module, component_export_name, multi_result_retptr_core_module,
+        (uint32_t)sizeof(multi_result_retptr_core_module),
+        std::vector<WASMComponentValueType>{
+            make_component_primitive_value_type(WASM_COMP_PRIMVAL_S32),
+            make_component_primitive_value_type(WASM_COMP_PRIMVAL_S32) },
+        "pair-retptr-core", lifted_func_idx_out);
+}
+
+static bool
+append_top_level_string_scalar_multi_result_retptr_lift(
+    WASMComponentModule *component_module, const char *component_export_name,
+    uint32_t *lifted_func_idx_out)
+{
+    static const uint8_t multi_result_retptr_core_module[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x09, 0x02, 0x60,
+        0x00, 0x01, 0x7f, 0x60, 0x01, 0x7f, 0x00, 0x03, 0x03, 0x02, 0x00, 0x01,
+        0x05, 0x03, 0x01, 0x00, 0x01, 0x07, 0x22, 0x03, 0x06, 0x6d, 0x65, 0x6d,
+        0x6f, 0x72, 0x79, 0x02, 0x00, 0x04, 0x70, 0x61, 0x69, 0x72, 0x00, 0x00,
+        0x0e, 0x63, 0x61, 0x62, 0x69, 0x5f, 0x70, 0x6f, 0x73, 0x74, 0x5f, 0x70,
+        0x61, 0x69, 0x72, 0x00, 0x01, 0x0a, 0x46, 0x02, 0x2c, 0x00, 0x41, 0x00,
+        0x41, 0x10, 0x36, 0x02, 0x00, 0x41, 0x04, 0x41, 0x05, 0x36, 0x02, 0x00,
+        0x41, 0x08, 0x41, 0x07, 0x36, 0x02, 0x00, 0x41, 0x10, 0x41, 0xe8, 0xca,
+        0xb1, 0xe3, 0x06, 0x36, 0x02, 0x00, 0x41, 0x14, 0x41, 0xef, 0x00, 0x3a,
+        0x00, 0x00, 0x41, 0x00, 0x0b, 0x17, 0x00, 0x20, 0x00, 0x42, 0x00, 0x37,
+        0x03, 0x00, 0x41, 0x08, 0x41, 0x00, 0x36, 0x02, 0x00, 0x41, 0x10, 0x42,
+        0x00, 0x37, 0x03, 0x00, 0x0b
+    };
+
+    if (!append_top_level_retptr_multi_result_lift_from_bytes(
+            component_module, component_export_name,
+            multi_result_retptr_core_module,
+            (uint32_t)sizeof(multi_result_retptr_core_module),
+            std::vector<WASMComponentValueType>{
+                make_component_primitive_value_type(WASM_COMP_PRIMVAL_STRING),
+                make_component_primitive_value_type(WASM_COMP_PRIMVAL_S32) },
+            "string-pair-retptr-core", lifted_func_idx_out)) {
+        return false;
+    }
+
+    for (int i = (int)component_module->component.section_count - 1; i >= 0; i--) {
+        auto *section = &component_module->component.sections[i];
+        if (section->id == WASM_COMP_SECTION_CANONS
+            && section->parsed.canon_section
+            && section->parsed.canon_section->count > 0) {
+            return ensure_canon_lift_string_utf8_opt(
+                &section->parsed.canon_section->canons[0]);
+        }
+    }
+    return false;
+}
+
+static bool
+append_top_level_list_s32_scalar_multi_result_retptr_lift(
+    WASMComponentModule *component_module, const char *component_export_name,
+    uint32_t *lifted_func_idx_out)
+{
+    static const uint8_t multi_result_retptr_core_module[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x09, 0x02, 0x60,
+        0x00, 0x01, 0x7f, 0x60, 0x01, 0x7f, 0x00, 0x03, 0x03, 0x02, 0x00, 0x01,
+        0x05, 0x03, 0x01, 0x00, 0x01, 0x07, 0x22, 0x03, 0x06, 0x6d, 0x65, 0x6d,
+        0x6f, 0x72, 0x79, 0x02, 0x00, 0x04, 0x70, 0x61, 0x69, 0x72, 0x00, 0x00,
+        0x0e, 0x63, 0x61, 0x62, 0x69, 0x5f, 0x70, 0x6f, 0x73, 0x74, 0x5f, 0x70,
+        0x61, 0x69, 0x72, 0x00, 0x01, 0x0a, 0x4f, 0x02, 0x2e, 0x00, 0x41, 0x00,
+        0x41, 0x10, 0x36, 0x02, 0x00, 0x41, 0x04, 0x41, 0x03, 0x36, 0x02, 0x00,
+        0x41, 0x08, 0x41, 0x09, 0x36, 0x02, 0x00, 0x41, 0x10, 0x41, 0x04, 0x36,
+        0x02, 0x00, 0x41, 0x14, 0x41, 0x05, 0x36, 0x02, 0x00, 0x41, 0x18, 0x41,
+        0x06, 0x36, 0x02, 0x00, 0x41, 0x00, 0x0b, 0x1e, 0x00, 0x20, 0x00, 0x42,
+        0x00, 0x37, 0x03, 0x00, 0x41, 0x08, 0x41, 0x00, 0x36, 0x02, 0x00, 0x41,
+        0x10, 0x42, 0x00, 0x37, 0x03, 0x00, 0x41, 0x18, 0x41, 0x00, 0x36, 0x02,
+        0x00, 0x0b
+    };
+    const int32_t list_type_idx = append_component_list_type(
+        component_module, WASM_COMP_PRIMVAL_S32, false, 0);
+
+    if (list_type_idx < 0) {
+        return false;
+    }
+
+    return append_top_level_retptr_multi_result_lift_from_bytes(
+        component_module, component_export_name, multi_result_retptr_core_module,
+        (uint32_t)sizeof(multi_result_retptr_core_module),
+        std::vector<WASMComponentValueType>{
+            make_component_type_index_value_type((uint32_t)list_type_idx),
+            make_component_primitive_value_type(WASM_COMP_PRIMVAL_S32) },
+        "list-s32-pair-retptr-core", lifted_func_idx_out);
 }
 
 static int32_t
@@ -41267,6 +41414,234 @@ TEST_F(BinaryParserTest,
     ASSERT_EQ(second.type.type.primitive_type,
               WASM_COMPONENT_PRIMITIVE_VALUE_S32);
     ASSERT_EQ(*(int32_t *)wasm_component_value_get_data(&second), 5);
+
+    wasm_component_value_destroy(&first);
+    wasm_component_value_destroy(&second);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestRuntimeCallsTopLevelStringScalarRetptrMultiResultCanonLift)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "runtime-top-level-string-retptr-multi-result-call";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    ASSERT_TRUE(append_top_level_string_scalar_multi_result_retptr_lift(
+        (WASMComponentModule *)module, "pair-retptr-results", nullptr));
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func =
+        wasm_runtime_lookup_component_function(module_inst, "pair-retptr-results");
+    ASSERT_NE(func, nullptr);
+
+    wasm_component_value_t public_results[2] = {};
+    const char payload[] = "hello";
+    std::vector<uint8_t> expected_payload;
+    append_component_string_payload(&expected_payload, payload);
+    ASSERT_TRUE(wasm_runtime_call_component_values(module_inst, func, 2,
+                                                   public_results, 0, nullptr))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(public_results[0].type.kind, WASM_COMPONENT_VALUE_TYPE_PRIMITIVE);
+    ASSERT_EQ(public_results[0].type.type.primitive_type,
+              WASM_COMPONENT_PRIMITIVE_VALUE_STRING);
+    ASSERT_EQ(public_results[0].storage_kind, WASM_COMPONENT_VALUE_STORAGE_OWNED);
+    ASSERT_EQ(public_results[0].byte_size, expected_payload.size());
+    ASSERT_EQ(memcmp(wasm_component_value_get_data(&public_results[0]),
+                     expected_payload.data(), expected_payload.size()),
+              0);
+    ASSERT_EQ(public_results[1].type.kind, WASM_COMPONENT_VALUE_TYPE_PRIMITIVE);
+    ASSERT_EQ(public_results[1].type.type.primitive_type,
+              WASM_COMPONENT_PRIMITIVE_VALUE_S32);
+    ASSERT_EQ(*(int32_t *)wasm_component_value_get_data(&public_results[1]), 7);
+
+    wasm_component_value_destroy(&public_results[0]);
+    wasm_component_value_destroy(&public_results[1]);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestRuntimeExecutesTopLevelStringScalarRetptrMultiResultStartSections)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "runtime-top-level-string-retptr-multi-result-start";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    uint32_t start_func_idx = UINT32_MAX;
+    uint32_t base_value_idx = count_top_level_sort_entries(
+        &((WASMComponentModule *)module)->component, WASM_COMP_SORT_VALUE);
+    ASSERT_TRUE(append_top_level_string_scalar_multi_result_retptr_lift(
+        (WASMComponentModule *)module, "pair-retptr-results", &start_func_idx));
+    ASSERT_TRUE(append_top_level_start_section((WASMComponentModule *)module,
+                                               start_func_idx, nullptr, 0, 2));
+    ASSERT_TRUE(append_top_level_value_export_section(
+        (WASMComponentModule *)module, "first-retptr-result", base_value_idx));
+    ASSERT_TRUE(append_top_level_value_export_section(
+        (WASMComponentModule *)module, "second-retptr-result",
+        base_value_idx + 1));
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_value_t first = {};
+    const char payload[] = "hello";
+    std::vector<uint8_t> expected_payload;
+    append_component_string_payload(&expected_payload, payload);
+    ASSERT_TRUE(
+        wasm_runtime_lookup_component_value(module_inst, "first-retptr-result",
+                                            &first));
+    ASSERT_EQ(first.type.kind, WASM_COMPONENT_VALUE_TYPE_PRIMITIVE);
+    ASSERT_EQ(first.type.type.primitive_type,
+              WASM_COMPONENT_PRIMITIVE_VALUE_STRING);
+    ASSERT_EQ(first.byte_size, expected_payload.size());
+    ASSERT_EQ(memcmp(wasm_component_value_get_data(&first), expected_payload.data(),
+                     expected_payload.size()),
+              0);
+
+    wasm_component_value_t second = {};
+    ASSERT_TRUE(
+        wasm_runtime_lookup_component_value(module_inst, "second-retptr-result",
+                                            &second));
+    ASSERT_EQ(second.type.kind, WASM_COMPONENT_VALUE_TYPE_PRIMITIVE);
+    ASSERT_EQ(second.type.type.primitive_type,
+              WASM_COMPONENT_PRIMITIVE_VALUE_S32);
+    ASSERT_EQ(*(int32_t *)wasm_component_value_get_data(&second), 7);
+
+    wasm_component_value_destroy(&first);
+    wasm_component_value_destroy(&second);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestRuntimeCallsTopLevelListS32ScalarRetptrMultiResultCanonLift)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "runtime-top-level-list-s32-retptr-multi-result-call";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    ASSERT_TRUE(append_top_level_list_s32_scalar_multi_result_retptr_lift(
+        (WASMComponentModule *)module, "pair-retptr-results", nullptr));
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func =
+        wasm_runtime_lookup_component_function(module_inst, "pair-retptr-results");
+    ASSERT_NE(func, nullptr);
+
+    const int32_t payload[] = { 4, 5, 6 };
+    wasm_component_value_t public_results[2] = {};
+    ASSERT_TRUE(wasm_runtime_call_component_values(module_inst, func, 2,
+                                                   public_results, 0, nullptr))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(public_results[0].type.kind, WASM_COMPONENT_VALUE_TYPE_DEFINED);
+    ASSERT_EQ(public_results[0].storage_kind, WASM_COMPONENT_VALUE_STORAGE_OWNED);
+    ASSERT_EQ(public_results[0].byte_size, sizeof(payload));
+    ASSERT_EQ(memcmp(wasm_component_value_get_data(&public_results[0]), payload,
+                     sizeof(payload)),
+              0);
+    ASSERT_EQ(public_results[1].type.kind, WASM_COMPONENT_VALUE_TYPE_PRIMITIVE);
+    ASSERT_EQ(public_results[1].type.type.primitive_type,
+              WASM_COMPONENT_PRIMITIVE_VALUE_S32);
+    ASSERT_EQ(*(int32_t *)wasm_component_value_get_data(&public_results[1]), 9);
+
+    wasm_component_value_destroy(&public_results[0]);
+    wasm_component_value_destroy(&public_results[1]);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestRuntimeExecutesTopLevelListS32ScalarRetptrMultiResultStartSections)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "runtime-top-level-list-s32-retptr-multi-result-start";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    uint32_t start_func_idx = UINT32_MAX;
+    uint32_t base_value_idx = count_top_level_sort_entries(
+        &((WASMComponentModule *)module)->component, WASM_COMP_SORT_VALUE);
+    ASSERT_TRUE(append_top_level_list_s32_scalar_multi_result_retptr_lift(
+        (WASMComponentModule *)module, "pair-retptr-results", &start_func_idx));
+    ASSERT_TRUE(append_top_level_start_section((WASMComponentModule *)module,
+                                               start_func_idx, nullptr, 0, 2));
+    ASSERT_TRUE(append_top_level_value_export_section(
+        (WASMComponentModule *)module, "first-retptr-result", base_value_idx));
+    ASSERT_TRUE(append_top_level_value_export_section(
+        (WASMComponentModule *)module, "second-retptr-result",
+        base_value_idx + 1));
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    const int32_t payload[] = { 4, 5, 6 };
+    wasm_component_value_t first = {};
+    ASSERT_TRUE(
+        wasm_runtime_lookup_component_value(module_inst, "first-retptr-result",
+                                            &first));
+    ASSERT_EQ(first.type.kind, WASM_COMPONENT_VALUE_TYPE_DEFINED);
+    ASSERT_EQ(first.byte_size, sizeof(payload));
+    ASSERT_EQ(memcmp(wasm_component_value_get_data(&first), payload,
+                     sizeof(payload)),
+              0);
+
+    wasm_component_value_t second = {};
+    ASSERT_TRUE(
+        wasm_runtime_lookup_component_value(module_inst, "second-retptr-result",
+                                            &second));
+    ASSERT_EQ(second.type.kind, WASM_COMPONENT_VALUE_TYPE_PRIMITIVE);
+    ASSERT_EQ(second.type.type.primitive_type,
+              WASM_COMPONENT_PRIMITIVE_VALUE_S32);
+    ASSERT_EQ(*(int32_t *)wasm_component_value_get_data(&second), 9);
 
     wasm_component_value_destroy(&first);
     wasm_component_value_destroy(&second);

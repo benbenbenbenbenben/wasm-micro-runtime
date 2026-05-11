@@ -504,8 +504,9 @@ Supported today:
   canon-lifted scalar-only multi-result function using direct core multi-value
   returns
 - materializing multiple start results when the start function is a
-  canon-lifted scalar-only multi-result function using the retptr-backed
-  Canonical ABI result-area shape
+  canon-lifted multi-result function using the retptr-backed Canonical ABI
+  result-area shape for the current supported scalar / UTF-8 string /
+  `list<scalar>` result-vector subset
 - materializing multiple start results when the start function is a
   host-imported scalar-only multi-result component function
 - parsing and validating multi-result component functypes, including start
@@ -514,9 +515,9 @@ Supported today:
 Still missing:
 
 - non-scalar multi-result execution for host-imported component functions
-- multi-result execution for memory-backed, composite, or resource results
-- retptr-backed Canonical ABI multi-results beyond the current scalar-only
-  result-vector subset
+- multi-result execution for composite or resource results
+- retptr-backed Canonical ABI multi-results beyond the current scalar /
+  UTF-8 string / `list<scalar>` result-vector subset
 - Canonical ABI beyond the current supported public-value subset
 - the more complete execution space needed for start-heavy real-world components
 
