@@ -448,14 +448,15 @@ Current limitations include:
   same-module plus cross-component nested typed `instance` import `func`
   members for the current scalar / UTF-8 string / variable-length `list<scalar>` /
   `list<string>` / tuple-record leaf subset; typed `instance` import matching is otherwise
-  limited to exported `core module`, exported `resource type` members with
-  abstract `type` bounds, scalar / variable-length `list<scalar>` /
+  limited to exported `core module`, exported `resource type` members with the
+  current abstract-`type` / runtime-eq-bound subset, scalar /
+  variable-length `list<scalar>` /
   `list<string>` / current tuple-record-subset `value`, nested `instance`
   members, and the first typed `component` subset: top-level component imports
   plus typed `instance` component members whose expected component types have no
   imports and only recurse through typed `component` exports with explicit
-  component type metadata; broader componenttype matching and eq-bound resource
-  type matching are still unsupported
+  component type metadata; broader pure componenttype matching and resource type
+  rebinding are still unsupported
 - host-import tuple/record values are still limited to the current scalar /
   UTF-8 string / nested `list<scalar>` / `list<string>` subset
 - public resource-type exports are now enumerable through
@@ -575,8 +576,8 @@ What is still missing:
    `instance`/`component` imports plus nested component-type matching with
    expected-side abstract `type` bounds only), and host-callback imported
    own-result subset
-- resource-type identity/rebinding beyond the current name/sort plus
-  expected-bound-shape matching subset; eq-bound matching is still explicitly
+- resource-type identity/rebinding beyond the current name/sort plus the
+  current abstract-`type` / runtime-eq-bound matching subset is still
   unsupported
 - borrowed resource values and the rest of general own/borrow public value
   transport beyond the current supported subset (host-callback borrowed

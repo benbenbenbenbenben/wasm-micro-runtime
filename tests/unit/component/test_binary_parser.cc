@@ -37780,7 +37780,7 @@ TEST_F(BinaryParserTest,
 }
 
 TEST_F(BinaryParserTest,
-       TestRuntimeRejectsEqBoundTypedNestedResourceComponentMemberImports)
+       TestRuntimeBindsEqBoundTypedNestedResourceComponentMemberImports)
 {
     bool ret = helper->read_wasm_file("add.wasm");
     ASSERT_TRUE(ret);
@@ -37804,10 +37804,20 @@ TEST_F(BinaryParserTest,
         wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
                                  helper->error_buf,
                                  (uint32_t)sizeof(helper->error_buf));
-    ASSERT_EQ(module_inst, nullptr) << helper->error_buf;
-    ASSERT_NE(strstr(helper->error_buf, "unsupported eq-bound"), nullptr)
-        << helper->error_buf;
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
 
+    wasm_component_instance_t forwarded_instance =
+        wasm_runtime_lookup_component_instance(
+            module_inst, "typed-forwarded-resource-component-instance");
+    ASSERT_NE(forwarded_instance, nullptr);
+    wasm_component_instance_t nested_instance =
+        wasm_component_instance_lookup_instance(forwarded_instance, "forwarded");
+    ASSERT_NE(nested_instance, nullptr);
+    ASSERT_NE(wasm_component_instance_lookup_component(nested_instance,
+                                                       "forwarded-component"),
+              nullptr);
+
+    wasm_runtime_deinstantiate(module_inst);
     wasm_runtime_unload(module);
 }
 

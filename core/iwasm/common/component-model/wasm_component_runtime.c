@@ -15800,16 +15800,8 @@ validate_component_resource_type_bound_supported(
 
     switch (type_bound->tag) {
         case WASM_COMP_TYPEBOUND_TYPE:
-            return true;
         case WASM_COMP_TYPEBOUND_EQ:
-            return set_component_runtime_error_fmt(
-                error_buf, error_buf_size,
-                member_name ? "component import \"%s\" instance export \"%s\" "
-                              "uses unsupported eq-bound resource type matching"
-                            : "component import \"%s\" uses unsupported eq-bound "
-                              "resource type matching",
-                import_name ? import_name : "<unnamed>",
-                member_name ? member_name : "");
+            return true;
         default:
             return set_component_runtime_error_fmt(
                 error_buf, error_buf_size,
@@ -15839,8 +15831,28 @@ validate_component_runtime_resource_type_against_bound(
             import_name ? import_name : "<unnamed>",
             member_name ? member_name : "");
 
-    return validate_component_resource_type_bound_supported(
-        type_bound, import_name, member_name, error_buf, error_buf_size);
+    if (!validate_component_resource_type_bound_supported(
+            type_bound, import_name, member_name, error_buf, error_buf_size))
+        return false;
+
+    if (type_bound->tag == WASM_COMP_TYPEBOUND_EQ) {
+        uint32 expected_type_idx = type_bound->type_idx;
+
+        if (runtime_resource_type->type_idx != expected_type_idx
+            && runtime_resource_type->source_type_idx != expected_type_idx
+            && runtime_resource_type->canonical_type_idx != expected_type_idx)
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                member_name
+                    ? "component import \"%s\" instance export \"%s\" expects "
+                      "eq-bound resource type %u"
+                    : "component import \"%s\" expects eq-bound resource type "
+                      "%u",
+                import_name ? import_name : "<unnamed>",
+                member_name ? member_name : "", expected_type_idx);
+    }
+
+    return true;
 }
 
 static bool
