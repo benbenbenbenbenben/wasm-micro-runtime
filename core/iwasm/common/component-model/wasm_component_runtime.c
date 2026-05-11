@@ -700,6 +700,8 @@ destroy_component_runtime_instance(WASMComponentRuntimeInstance *component_inst)
 static void
 release_component_resource_handle_entry(WASMComponentResourceHandleEntry *entry)
 {
+    uint32 generation;
+
     if (!entry || !entry->is_live)
         return;
 
@@ -710,7 +712,9 @@ release_component_resource_handle_entry(WASMComponentResourceHandleEntry *entry)
             wasm_runtime_free(entry->data);
     }
 
+    generation = entry->generation;
     memset(entry, 0, sizeof(*entry));
+    entry->generation = generation;
 }
 
 static void
@@ -2996,6 +3000,13 @@ component_resource_builtin_trampoline(WASMModuleInstanceCommon *caller_module_in
                     (WASMComponentRuntimeResourceType *)canonical_resource_type;
 
                 if (was_owned) {
+                    if (entry->borrow_count > 0) {
+                        wasm_runtime_set_exception(
+                            caller_module_inst,
+                            "component resource handle has outstanding borrowed "
+                            "handles");
+                        return;
+                    }
                     if (!canonical_resource_type->imported_drop_callback) {
                         wasm_runtime_set_exception(
                             caller_module_inst,
@@ -3020,12 +3031,19 @@ component_resource_builtin_trampoline(WASMModuleInstanceCommon *caller_module_in
                 return;
             }
             if (!entry->is_owned) {
-                WASMComponentRuntimeResourceType *mutable_canonical_type =
-                    (WASMComponentRuntimeResourceType *)canonical_resource_type;
-
-                release_component_resource_handle_entry(entry);
-                if (mutable_canonical_type->handle_table.live_handle_count > 0)
-                    mutable_canonical_type->handle_table.live_handle_count--;
+                if (!wasm_component_resource_release_borrowed_handle(
+                        resource_function->resource_state,
+                        resource_function->resource_type_idx, handle, error_buf,
+                        (uint32)sizeof(error_buf))) {
+                    wasm_runtime_set_exception(caller_module_inst, error_buf);
+                    return;
+                }
+                return;
+            }
+            if (entry->borrow_count > 0) {
+                wasm_runtime_set_exception(
+                    caller_module_inst,
+                    "component resource handle has outstanding borrowed handles");
                 return;
             }
             if (canonical_resource_type->has_dtor) {
@@ -5427,6 +5445,9 @@ drop_component_owned_resource_handle_internal(
     if (!entry->is_live || !entry->is_owned)
         return set_component_call_error(
             inst, "component resource handle is not an owned live handle");
+    if (entry->borrow_count > 0)
+        return set_component_call_error(
+            inst, "component resource handle has outstanding borrowed handles");
 
     if (canonical_type->kind == WASM_COMP_RUNTIME_RESOURCE_TYPE_IMPORTED) {
         WASMComponentRuntimeResourceType *mutable_canonical_type =

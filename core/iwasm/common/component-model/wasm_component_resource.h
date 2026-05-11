@@ -29,6 +29,10 @@ typedef struct WASMComponentResourceHandleEntry {
     bool is_live;
     bool is_owned;
     uint32 handle;
+    uint32 generation;
+    uint32 borrow_count;
+    uint32 borrowed_from_handle;
+    uint32 borrowed_from_generation;
     void *data;
     WASMComponentResourceHandleFinalizer finalizer;
     void *finalizer_ctx;

@@ -448,6 +448,8 @@ ensure_handle_entry_capacity(WASMComponentResourceHandleTable *handle_table,
 static void
 release_handle_entry(WASMComponentResourceHandleEntry *entry)
 {
+    uint32 generation;
+
     if (!entry || !entry->is_live)
         return;
 
@@ -458,7 +460,31 @@ release_handle_entry(WASMComponentResourceHandleEntry *entry)
             wasm_runtime_free(entry->data);
     }
 
+    generation = entry->generation;
     memset(entry, 0, sizeof(*entry));
+    entry->generation = generation;
+}
+
+static void
+init_live_handle_entry(WASMComponentResourceHandleEntry *entry, bool is_owned,
+                       uint32 handle, void *data,
+                       WASMComponentResourceHandleFinalizer finalizer,
+                       void *finalizer_ctx)
+{
+    uint32 generation;
+
+    generation = entry->generation + 1;
+    if (generation == 0)
+        generation = 1;
+
+    memset(entry, 0, sizeof(*entry));
+    entry->is_live = true;
+    entry->is_owned = is_owned;
+    entry->handle = handle;
+    entry->generation = generation;
+    entry->data = data;
+    entry->finalizer = finalizer;
+    entry->finalizer_ctx = finalizer_ctx;
 }
 
 WASMComponentRuntimeResourceState *
@@ -595,12 +621,8 @@ wasm_component_resource_create_owned_handle(
                                          error_buf, error_buf_size))
         return false;
 
-    handle_table->entries[handle - 1].is_live = true;
-    handle_table->entries[handle - 1].is_owned = true;
-    handle_table->entries[handle - 1].handle = handle;
-    handle_table->entries[handle - 1].data = data;
-    handle_table->entries[handle - 1].finalizer = finalizer;
-    handle_table->entries[handle - 1].finalizer_ctx = finalizer_ctx;
+    init_live_handle_entry(&handle_table->entries[handle - 1], true, handle, data,
+                           finalizer, finalizer_ctx);
     handle_table->live_handle_count++;
     handle_table->owned_handle_count++;
 
@@ -641,6 +663,11 @@ wasm_component_resource_drop_owned_handle(
         return set_component_resource_error_fmt(
             error_buf, error_buf_size,
             "component resource handle %u is not an owned live handle", handle);
+    if (entry->borrow_count > 0)
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "component resource handle %u has outstanding borrowed handles",
+            handle);
 
     release_handle_entry(entry);
     canonical_type->handle_table.live_handle_count--;
@@ -712,13 +739,8 @@ wasm_component_resource_create_imported_handle(
                                                    error_buf_size)))
         return false;
 
-    handle_table->entries[handle - 1].is_live = true;
-    handle_table->entries[handle - 1].is_owned = owned;
-    handle_table->entries[handle - 1].handle = handle;
-    handle_table->entries[handle - 1].data = data;
-    handle_table->entries[handle - 1].finalizer =
-        owned ? imported_resource_noop_finalizer : NULL;
-    handle_table->entries[handle - 1].finalizer_ctx = NULL;
+    init_live_handle_entry(&handle_table->entries[handle - 1], owned, handle, data,
+                           owned ? imported_resource_noop_finalizer : NULL, NULL);
     handle_table->live_handle_count++;
 
     if (owned) {
@@ -772,6 +794,11 @@ wasm_component_resource_take_owned_handle(
         return set_component_resource_error_fmt(
             error_buf, error_buf_size,
             "component resource handle %u is not an owned live handle", handle);
+    if (entry->borrow_count > 0)
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "component resource handle %u has outstanding borrowed handles",
+            handle);
 
     memset(resource_value_out, 0, sizeof(*resource_value_out));
     resource_value_out->magic = WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_MAGIC;
@@ -784,7 +811,12 @@ wasm_component_resource_take_owned_handle(
     resource_value_out->finalizer = entry->finalizer;
     resource_value_out->finalizer_ctx = entry->finalizer_ctx;
 
-    memset(entry, 0, sizeof(*entry));
+    {
+        uint32 generation = entry->generation;
+
+        memset(entry, 0, sizeof(*entry));
+        entry->generation = generation;
+    }
     if (canonical_type->handle_table.live_handle_count > 0)
         canonical_type->handle_table.live_handle_count--;
     if (canonical_type->handle_table.owned_handle_count > 0)
@@ -838,12 +870,9 @@ wasm_component_resource_restore_owned_handle(
             error_buf, error_buf_size,
             "component resource handle %u is already live", handle);
 
-    entry->is_live = true;
-    entry->is_owned = true;
-    entry->handle = handle;
-    entry->data = resource_value->data;
-    entry->finalizer = resource_value->finalizer;
-    entry->finalizer_ctx = resource_value->finalizer_ctx;
+    init_live_handle_entry(entry, true, handle, resource_value->data,
+                           resource_value->finalizer,
+                           resource_value->finalizer_ctx);
 
     canonical_type->handle_table.live_handle_count++;
     canonical_type->handle_table.owned_handle_count++;
@@ -948,10 +977,11 @@ wasm_component_resource_create_borrowed_handle(
             "component resource handle %u is out of bounds", source_handle);
 
     source_entry = &canonical_type->handle_table.entries[source_handle - 1];
-    if (!source_entry->is_live)
+    if (!source_entry->is_live || !source_entry->is_owned)
         return set_component_resource_error_fmt(
             error_buf, error_buf_size,
-            "component resource handle %u is not a live handle", source_handle);
+            "component resource handle %u is not an owned live handle",
+            source_handle);
 
     handle = canonical_type->handle_table.next_handle++;
     if (!ensure_handle_entry_capacity(&canonical_type->handle_table, handle, error_buf,
@@ -964,12 +994,10 @@ wasm_component_resource_create_borrowed_handle(
             error_buf, error_buf_size,
             "component resource handle %u is already live", handle);
 
-    entry->is_live = true;
-    entry->is_owned = false;
-    entry->handle = handle;
-    entry->data = source_entry->data;
-    entry->finalizer = NULL;
-    entry->finalizer_ctx = NULL;
+    init_live_handle_entry(entry, false, handle, source_entry->data, NULL, NULL);
+    entry->borrowed_from_handle = source_handle;
+    entry->borrowed_from_generation = source_entry->generation;
+    source_entry->borrow_count++;
     canonical_type->handle_table.live_handle_count++;
 
     *out_handle = handle;
@@ -983,7 +1011,8 @@ wasm_component_resource_release_borrowed_handle(
 {
     WASMComponentRuntimeResourceType *resource_type;
     WASMComponentRuntimeResourceType *canonical_type;
-    WASMComponentResourceHandleEntry *entry;
+    WASMComponentResourceHandleEntry *entry, *source_entry = NULL;
+    uint32 source_handle, source_generation;
 
     if (!resource_state || handle == 0)
         return set_component_resource_error(
@@ -1016,6 +1045,17 @@ wasm_component_resource_release_borrowed_handle(
         return set_component_resource_error_fmt(
             error_buf, error_buf_size,
             "component resource handle %u is not a borrowed live handle", handle);
+
+    source_handle = entry->borrowed_from_handle;
+    source_generation = entry->borrowed_from_generation;
+    if (source_handle > 0 && source_handle - 1 < canonical_type->handle_table.entry_count) {
+        source_entry = &canonical_type->handle_table.entries[source_handle - 1];
+        if (source_entry->is_live && source_entry->is_owned
+            && source_entry->handle == source_handle
+            && source_entry->generation == source_generation
+            && source_entry->borrow_count > 0)
+            source_entry->borrow_count--;
+    }
 
     release_handle_entry(entry);
     if (canonical_type->handle_table.live_handle_count > 0)

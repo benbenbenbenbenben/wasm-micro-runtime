@@ -585,9 +585,12 @@ What is still missing:
   `own<resource>` and `borrow<resource>` parameters, guest-side local
   `resource.rep` / borrowed `resource.drop` on those temporary borrowed handles,
   plus fresh imported own results)
-- runtime enforcement of richer resource lifecycle rules
-- no lend-count or equivalent outstanding-borrow tracking yet: dropping an owned
-  handle while borrowed aliases are still live is not detected or prevented
+- runtime enforcement of richer resource lifecycle rules beyond the current local
+  outstanding-borrow subset
+- no full lend-count or borrow-scope enforcement yet: the current local resource
+  subset now rejects owned drops/transfers while tracked borrowed aliases are
+  still live, but broader outstanding-borrow tracking and lifetime enforcement
+  still remain incomplete
 - public resource-aware callable component APIs beyond the new
   owned-result drop helper, top-level imported-resource binding, and the current
   owned-resource / borrowed-parameter call subset; broader borrow/lend behavior,
