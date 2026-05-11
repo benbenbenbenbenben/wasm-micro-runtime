@@ -31055,6 +31055,231 @@ TEST_F(BinaryParserTest,
 }
 
 TEST_F(BinaryParserTest,
+       TestPublicComponentInstantiationBindsEqActualTypedTopLevelResourceComponentImports)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs source_load_args = {};
+    char source_module_name[] = "typed-resource-component-import-source-eq-actual";
+    source_load_args.name = source_module_name;
+    wasm_module_t source_module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &source_load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(source_module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(append_typed_resource_component_export_source_sections(
+        (WASMComponentModule *)source_module, "forwarded-resource-type",
+        WASM_COMP_TYPEBOUND_EQ));
+
+    wasm_module_inst_t source_inst =
+        wasm_runtime_instantiate(source_module, helper->stack_size,
+                                 helper->heap_size, helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(source_inst, nullptr) << helper->error_buf;
+
+    wasm_component_component_t imported_component =
+        wasm_runtime_lookup_component_component(source_inst, "typed-source");
+    ASSERT_NE(imported_component, nullptr);
+
+    uint32_t target_wasm_file_size = 0;
+    auto *target_component_raw =
+        (unsigned char *)bh_read_file_to_buffer("add.wasm", &target_wasm_file_size);
+    ASSERT_NE(target_component_raw, nullptr);
+
+    LoadArgs target_load_args = {};
+    char target_module_name[] = "typed-resource-component-import-target-eq-actual";
+    target_load_args.name = target_module_name;
+    wasm_module_t target_module = wasm_runtime_load_ex(
+        target_component_raw, target_wasm_file_size, &target_load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(target_module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(append_top_level_typed_resource_component_import_sections(
+        (WASMComponentModule *)target_module, "forwarded-resource-type",
+        WASM_COMP_TYPEBOUND_TYPE));
+
+    struct InstantiationArgs2 *inst_args = nullptr;
+    ASSERT_TRUE(wasm_runtime_instantiation_args_create(&inst_args));
+    wasm_runtime_instantiation_args_set_default_stack_size(inst_args,
+                                                           helper->stack_size);
+    wasm_runtime_instantiation_args_set_host_managed_heap_size(
+        inst_args, helper->heap_size);
+
+    wasm_component_import_binding_t import_binding = {};
+    import_binding.name = "source";
+    import_binding.kind = WASM_COMPONENT_EXTERN_KIND_COMPONENT;
+    import_binding.value.component = imported_component;
+    wasm_runtime_instantiation_args_set_component_imports(inst_args,
+                                                          &import_binding, 1);
+
+    wasm_module_inst_t target_inst =
+        wasm_runtime_instantiate_ex2(target_module, inst_args, helper->error_buf,
+                                     (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(target_inst, nullptr) << helper->error_buf;
+
+    wasm_component_component_t forwarded_component =
+        wasm_runtime_lookup_component_component(target_inst, "forwarded-source");
+    ASSERT_NE(forwarded_component, nullptr);
+    ASSERT_EQ(forwarded_component->component, imported_component->component);
+    ASSERT_EQ(forwarded_component->scope, imported_component->scope);
+
+    wasm_runtime_instantiation_args_destroy(inst_args);
+    wasm_runtime_deinstantiate(target_inst);
+    wasm_runtime_unload(target_module);
+    BH_FREE(target_component_raw);
+    wasm_runtime_deinstantiate(source_inst);
+    wasm_runtime_unload(source_module);
+}
+
+TEST_F(BinaryParserTest,
+       TestPublicComponentInstantiationBindsEqBoundTypedTopLevelResourceComponentImports)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs source_load_args = {};
+    char source_module_name[] = "typed-resource-component-import-source-eq-bound";
+    source_load_args.name = source_module_name;
+    wasm_module_t source_module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &source_load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(source_module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(append_typed_resource_component_export_source_sections(
+        (WASMComponentModule *)source_module, "forwarded-resource-type",
+        WASM_COMP_TYPEBOUND_EQ));
+
+    wasm_module_inst_t source_inst =
+        wasm_runtime_instantiate(source_module, helper->stack_size,
+                                 helper->heap_size, helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(source_inst, nullptr) << helper->error_buf;
+
+    wasm_component_component_t imported_component =
+        wasm_runtime_lookup_component_component(source_inst, "typed-source");
+    ASSERT_NE(imported_component, nullptr);
+
+    uint32_t target_wasm_file_size = 0;
+    auto *target_component_raw =
+        (unsigned char *)bh_read_file_to_buffer("add.wasm", &target_wasm_file_size);
+    ASSERT_NE(target_component_raw, nullptr);
+
+    LoadArgs target_load_args = {};
+    char target_module_name[] = "typed-resource-component-import-target-eq-bound";
+    target_load_args.name = target_module_name;
+    wasm_module_t target_module = wasm_runtime_load_ex(
+        target_component_raw, target_wasm_file_size, &target_load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(target_module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(append_top_level_typed_resource_component_import_sections(
+        (WASMComponentModule *)target_module, "forwarded-resource-type",
+        WASM_COMP_TYPEBOUND_EQ));
+
+    struct InstantiationArgs2 *inst_args = nullptr;
+    ASSERT_TRUE(wasm_runtime_instantiation_args_create(&inst_args));
+    wasm_runtime_instantiation_args_set_default_stack_size(inst_args,
+                                                           helper->stack_size);
+    wasm_runtime_instantiation_args_set_host_managed_heap_size(
+        inst_args, helper->heap_size);
+
+    wasm_component_import_binding_t import_binding = {};
+    import_binding.name = "source";
+    import_binding.kind = WASM_COMPONENT_EXTERN_KIND_COMPONENT;
+    import_binding.value.component = imported_component;
+    wasm_runtime_instantiation_args_set_component_imports(inst_args,
+                                                          &import_binding, 1);
+
+    wasm_module_inst_t target_inst =
+        wasm_runtime_instantiate_ex2(target_module, inst_args, helper->error_buf,
+                                     (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(target_inst, nullptr) << helper->error_buf;
+
+    wasm_component_component_t forwarded_component =
+        wasm_runtime_lookup_component_component(target_inst, "forwarded-source");
+    ASSERT_NE(forwarded_component, nullptr);
+    ASSERT_EQ(forwarded_component->component, imported_component->component);
+    ASSERT_EQ(forwarded_component->scope, imported_component->scope);
+
+    wasm_runtime_instantiation_args_destroy(inst_args);
+    wasm_runtime_deinstantiate(target_inst);
+    wasm_runtime_unload(target_module);
+    BH_FREE(target_component_raw);
+    wasm_runtime_deinstantiate(source_inst);
+    wasm_runtime_unload(source_module);
+}
+
+TEST_F(BinaryParserTest,
+       TestPublicComponentInstantiationRejectsAbstractActualForEqBoundTypedTopLevelResourceComponentImports)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs source_load_args = {};
+    char source_module_name[] =
+        "typed-resource-component-import-source-eq-bound-mismatch";
+    source_load_args.name = source_module_name;
+    wasm_module_t source_module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &source_load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(source_module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(append_typed_resource_component_export_source_sections(
+        (WASMComponentModule *)source_module, "forwarded-resource-type",
+        WASM_COMP_TYPEBOUND_TYPE));
+
+    wasm_module_inst_t source_inst =
+        wasm_runtime_instantiate(source_module, helper->stack_size,
+                                 helper->heap_size, helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(source_inst, nullptr) << helper->error_buf;
+
+    wasm_component_component_t imported_component =
+        wasm_runtime_lookup_component_component(source_inst, "typed-source");
+    ASSERT_NE(imported_component, nullptr);
+
+    uint32_t target_wasm_file_size = 0;
+    auto *target_component_raw =
+        (unsigned char *)bh_read_file_to_buffer("add.wasm", &target_wasm_file_size);
+    ASSERT_NE(target_component_raw, nullptr);
+
+    LoadArgs target_load_args = {};
+    char target_module_name[] =
+        "typed-resource-component-import-target-eq-bound-mismatch";
+    target_load_args.name = target_module_name;
+    wasm_module_t target_module = wasm_runtime_load_ex(
+        target_component_raw, target_wasm_file_size, &target_load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(target_module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(append_top_level_typed_resource_component_import_sections(
+        (WASMComponentModule *)target_module, "forwarded-resource-type",
+        WASM_COMP_TYPEBOUND_EQ));
+
+    struct InstantiationArgs2 *inst_args = nullptr;
+    ASSERT_TRUE(wasm_runtime_instantiation_args_create(&inst_args));
+    wasm_runtime_instantiation_args_set_default_stack_size(inst_args,
+                                                           helper->stack_size);
+    wasm_runtime_instantiation_args_set_host_managed_heap_size(
+        inst_args, helper->heap_size);
+
+    wasm_component_import_binding_t import_binding = {};
+    import_binding.name = "source";
+    import_binding.kind = WASM_COMPONENT_EXTERN_KIND_COMPONENT;
+    import_binding.value.component = imported_component;
+    wasm_runtime_instantiation_args_set_component_imports(inst_args,
+                                                          &import_binding, 1);
+
+    wasm_module_inst_t target_inst =
+        wasm_runtime_instantiate_ex2(target_module, inst_args, helper->error_buf,
+                                     (uint32_t)sizeof(helper->error_buf));
+    ASSERT_EQ(target_inst, nullptr);
+    ASSERT_NE(strstr(helper->error_buf, "eq-bound resource type export"), nullptr)
+        << helper->error_buf;
+
+    wasm_runtime_instantiation_args_destroy(inst_args);
+    wasm_runtime_unload(target_module);
+    BH_FREE(target_component_raw);
+    wasm_runtime_deinstantiate(source_inst);
+    wasm_runtime_unload(source_module);
+}
+
+TEST_F(BinaryParserTest,
        TestPublicComponentInstantiationBindsTypedTopLevelInstanceImports)
 {
     bool ret = helper->read_wasm_file("add.wasm");

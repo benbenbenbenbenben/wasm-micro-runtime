@@ -14728,11 +14728,32 @@ validate_runtime_component_against_type(
                                                          : "<unnamed>",
                                              expected_export_name);
 
-                        if (!validate_component_resource_type_bound_supported(
-                                export_decl->extern_desc->extern_desc.type
-                                    .type_bound,
-                                import_name, member_name, error_buf,
-                                error_buf_size))
+                        if (!member_name) {
+                            if (!actual_export->extern_desc
+                                || actual_export->extern_desc->type
+                                       != WASM_COMP_EXTERN_TYPE)
+                                return set_component_runtime_error_fmt(
+                                    error_buf, error_buf_size,
+                                    "component import \"%s\" resource type "
+                                    "export \"%s\" is missing resource type "
+                                    "metadata",
+                                    import_name ? import_name : "<unnamed>",
+                                    expected_export_name);
+
+                            if (!validate_component_resource_type_bound_against_bound(
+                                    export_decl->extern_desc->extern_desc.type
+                                        .type_bound,
+                                    actual_export->extern_desc->extern_desc.type
+                                        .type_bound,
+                                    import_name, member_name, error_buf,
+                                    error_buf_size))
+                                return false;
+                        }
+                        else if (!validate_component_resource_type_bound_supported(
+                                     export_decl->extern_desc->extern_desc.type
+                                         .type_bound,
+                                     import_name, member_name, error_buf,
+                                     error_buf_size))
                             return false;
                         break;
                     default:
