@@ -118,6 +118,9 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
                                     const wasm_component_value_t *args,
                                     bool require_top_level_export);
 
+static void
+destroy_component_public_values(wasm_component_value_t *values, uint32 count);
+
 static bool
 resolve_component_func_type(WASMComponentInstance *inst,
                             const WASMComponentRuntimeFunc *function,
@@ -6037,14 +6040,29 @@ validate_component_host_import_func_type(WASMComponentInstance *inst,
         }
     }
 
-    if (func_type->results && func_type->results->count > 1)
-        return set_component_runtime_error_fmt(
-            error_buf, error_buf_size,
-            "host component import \"%s\" uses multi-result component functions, "
-            "which are not supported yet",
-            import_name);
-
     if (func_type->results && func_type->results->results) {
+        if (func_type->results->count > 1) {
+            for (i = 0; i < func_type->results->count; i++) {
+                bool is_primitive_result = false;
+                uint8 result_prim_type = 0;
+
+                if (!resolve_component_runtime_primitive_type(
+                        component, &func_type->results->results[i],
+                        &is_primitive_result, &result_prim_type, error_buf,
+                        error_buf_size))
+                    return false;
+
+                if (!is_primitive_result
+                    || result_prim_type == WASM_COMP_PRIMVAL_STRING)
+                    return set_component_runtime_error_fmt(
+                        error_buf, error_buf_size,
+                        "host component import \"%s\" only supports scalar "
+                        "multi-result signatures",
+                        import_name);
+            }
+            return true;
+        }
+
         bool is_composite = false;
         bool is_owned_resource = false;
         bool is_borrowed_resource = false;
@@ -10914,7 +10932,8 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
     wasm_runtime_clear_exception((WASMModuleInstanceCommon *)inst);
 
     if (function->kind == WASM_COMP_RUNTIME_FUNC_HOST_IMPORT) {
-        wasm_component_value_t callback_results[1];
+        wasm_component_value_t stack_callback_results[4];
+        wasm_component_value_t *callback_results = stack_callback_results;
         wasm_component_value_t stack_callback_args[16];
         wasm_component_value_t *callback_args = stack_callback_args;
         wasm_val_t ignored = { 0 };
@@ -10933,10 +10952,6 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
             return false;
 
         expected_result_count = get_component_func_result_count(component_type);
-        if (expected_result_count > 1)
-            return set_component_call_error(
-                inst, "host component function multi-result calls are not yet "
-                      "supported");
         if (!component_type)
             return set_component_call_error(
                 inst, "host component function is missing parameter metadata");
@@ -10952,7 +10967,6 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
                 inst,
                 "host component function expects %u results but received %u",
                 expected_result_count, num_results);
-        memset(callback_results, 0, sizeof(callback_results));
         memset(stack_callback_args, 0, sizeof(stack_callback_args));
 
         if (num_args > 0 && !args)
@@ -10962,14 +10976,30 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
             return set_component_call_error(
                 inst, "host component function results buffer is null");
 
+        if (expected_result_count
+            > sizeof(stack_callback_results) / sizeof(stack_callback_results[0])) {
+            callback_results =
+                wasm_runtime_malloc(sizeof(wasm_component_value_t)
+                                    * expected_result_count);
+            if (!callback_results)
+                return set_component_call_error(
+                    inst, "host component function could not allocate result "
+                          "storage");
+        }
+        memset(callback_results, 0,
+               sizeof(wasm_component_value_t) * expected_result_count);
+
         if (host_param_count > sizeof(stack_callback_args)
                                    / sizeof(stack_callback_args[0])) {
             callback_args =
                 wasm_runtime_malloc(sizeof(wasm_component_value_t) * host_param_count);
-            if (!callback_args)
+            if (!callback_args) {
+                if (callback_results != stack_callback_results)
+                    wasm_runtime_free(callback_results);
                 return set_component_call_error(
                     inst, "host component function could not allocate argument "
                           "storage");
+            }
             memset(callback_args, 0,
                    sizeof(wasm_component_value_t) * host_param_count);
         }
@@ -11079,25 +11109,30 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
                                      expected_result_count, callback_results,
                                      num_args, callback_args, host_error_buf,
                                      (uint32)sizeof(host_error_buf))) {
-            wasm_component_detach_matching_public_resource_value(
-                callback_args, host_param_count,
-                wasm_component_get_public_resource_value(&callback_results[0]));
-            wasm_component_value_destroy(&callback_results[0]);
+            for (uint32 result_i = 0; result_i < expected_result_count; result_i++) {
+                wasm_component_detach_matching_public_resource_value(
+                    callback_args, host_param_count,
+                    wasm_component_get_public_resource_value(
+                        &callback_results[result_i]));
+            }
+            destroy_component_public_values(callback_results, expected_result_count);
             if (!cleanup_host_component_resource_arguments(inst, callback_args,
                                                           host_param_count, true))
                 goto host_import_cleanup_fail;
             if (callback_args != stack_callback_args)
                 wasm_runtime_free(callback_args);
+            if (callback_results != stack_callback_results)
+                wasm_runtime_free(callback_results);
             return set_component_call_error_from_host_result(inst, host_error_buf);
         }
 
-        if (expected_result_count == 1) {
+        for (uint32 result_i = 0; result_i < expected_result_count; result_i++) {
             if (function->has_composite_result) {
                 if (!validate_host_component_public_composite_result_value(
                         inst, component,
-                        component_type->results->results, &callback_results[0],
-                        0)) {
-                    wasm_component_value_destroy(&callback_results[0]);
+                        &component_type->results->results[result_i],
+                        &callback_results[result_i], result_i)) {
+                    wasm_component_value_destroy(&callback_results[result_i]);
                     goto host_import_success_fail;
                 }
             }
@@ -11109,37 +11144,39 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
 
                 if (!try_lookup_component_owned_resource_transfer_type(
                         inst, host_resource_state, component,
-                        component_type->results->results, "result", 0,
+                        &component_type->results->results[result_i], "result",
+                        result_i,
                         &host_owned_resource_result, &result_info,
                         &result_resource_type_idx)
                     || (!host_owned_resource_result
                         && !try_lookup_component_borrowed_resource_param_type(
                             inst, host_resource_state, component,
-                            component_type->results->results, "result", 0,
+                            &component_type->results->results[result_i], "result",
+                            result_i,
                             &host_borrowed_resource_result, &result_info,
                             &result_resource_type_idx))
                     || (!host_owned_resource_result
                         && !host_borrowed_resource_result
                         && !lookup_component_canon_lift_value_type(
-                            component, component_type->results->results,
-                            "result", 0, true, false, true, true, &result_info,
-                            inst))) {
-                    wasm_component_value_destroy(&callback_results[0]);
+                            component, &component_type->results->results[result_i],
+                            "result", result_i, true, false, true, true,
+                            &result_info, inst))) {
+                    wasm_component_value_destroy(&callback_results[result_i]);
                     goto host_import_success_fail;
                 }
 
                 if (host_owned_resource_result) {
                     WASMComponentPublicResourceValue *resource_value =
                         wasm_component_get_public_resource_value(
-                            &callback_results[0]);
+                            &callback_results[result_i]);
                     wasm_val_t handle_value = { 0 };
                     uint32 restored_handle;
 
                     if (!resource_value) {
-                        wasm_component_value_destroy(&callback_results[0]);
+                        wasm_component_value_destroy(&callback_results[result_i]);
                         set_component_call_error(
                             inst,
-                            "host component function result 0 must return an "
+                            "host component function result must return an "
                             "owned resource argument from the current call or a "
                             "fresh imported resource result");
                         goto host_import_success_fail;
@@ -11147,10 +11184,10 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
 
                     if (resource_value->kind
                         == WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_BORROWED) {
-                        wasm_component_value_destroy(&callback_results[0]);
+                        wasm_component_value_destroy(&callback_results[result_i]);
                         set_component_call_error(
                             inst,
-                            "host component function result 0 cannot return a "
+                            "host component function result cannot return a "
                             "borrowed resource value");
                         goto host_import_success_fail;
                     }
@@ -11159,10 +11196,10 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
                         if (resource_value->resource_state != host_resource_state
                             || resource_value->resource_type_idx
                                    != result_resource_type_idx) {
-                            wasm_component_value_destroy(&callback_results[0]);
+                            wasm_component_value_destroy(&callback_results[result_i]);
                             set_component_call_error(
                                 inst,
-                                "host component function result 0 must return "
+                                "host component function result must return "
                                 "an owned resource argument from the current "
                                 "call or a fresh imported resource result");
                             goto host_import_success_fail;
@@ -11172,8 +11209,8 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
                         wasm_component_detach_matching_public_resource_value(
                             callback_args, host_param_count, resource_value);
                         if (!wasm_component_restore_public_resource_value(
-                                inst, &callback_results[0])) {
-                            wasm_component_value_destroy(&callback_results[0]);
+                                inst, &callback_results[result_i])) {
+                            wasm_component_value_destroy(&callback_results[result_i]);
                             goto host_import_success_fail;
                         }
                         handle_value.kind = WASM_I32;
@@ -11181,28 +11218,29 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
                     }
                     else if (!wasm_component_promote_pending_imported_resource_result(
                                   inst, host_resource_state, result_resource_type_idx,
-                                  &callback_results[0], &handle_value)) {
-                        wasm_component_value_destroy(&callback_results[0]);
+                                  &callback_results[result_i], &handle_value)) {
+                        wasm_component_value_destroy(&callback_results[result_i]);
                         goto host_import_success_fail;
                     }
 
                     if (!encode_component_public_scalar_value(
-                            &result_info, &handle_value, &callback_results[0]))
+                            &result_info, &handle_value,
+                            &callback_results[result_i]))
                         goto host_import_success_fail;
                 }
                 else if (host_borrowed_resource_result) {
                     WASMComponentPublicResourceValue *resource_value =
                         wasm_component_get_public_resource_value(
-                            &callback_results[0]);
+                            &callback_results[result_i]);
                     bool matched_current_borrow_arg = false;
 
                     if (!resource_value
                         || resource_value->kind
                                != WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_BORROWED) {
-                        wasm_component_value_destroy(&callback_results[0]);
+                        wasm_component_value_destroy(&callback_results[result_i]);
                         set_component_call_error(
                             inst,
-                            "host component function result 0 must return a "
+                            "host component function result must return a "
                             "borrowed resource argument from the current call");
                         goto host_import_success_fail;
                     }
@@ -11217,19 +11255,20 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
                         }
                     }
                     if (!matched_current_borrow_arg) {
-                        wasm_component_value_destroy(&callback_results[0]);
+                        wasm_component_value_destroy(&callback_results[result_i]);
                         set_component_call_error(
                             inst,
-                            "host component function result 0 must return a "
+                            "host component function result must return a "
                             "borrowed resource argument from the current call");
                         goto host_import_success_fail;
                     }
                 }
                 else if (result_info.kind == WASM_COMP_CANON_LIFT_VALUE_SCALAR) {
                     if (!decode_component_public_scalar_value(
-                            inst, &callback_results[0], &result_info, "result", 0,
+                            inst, &callback_results[result_i], &result_info,
+                            "result", result_i,
                             &ignored)) {
-                        wasm_component_value_destroy(&callback_results[0]);
+                        wasm_component_value_destroy(&callback_results[result_i]);
                         goto host_import_success_fail;
                     }
                 }
@@ -11240,36 +11279,42 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
 
                     if ((result_info.kind == WASM_COMP_CANON_LIFT_VALUE_STRING
                          && !decode_component_public_string_value(
-                              inst, &callback_results[0], &result_info, "result",
-                              0, &payload, &payload_len))
+                              inst, &callback_results[result_i], &result_info,
+                              "result", result_i, &payload, &payload_len))
                         || (result_info.kind == WASM_COMP_CANON_LIFT_VALUE_LIST_STRING
                             && !decode_component_public_list_string_value(
-                                inst, &callback_results[0], &result_info, "result",
-                                0, &payload, &payload_len, &element_count))
+                                inst, &callback_results[result_i], &result_info,
+                                "result", result_i, &payload, &payload_len,
+                                &element_count))
                         || (result_info.kind == WASM_COMP_CANON_LIFT_VALUE_LIST_SCALAR
                             && !decode_component_public_list_scalar_value(
-                                 inst, &callback_results[0], &result_info, "result",
-                                 0, &payload, &payload_len))) {
-                        wasm_component_value_destroy(&callback_results[0]);
+                                 inst, &callback_results[result_i], &result_info,
+                                 "result", result_i, &payload, &payload_len))) {
+                        wasm_component_value_destroy(&callback_results[result_i]);
                         goto host_import_success_fail;
                     }
                     (void)element_count;
                 }
             }
 
-            wasm_component_value_destroy(&results[0]);
-            results[0] = callback_results[0];
-            memset(&callback_results[0], 0, sizeof(callback_results[0]));
+            wasm_component_value_destroy(&results[result_i]);
+            results[result_i] = callback_results[result_i];
+            memset(&callback_results[result_i], 0,
+                   sizeof(callback_results[result_i]));
         }
 
-        wasm_component_detach_matching_public_resource_value(
-            callback_args, host_param_count,
-            wasm_component_get_public_resource_value(&results[0]));
+        for (uint32 result_i = 0; result_i < expected_result_count; result_i++) {
+            wasm_component_detach_matching_public_resource_value(
+                callback_args, host_param_count,
+                wasm_component_get_public_resource_value(&results[result_i]));
+        }
         if (!cleanup_host_component_resource_arguments(inst, callback_args,
                                                       host_param_count, false))
             goto host_import_cleanup_fail;
         if (callback_args != stack_callback_args)
             wasm_runtime_free(callback_args);
+        if (callback_results != stack_callback_results)
+            wasm_runtime_free(callback_results);
         return true;
 
 host_import_param_fail_missing_callback:
@@ -11281,26 +11326,40 @@ host_import_param_fail:
             goto host_import_cleanup_fail;
         if (callback_args != stack_callback_args)
             wasm_runtime_free(callback_args);
+        destroy_component_public_values(callback_results, expected_result_count);
+        if (callback_results != stack_callback_results)
+            wasm_runtime_free(callback_results);
         return false;
 
 host_import_success_fail:
-        wasm_component_detach_matching_public_resource_value(
-            callback_args, host_param_count,
-            wasm_component_get_public_resource_value(&callback_results[0]));
+        for (uint32 result_i = 0; result_i < expected_result_count; result_i++) {
+            wasm_component_detach_matching_public_resource_value(
+                callback_args, host_param_count,
+                wasm_component_get_public_resource_value(
+                    &callback_results[result_i]));
+        }
         if (!cleanup_host_component_resource_arguments(inst, callback_args,
                                                       host_param_count, true))
             goto host_import_cleanup_fail;
         if (callback_args != stack_callback_args)
             wasm_runtime_free(callback_args);
+        destroy_component_public_values(callback_results, expected_result_count);
+        if (callback_results != stack_callback_results)
+            wasm_runtime_free(callback_results);
         return false;
 
 host_import_cleanup_fail:
-        wasm_component_detach_matching_public_resource_value(
-            callback_args, host_param_count,
-            wasm_component_get_public_resource_value(&callback_results[0]));
-        wasm_component_value_destroy(&callback_results[0]);
+        for (uint32 result_i = 0; result_i < expected_result_count; result_i++) {
+            wasm_component_detach_matching_public_resource_value(
+                callback_args, host_param_count,
+                wasm_component_get_public_resource_value(
+                    &callback_results[result_i]));
+        }
+        destroy_component_public_values(callback_results, expected_result_count);
         if (callback_args != stack_callback_args)
             wasm_runtime_free(callback_args);
+        if (callback_results != stack_callback_results)
+            wasm_runtime_free(callback_results);
         return false;
     }
 
@@ -11901,7 +11960,8 @@ wasm_component_call_internal(WASMComponentInstance *inst,
     if (function->kind == WASM_COMP_RUNTIME_FUNC_HOST_IMPORT) {
         wasm_component_value_t stack_public_args[16];
         wasm_component_value_t *public_args = stack_public_args;
-        wasm_component_value_t public_result = { 0 };
+        wasm_component_value_t stack_public_results[4];
+        wasm_component_value_t *public_results = stack_public_results;
 
         if (require_top_level_export && !function->is_top_level_export)
             return set_component_call_error(
@@ -11941,10 +12001,6 @@ wasm_component_call_internal(WASMComponentInstance *inst,
                 inst, "host component function is missing parameter metadata");
 
         expected_result_count = get_component_func_result_count(component_type);
-        if (expected_result_count > 1)
-            return set_component_call_error(
-                inst, "host component function multi-result calls are not yet "
-                      "supported");
         if (num_args != (component_type->params ? component_type->params->count : 0))
             return set_component_call_error_fmt(
                 inst,
@@ -11963,13 +12019,28 @@ wasm_component_call_internal(WASMComponentInstance *inst,
             return set_component_call_error(
                 inst, "host component function results buffer is null");
 
+        if (expected_result_count
+            > sizeof(stack_public_results) / sizeof(stack_public_results[0])) {
+            public_results = wasm_runtime_malloc(sizeof(wasm_component_value_t)
+                                                 * expected_result_count);
+            if (!public_results)
+                return set_component_call_error(
+                    inst, "host component function could not allocate result "
+                          "storage");
+        }
+        memset(public_results, 0,
+               sizeof(wasm_component_value_t) * expected_result_count);
+
         if (num_args > sizeof(stack_public_args) / sizeof(stack_public_args[0])) {
             public_args =
                 wasm_runtime_malloc(sizeof(wasm_component_value_t) * num_args);
-            if (!public_args)
+            if (!public_args) {
+                if (public_results != stack_public_results)
+                    wasm_runtime_free(public_results);
                 return set_component_call_error(
                     inst, "host component function could not allocate argument "
                           "storage");
+            }
         }
         memset(public_args, 0, sizeof(wasm_component_value_t) * num_args);
 
@@ -11996,13 +12067,16 @@ wasm_component_call_internal(WASMComponentInstance *inst,
 
         if (!wasm_component_call_values_internal(inst, function, expected_result_count,
                                                  expected_result_count
-                                                     ? &public_result
+                                                     ? public_results
                                                      : NULL,
                                                  num_args, public_args, false)) {
             for (uint32 j = 0; j < num_args; j++)
                 wasm_component_value_destroy(&public_args[j]);
             if (public_args != stack_public_args)
                 wasm_runtime_free(public_args);
+            destroy_component_public_values(public_results, expected_result_count);
+            if (public_results != stack_public_results)
+                wasm_runtime_free(public_results);
             return false;
         }
 
@@ -12011,21 +12085,25 @@ wasm_component_call_internal(WASMComponentInstance *inst,
         if (public_args != stack_public_args)
             wasm_runtime_free(public_args);
 
-        if (expected_result_count == 1) {
+        for (uint32 j = 0; j < expected_result_count; j++) {
             WASMComponentCanonLiftValueInfo result_info_local;
 
             if (!lookup_component_canon_lift_value_type(
-                    component, component_type->results->results,
-                    "result", 0, false, false, false, false, &result_info_local, inst)
+                    component, &component_type->results->results[j],
+                    "result", j, false, false, false, false, &result_info_local, inst)
                 || !decode_component_public_scalar_value(
-                    inst, &public_result, &result_info_local, "result", 0,
-                    &results[0])) {
-                wasm_component_value_destroy(&public_result);
+                    inst, &public_results[j], &result_info_local, "result", j,
+                    &results[j])) {
+                destroy_component_public_values(public_results, expected_result_count);
+                if (public_results != stack_public_results)
+                    wasm_runtime_free(public_results);
                 return false;
             }
         }
 
-        wasm_component_value_destroy(&public_result);
+        destroy_component_public_values(public_results, expected_result_count);
+        if (public_results != stack_public_results)
+            wasm_runtime_free(public_results);
         return true;
     }
 

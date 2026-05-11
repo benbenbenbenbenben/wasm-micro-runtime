@@ -503,12 +503,14 @@ Supported today:
 - materializing multiple start results when the start function is a
   canon-lifted scalar-only multi-result function using direct core multi-value
   returns
+- materializing multiple start results when the start function is a
+  host-imported scalar-only multi-result component function
 - parsing and validating multi-result component functypes, including start
   sections whose declared result count matches a multi-result functype
 
 Still missing:
 
-- multi-result execution for host-imported component functions
+- non-scalar multi-result execution for host-imported component functions
 - multi-result execution for memory-backed, composite, or resource results
 - support for the spec-style retptr-based Canonical ABI shape for flattened
   multi-results
