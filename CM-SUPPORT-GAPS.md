@@ -501,10 +501,13 @@ Supported today:
 - top-level start execution for the current supported public-value subset
 - nested start execution for the current supported public-value subset
 - materializing at most one start result as a component value
+- parsing and validating multi-result component functypes, including start
+  sections whose declared result count matches a multi-result functype
 
 Still missing:
 
-- multi-result start handling
+- executing multi-result start sections (the runtime now rejects them
+  explicitly instead of the parser/type model rejecting the binary structurally)
 - Canonical ABI beyond the current supported public-value subset
 - the more complete execution space needed for start-heavy real-world components
 

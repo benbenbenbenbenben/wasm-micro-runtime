@@ -19,6 +19,47 @@ static bool
 defvaltype_equal(WASMComponentDefValType *a, WASMComponentDefValType *b,
                  WASMComponentValidationContext *ctx);
 
+static bool
+valtype_subtype(WASMComponentValueType *a, WASMComponentValueType *b,
+                WASMComponentValidationContext *ctx);
+static bool
+valtype_equal(WASMComponentValueType *a, WASMComponentValueType *b,
+              WASMComponentValidationContext *ctx);
+
+static bool
+result_list_equal(WASMComponentResultList *a, WASMComponentResultList *b,
+                  WASMComponentValidationContext *ctx)
+{
+    if (!a && !b)
+        return true;
+    if (!a || !b)
+        return false;
+    if (a->count != b->count)
+        return false;
+    for (uint32_t i = 0; i < a->count; i++) {
+        if (!valtype_equal(&a->results[i], &b->results[i], ctx))
+            return false;
+    }
+    return true;
+}
+
+static bool
+result_list_subtype(WASMComponentResultList *a, WASMComponentResultList *b,
+                    WASMComponentValidationContext *ctx)
+{
+    if (!a && !b)
+        return true;
+    if (!a || !b)
+        return false;
+    if (a->count != b->count)
+        return false;
+    for (uint32_t i = 0; i < a->count; i++) {
+        if (!valtype_subtype(&a->results[i], &b->results[i], ctx))
+            return false;
+    }
+    return true;
+}
+
 // Grow types[] and type_is_local[] if needed, then record the entry at
 // ctx->type_count.
 static bool
@@ -210,17 +251,7 @@ functype_equal(WASMComponentFuncType *a, WASMComponentFuncType *b,
             return false;
     }
 
-    // Compare results
-    if (!a->results && !b->results)
-        return true;
-    if (!a->results || !b->results)
-        return false;
-    if (a->results->tag != b->results->tag)
-        return false;
-    if (a->results->tag == WASM_COMP_RESULT_LIST_EMPTY)
-        return true;
-
-    return valtype_equal(a->results->results, b->results->results, ctx);
+    return result_list_equal(a->results, b->results, ctx);
 }
 
 // Compare two WASMComponentDefValType* for structural equality
@@ -450,17 +481,7 @@ functype_subtype(WASMComponentFuncType *a, WASMComponentFuncType *b,
             return false;
     }
 
-    if (!a->results && !b->results)
-        return true;
-    if (!a->results || !b->results)
-        return false;
-    if (a->results->tag != b->results->tag)
-        return false;
-    if (a->results->tag == WASM_COMP_RESULT_LIST_EMPTY)
-        return true;
-
-    // COVARIANT: A's result must be subtype of B's result
-    return valtype_subtype(a->results->results, b->results->results, ctx);
+    return result_list_subtype(a->results, b->results, ctx);
 }
 
 // Check if defvaltype A is a subtype of defvaltype B.
@@ -722,11 +743,10 @@ result_is_own_or_result_own(WASMComponentFuncType *ft,
     if (!ft || !ft->results)
         return false;
 
-    if (ft->results->tag != WASM_COMP_RESULT_LIST_WITH_TYPE
-        || !ft->results->results)
+    if (ft->results->count != 1 || !ft->results->results)
         return false;
 
-    WASMComponentValueType *rv = ft->results->results;
+    WASMComponentValueType *rv = &ft->results->results[0];
 
     // Direct own<R>
     if (valtype_get_own_resource(rv, ctx) != UINT32_MAX)
@@ -994,10 +1014,11 @@ functype_results_has_list_or_string(WASMComponentFuncType *ft,
     if (!ft)
         return false;
 
-    if (ft->results && ft->results->tag == WASM_COMP_RESULT_LIST_WITH_TYPE
-        && ft->results->results) {
-        if (valtype_has_list_or_string(ft->results->results, ctx))
-            return true;
+    if (ft->results && ft->results->results) {
+        for (uint32_t i = 0; i < ft->results->count; i++) {
+            if (valtype_has_list_or_string(&ft->results->results[i], ctx))
+                return true;
+        }
     }
 
     return false;
@@ -1911,13 +1932,17 @@ validate_type_section(WASMComponentValidationContext *ctx,
                 }
                 // borrow<T> is a caller-scoped lend and returning it across a
                 // function boundary would extend its lifetime past the call
-                if (ft->results
-                    && ft->results->tag == WASM_COMP_RESULT_LIST_WITH_TYPE
-                    && valtype_has_borrow(ft->results->results, ctx)) {
-                    set_error_buf_ex(error_buf, error_buf_size,
-                                     "borrow type must not appear in functype "
-                                     "result position");
-                    return false;
+                if (ft->results && ft->results->results) {
+                    for (uint32_t result_idx = 0; result_idx < ft->results->count;
+                         result_idx++) {
+                        if (!valtype_has_borrow(
+                                &ft->results->results[result_idx], ctx))
+                            continue;
+                        set_error_buf_ex(error_buf, error_buf_size,
+                                         "borrow type must not appear in "
+                                         "functype result position");
+                        return false;
+                    }
                 }
                 break;
             }
@@ -2356,10 +2381,8 @@ validate_start_section(WASMComponentValidationContext *ctx,
             ctx->types[start_ft_idx]->type.func_type;
         uint32_t expected_params =
             start_ft->params ? start_ft->params->count : 0;
-        uint32_t expected_results = 0;
-        if (start_ft->results
-            && start_ft->results->tag == WASM_COMP_RESULT_LIST_WITH_TYPE)
-            expected_results = 1;
+        uint32_t expected_results =
+            start_ft->results ? start_ft->results->count : 0;
 
         if (start_section->value_args_count != expected_params) {
             set_error_buf_ex(error_buf, error_buf_size,

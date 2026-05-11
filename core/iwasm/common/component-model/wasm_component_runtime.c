@@ -1890,7 +1890,7 @@ wasm_component_func_get_generic_signature(
         wasm_valkind_t public_kind = WASM_I32;
 
         if (!resolve_component_scalar_primitive_type(
-                component, func_type->results->results, "generic host API",
+                component, &func_type->results->results[i], "generic host API",
                 NULL, "result", i, &primitive_type, &supported, error_buf,
                 error_buf_size))
             return false;
@@ -2593,6 +2593,11 @@ validate_lowered_import_signature(
     }
 
     expected_result_count = get_component_func_result_count(component_type);
+    if (expected_result_count > 1)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "component canon lower direct core-call bindings do not yet support "
+            "multi-result component functions");
     if (expected_result_count == 1) {
         WASMComponentCanonLiftValueShape shape;
         WASMComponentCanonLiftValueInfo type_info;
@@ -5266,10 +5271,8 @@ static uint32
 get_component_func_result_count(const WASMComponentFuncType *component_type)
 {
     return component_type && component_type->results
-                   && component_type->results->tag
-                           == WASM_COMP_RESULT_LIST_WITH_TYPE
                    && component_type->results->results
-               ? 1
+               ? component_type->results->count
                : 0;
 }
 
@@ -6034,8 +6037,14 @@ validate_component_host_import_func_type(WASMComponentInstance *inst,
         }
     }
 
-    if (func_type->results
-        && func_type->results->tag == WASM_COMP_RESULT_LIST_WITH_TYPE) {
+    if (func_type->results && func_type->results->count > 1)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "host component import \"%s\" uses multi-result component functions, "
+            "which are not supported yet",
+            import_name);
+
+    if (func_type->results && func_type->results->results) {
         bool is_composite = false;
         bool is_owned_resource = false;
         bool is_borrowed_resource = false;
@@ -6409,9 +6418,13 @@ resolve_component_canon_lift_abi(WASMComponentInstance *inst,
         }
     }
 
-    if (func_type->results
-        && func_type->results->tag == WASM_COMP_RESULT_LIST_WITH_TYPE
-        && func_type->results->results) {
+    if (func_type->results && func_type->results->count > 1)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "component canon lift function uses multi-result component "
+            "signatures, which are not supported yet");
+
+    if (func_type->results && func_type->results->results) {
         bool has_string_result = false;
         bool has_list_scalar_result = false;
         bool is_primitive_result = false;
@@ -10904,6 +10917,10 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
             return false;
 
         expected_result_count = get_component_func_result_count(component_type);
+        if (expected_result_count > 1)
+            return set_component_call_error(
+                inst, "host component function multi-result calls are not yet "
+                      "supported");
         if (!component_type)
             return set_component_call_error(
                 inst, "host component function is missing parameter metadata");
@@ -11866,6 +11883,10 @@ wasm_component_call_internal(WASMComponentInstance *inst,
                 inst, "host component function is missing parameter metadata");
 
         expected_result_count = get_component_func_result_count(component_type);
+        if (expected_result_count > 1)
+            return set_component_call_error(
+                inst, "host component function multi-result calls are not yet "
+                      "supported");
         if (num_args != (component_type->params ? component_type->params->count : 0))
             return set_component_call_error_fmt(
                 inst,
@@ -12281,6 +12302,18 @@ execute_component_start_section_with_public_values(
     WASMComponentFuncType *component_type = NULL;
     wasm_component_value_t public_result = { 0 };
 
+    if (!resolve_component_start_function_type(inst, function, &component_type))
+        return set_component_start_error_from_exception(inst, error_buf,
+                                                        error_buf_size,
+                                                        error_prefix);
+
+    if (get_component_func_result_count(component_type) > 1)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "%s uses a multi-result component function, which is not "
+            "supported yet",
+            error_prefix);
+
     if (!wasm_component_call_values_internal(inst, function, start_section->result,
                                              start_section->result ? &public_result
                                                                    : NULL,
@@ -12292,15 +12325,8 @@ execute_component_start_section_with_public_values(
     }
 
     if (start_section->result > 0) {
-        if (!resolve_component_start_function_type(inst, function, &component_type)) {
-            wasm_component_value_destroy(&public_result);
-            return set_component_start_error_from_exception(inst, error_buf,
-                                                            error_buf_size,
-                                                            error_prefix);
-        }
-
         if (!component_type || !component_type->results
-            || component_type->results->tag != WASM_COMP_RESULT_LIST_WITH_TYPE
+            || component_type->results->count == 0
             || !component_type->results->results) {
             wasm_component_value_destroy(&public_result);
             return set_component_runtime_error_fmt(
@@ -14914,7 +14940,7 @@ component_func_type_uses_supported_scalar_matching(
 
     if (result_count == 1) {
         if (!resolve_component_scalar_primitive_type(
-                component, func_type->results->results, import_name,
+                component, &func_type->results->results[0], import_name,
                 member_name, "result", 0, &ignored_primitive_type,
                 &value_supported, error_buf, error_buf_size))
             return false;
@@ -14962,7 +14988,7 @@ component_func_type_uses_supported_value_matching(
 
     if (result_count == 1
         && !component_value_type_uses_supported_matching_subset(
-            component, func_type->results->results))
+            component, &func_type->results->results[0]))
         return true;
 
     *supported = true;
@@ -15044,10 +15070,10 @@ validate_component_func_types_equal(
                 member_name ? member_name : "");
     }
 
-    if (expected_result_count == 1) {
+    for (uint32 i = 0; i < expected_result_count; i++) {
         if (!validate_component_value_types_equal(
-                expected_component, expected_type->results->results,
-                actual_component, actual_type->results->results, import_name,
+                expected_component, &expected_type->results->results[i],
+                actual_component, &actual_type->results->results[i], import_name,
                 member_name, error_buf, error_buf_size))
             return set_component_runtime_error_fmt(
                 error_buf, error_buf_size,

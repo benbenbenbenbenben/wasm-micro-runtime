@@ -2652,6 +2652,30 @@ lookup_local_component_func_type(WASMComponentModule *component_module,
     return nullptr;
 }
 
+static bool
+expand_func_type_to_two_results(WASMComponentFuncType *func_type)
+{
+    WASMComponentValueType *new_results;
+
+    if (!func_type || !func_type->results || !func_type->results->results
+        || func_type->results->count != 1) {
+        return false;
+    }
+
+    new_results = (WASMComponentValueType *)wasm_runtime_malloc(
+        sizeof(WASMComponentValueType) * 2);
+    if (!new_results) {
+        return false;
+    }
+
+    new_results[0] = func_type->results->results[0];
+    new_results[1] = func_type->results->results[0];
+    wasm_runtime_free(func_type->results->results);
+    func_type->results->results = new_results;
+    func_type->results->count = 2;
+    return true;
+}
+
 static int32_t
 find_top_level_export_sort_index(WASMComponentModule *component_module,
                                  const char *export_name, uint8_t sort)
@@ -3300,6 +3324,7 @@ append_component_func_type(
     memset(func_type->results, 0, sizeof(WASMComponentResultList));
     if (result_type.has_value()) {
         func_type->results->tag = WASM_COMP_RESULT_LIST_WITH_TYPE;
+        func_type->results->count = 1;
         func_type->results->results =
             (WASMComponentValueType *)wasm_runtime_malloc(
                 sizeof(WASMComponentValueType));
@@ -3480,22 +3505,25 @@ clone_component_func_type(const WASMComponent *source_component,
     }
     memset(func_type->results, 0, sizeof(WASMComponentResultList));
     if (!src || !src->results
-        || src->results->tag == WASM_COMP_RESULT_LIST_EMPTY
+        || src->results->count == 0
         || !src->results->results) {
         func_type->results->tag = WASM_COMP_RESULT_LIST_EMPTY;
     }
     else {
         func_type->results->tag = src->results->tag;
+        func_type->results->count = src->results->count;
         func_type->results->results =
             (WASMComponentValueType *)wasm_runtime_malloc(
-                sizeof(WASMComponentValueType));
+                sizeof(WASMComponentValueType) * src->results->count);
         if (!func_type->results->results) {
             return nullptr;
         }
-        if (!clone_supported_value_type_into_component(
-                target_component, source_component, src->results->results,
-                func_type->results->results)) {
-            return nullptr;
+        for (uint32_t i = 0; i < src->results->count; i++) {
+            if (!clone_supported_value_type_into_component(
+                    target_component, source_component, &src->results->results[i],
+                    &func_type->results->results[i])) {
+                return nullptr;
+            }
         }
     }
 
@@ -4197,6 +4225,7 @@ append_nested_component_local_resource_instance_sections(
     memset(nested_result_type, 0, sizeof(WASMComponentValueType));
     memset(nested_param_list, 0, sizeof(WASMComponentParamList));
     nested_result_list->tag = WASM_COMP_RESULT_LIST_WITH_TYPE;
+    nested_result_list->count = 1;
     nested_result_list->results = nested_result_type;
     *nested_result_type = make_component_type_index_value_type(nested_own_type_idx);
     nested_func_type->params = nested_param_list;
@@ -40545,6 +40574,49 @@ TEST_F(BinaryParserTest, TestRuntimeExecutesTopLevelScalarStartSections)
 
     wasm_component_value_destroy(&value);
     wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestRuntimeRejectsTopLevelMultiResultStartSectionExecution)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "runtime-top-level-multi-result-start";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    ASSERT_TRUE(append_top_level_s32_value_section(
+        (WASMComponentModule *)module, runtime_value_section_i32_two_bytes,
+        (uint32_t)sizeof(runtime_value_section_i32_two_bytes)));
+    ASSERT_TRUE(append_top_level_s32_value_section(
+        (WASMComponentModule *)module, runtime_value_section_i32_three_bytes,
+        (uint32_t)sizeof(runtime_value_section_i32_three_bytes)));
+    uint32_t start_args[] = { 0, 1 };
+    ASSERT_TRUE(append_top_level_start_section((WASMComponentModule *)module, 0,
+                                               start_args, 2, 2));
+
+    WASMComponentFuncType *func_type =
+        lookup_local_component_func_type((WASMComponentModule *)module, 0);
+    ASSERT_NE(func_type, nullptr);
+    ASSERT_TRUE(expand_func_type_to_two_results(func_type));
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_EQ(module_inst, nullptr);
+    ASSERT_NE(strstr(helper->error_buf,
+                     "multi-result component signatures"),
+              nullptr)
+        << helper->error_buf;
+
     wasm_runtime_unload(module);
 }
 

@@ -1105,6 +1105,7 @@ typedef struct WASMComponentParamList {
 // resultlist ::= rt*:vec(<resulttype>) => rt*
 typedef struct WASMComponentResultList {
     WASMComponentResultListTag tag;
+    uint32_t count;
     WASMComponentValueType *results;
 } WASMComponentResultList;
 

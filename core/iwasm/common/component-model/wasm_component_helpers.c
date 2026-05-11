@@ -51,7 +51,7 @@ parse_result_list(const uint8_t **payload, const uint8_t *end,
     switch (tag) {
         case WASM_COMP_RESULT_LIST_WITH_TYPE:
         {
-            // Allocate memory for the single result value type
+            (*out)->count = 1;
             (*out)->results =
                 wasm_runtime_malloc(sizeof(WASMComponentValueType));
             if (!(*out)->results) {
@@ -72,14 +72,49 @@ parse_result_list(const uint8_t **payload, const uint8_t *end,
         }
         case WASM_COMP_RESULT_LIST_EMPTY:
         {
-            (*out)->results = NULL;
-            // Binary.md encodes empty resultlist as 0x01 0x00
-            uint8_t terminator = *p++;
-            if (terminator != 0x00) {
-                set_error_buf_ex(error_buf, error_buf_size,
-                                 "Invalid empty resultlist terminator: 0x%02x",
-                                 terminator);
+            uint64_t count_leb = 0;
+
+            if (!read_leb((uint8_t **)&p, end, 32, false, &count_leb, error_buf,
+                          error_buf_size)) {
                 return false;
+            }
+            (*out)->count = (uint32_t)count_leb;
+            if ((*out)->count == 0) {
+                (*out)->results = NULL;
+                break;
+            }
+
+            (*out)->results = wasm_runtime_malloc(sizeof(WASMComponentValueType)
+                                                  * (*out)->count);
+            if (!(*out)->results) {
+                set_error_buf_ex(error_buf, error_buf_size,
+                                 "Failed to allocate memory for result value "
+                                 "types");
+                return false;
+            }
+            memset((*out)->results, 0,
+                   sizeof(WASMComponentValueType) * (*out)->count);
+
+            for (uint32_t i = 0; i < (*out)->count; i++) {
+                WASMComponentCoreName *label =
+                    wasm_runtime_malloc(sizeof(WASMComponentCoreName));
+                if (!label) {
+                    set_error_buf_ex(error_buf, error_buf_size,
+                                     "Failed to allocate memory for result "
+                                     "label");
+                    return false;
+                }
+                memset(label, 0, sizeof(*label));
+                if (!parse_label_prime(&p, end, &label, error_buf,
+                                       error_buf_size)
+                    || !parse_valtype(&p, end, &(*out)->results[i], error_buf,
+                                      error_buf_size)) {
+                    free_label_prime(label);
+                    wasm_runtime_free(label);
+                    return false;
+                }
+                free_label_prime(label);
+                wasm_runtime_free(label);
             }
             break;
         }
