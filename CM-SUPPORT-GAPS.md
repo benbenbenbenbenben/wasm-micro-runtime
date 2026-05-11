@@ -254,6 +254,10 @@ The runtime now includes:
   locally-defined resource types and aliases thereof, `rep i32` only, sync
   destructors on explicit `resource.drop`, no async drop, no imported
   non-alias resource types
+- explicit rejection for imported resource builtin misuse:
+  `canon resource.new` / `canon resource.rep` on imported resource types now
+  fail with spec-grounded errors, while imported `canon resource.drop` is still
+  a not-yet-wired gap
 - deinstantiate-time destructor execution for still-live handles in that same
   currently supported local subset
 - finalizer cleanup during deinstantiation
@@ -508,6 +512,8 @@ What exists:
 - deinstantiate-time sync destructor execution for still-live handles in that
   same currently supported subset
 - deinstantiate-time cleanup/finalization
+- explicit rejection of imported `resource.new` / `resource.rep`, with imported
+  `resource.drop` still deferred pending a real imported-resource runtime model
 
 What is still missing:
 

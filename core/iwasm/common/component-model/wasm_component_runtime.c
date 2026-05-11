@@ -2168,6 +2168,27 @@ prepare_resource_builtin_function(
             "component resource builtin uses unresolved resource type index %u",
             resource_type_idx);
 
+    if (canonical_resource_type
+        && canonical_resource_type->kind == WASM_COMP_RUNTIME_RESOURCE_TYPE_IMPORTED) {
+        if (canon_tag == WASM_COMP_CANON_RESOURCE_NEW
+            || canon_tag == WASM_COMP_CANON_RESOURCE_REP) {
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                "component canon %s is invalid for imported resource types "
+                "(type index %u)",
+                canon_tag == WASM_COMP_CANON_RESOURCE_NEW ? "resource.new"
+                                                          : "resource.rep",
+                resource_type_idx);
+        }
+        if (canon_tag == WASM_COMP_CANON_RESOURCE_DROP) {
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                "component canon resource.drop for imported resource types is "
+                "not supported yet (type index %u)",
+                resource_type_idx);
+        }
+    }
+
     if (!canonical_resource_type
         || canonical_resource_type->kind != WASM_COMP_RUNTIME_RESOURCE_TYPE_LOCAL)
         return set_component_runtime_error_fmt(
