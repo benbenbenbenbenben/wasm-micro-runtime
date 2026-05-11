@@ -546,6 +546,9 @@ What exists:
   resource-type members with abstract `type` bounds
 - recursive component-type matching for nested component exports whose own
   component types export resource-type members with abstract `type` bounds
+- public `wasm_runtime_call_component_values(...)` lowering of existing
+  `own<resource>` arguments into exported canon-lifted component functions for
+  the currently supported local-resource subset
 - synchronous host callback round-tripping of existing `own<resource>` handles
   through `wasm_runtime_call_component_values(...)` for host function imports
 - synchronous host callback transport of borrowed resource parameters for host
@@ -575,13 +578,16 @@ What is still missing:
 - resource-type identity/rebinding beyond the current name/sort plus
   expected-bound-shape matching subset; eq-bound matching is still explicitly
   unsupported
-- borrowed resource values and general own/borrow public value transport beyond
-  the current callback subset (borrowed parameters, round-tripping existing
-  owned handles, plus fresh imported own results)
+- borrowed resource values and the rest of general own/borrow public value
+  transport beyond the current supported subset (host-callback borrowed
+  parameters, host-callback round-tripping of existing owned handles, public
+  call lowering of existing owned handles into exported canon-lifted functions,
+  plus fresh imported own results)
 - runtime enforcement of richer resource lifecycle rules
 - public resource-aware callable component APIs beyond the new
-  owned-result drop helper, top-level imported-resource binding, and current
-  synchronous host-callback own-resource subset
+  owned-result drop helper, top-level imported-resource binding, and the current
+  owned-resource call subset; borrowed public call parameters and stricter
+  caller-side ownership/consumption semantics still remain open
 - full trap/failure-path operational cleanup semantics
 
 So resources now have a narrow executable seam, not a finished runtime.

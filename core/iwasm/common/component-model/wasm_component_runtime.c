@@ -4305,6 +4305,12 @@ typedef struct WASMComponentCanonParamAllocationTracker {
     uint32 capacity;
 } WASMComponentCanonParamAllocationTracker;
 
+typedef struct WASMComponentCanonOwnedResourceParamTracker {
+    wasm_component_value_t **values;
+    uint32 count;
+    uint32 capacity;
+} WASMComponentCanonOwnedResourceParamTracker;
+
 static bool
 lookup_component_call_primitive_type(const WASMComponent *component,
                                      const WASMComponentValueType *value_type,
@@ -5649,6 +5655,55 @@ restore_component_public_resource_value(WASMComponentInstance *inst,
 
     wasm_component_value_destroy(value);
     return true;
+}
+
+static bool
+validate_component_public_owned_resource_handle(
+    WASMComponentInstance *inst,
+    const WASMComponentRuntimeResourceState *resource_state, uint32 resource_type_idx,
+    uint32 handle)
+{
+    WASMComponentPublicResourceValue resource_value;
+    char error_buf[128] = { 0 };
+
+    memset(&resource_value, 0, sizeof(resource_value));
+    if (!wasm_component_resource_take_owned_handle(
+            (WASMComponentRuntimeResourceState *)resource_state, resource_type_idx,
+            handle, &resource_value, error_buf, (uint32)sizeof(error_buf))
+        || !wasm_component_resource_restore_owned_handle(&resource_value, error_buf,
+                                                         (uint32)sizeof(error_buf)))
+        return set_component_call_error(inst, error_buf);
+
+    return true;
+}
+
+static bool
+track_component_owned_resource_param(
+    WASMComponentCanonOwnedResourceParamTracker *tracker,
+    wasm_component_value_t *value)
+{
+    if (!tracker || !value || tracker->count >= tracker->capacity)
+        return false;
+
+    tracker->values[tracker->count++] = value;
+    return true;
+}
+
+static void
+consume_component_owned_resource_params(
+    WASMComponentCanonOwnedResourceParamTracker *tracker)
+{
+    uint32 i;
+
+    if (!tracker || !tracker->values)
+        return;
+
+    for (i = 0; i < tracker->count; i++) {
+        if (tracker->values[i])
+            wasm_component_value_destroy(tracker->values[i]);
+    }
+
+    tracker->count = 0;
 }
 
 static void
@@ -8052,10 +8107,14 @@ flatten_component_public_param_value(
     const wasm_component_value_t *value, uint32 param_index,
     const WASMFuncType *core_type, wasm_val_t *core_args,
     uint32 *core_arg_index_io,
-    WASMComponentCanonParamAllocationTracker *allocation_tracker)
+    WASMComponentCanonParamAllocationTracker *allocation_tracker,
+    const WASMComponentRuntimeResourceState *resource_state,
+    WASMComponentCanonOwnedResourceParamTracker *owned_resource_tracker)
 {
     WASMComponentCanonLiftValueShape shape;
     WASMComponentCanonLiftValueInfo type_info;
+    bool has_owned_resource_param = false;
+    uint32 resource_type_idx = WASM_COMPONENT_RESOURCE_INVALID_TYPE_IDX;
 
     if (!resolve_component_canon_lift_value_shape(component, value_type, "parameter",
                                                   param_index, &shape, inst))
@@ -8095,6 +8154,42 @@ flatten_component_public_param_value(
                 inst, "component canon lift function parameter %u contains "
                       "trailing bytes",
                 param_index);
+        return true;
+    }
+
+    if (!try_lookup_component_owned_resource_transfer_type(
+            inst, resource_state, component, value_type, "parameter", param_index,
+            &has_owned_resource_param, &type_info, &resource_type_idx))
+        return false;
+
+    if (has_owned_resource_param) {
+        wasm_val_t handle_value = { 0 };
+
+        if (*core_arg_index_io >= core_type->param_count)
+            return set_component_param_flattening_error(inst);
+
+        if (!decode_component_public_scalar_value(inst, value, &type_info,
+                                                  "parameter", param_index,
+                                                  &handle_value)
+            || !validate_component_public_owned_resource_handle(
+                inst, resource_state, resource_type_idx,
+                (uint32)handle_value.of.i32))
+            return false;
+
+        if (!track_component_owned_resource_param(
+                owned_resource_tracker, (wasm_component_value_t *)value))
+            return set_component_call_error(
+                inst, "component canon lift function could not track owned "
+                      "resource parameters");
+
+        if (core_type->types[*core_arg_index_io] != VALUE_TYPE_I32)
+            return set_component_call_error_fmt(
+                inst, "component canon lift function parameter %u does not match "
+                      "the core function signature",
+                param_index);
+
+        core_args[*core_arg_index_io] = handle_value;
+        (*core_arg_index_io)++;
         return true;
     }
 
@@ -10769,6 +10864,11 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
     WASMComponentCanonParamAllocation stack_param_allocations[16];
     WASMComponentCanonParamAllocation *param_allocations = stack_param_allocations;
     WASMComponentCanonParamAllocationTracker param_allocation_tracker;
+    wasm_component_value_t *stack_owned_resource_params[16];
+    wasm_component_value_t **owned_resource_params = stack_owned_resource_params;
+    WASMComponentCanonOwnedResourceParamTracker owned_resource_tracker;
+    const WASMComponentRuntimeResourceState *call_resource_state =
+        function->resource_state ? function->resource_state : inst->resource_state;
     uint32 expected_result_count;
     uint32 i, core_arg_index = 0, flat_result_count = 0;
     bool call_succeeded = false;
@@ -11343,6 +11443,24 @@ host_import_cleanup_fail:
     param_allocation_tracker.allocations = param_allocations;
     param_allocation_tracker.count = 0;
     param_allocation_tracker.capacity = core_type->param_count;
+    if (component_type->params->count
+        > sizeof(stack_owned_resource_params)
+              / sizeof(stack_owned_resource_params[0])) {
+        owned_resource_params =
+            wasm_runtime_malloc(sizeof(*owned_resource_params)
+                                * component_type->params->count);
+        if (!owned_resource_params) {
+            set_component_call_error(
+                inst, "component canon lift function could not allocate resource "
+                      "parameter tracking");
+            goto cleanup;
+        }
+    }
+    memset(owned_resource_params, 0,
+           sizeof(*owned_resource_params) * component_type->params->count);
+    owned_resource_tracker.values = owned_resource_params;
+    owned_resource_tracker.count = 0;
+    owned_resource_tracker.capacity = component_type->params->count;
     if (core_type->result_count
         > sizeof(stack_results) / sizeof(stack_results[0])) {
         core_results =
@@ -11361,7 +11479,8 @@ host_import_cleanup_fail:
                 inst, function, component,
                 component_type->params->params[i].value_type, &args[i], i,
                 core_type, core_args, &core_arg_index,
-                &param_allocation_tracker)) {
+                &param_allocation_tracker, call_resource_state,
+                &owned_resource_tracker)) {
             call_succeeded = false;
             goto cleanup;
         }
@@ -11540,6 +11659,8 @@ host_import_cleanup_fail:
     call_succeeded = true;
 
 cleanup:
+    if (core_call_attempted)
+        consume_component_owned_resource_params(&owned_resource_tracker);
     if (!core_call_attempted)
         cleanup_component_canon_param_allocations(inst, function,
                                                   &param_allocation_tracker);
@@ -11571,6 +11692,8 @@ cleanup:
         wasm_runtime_free(core_results);
     if (param_allocations != stack_param_allocations)
         wasm_runtime_free(param_allocations);
+    if (owned_resource_params != stack_owned_resource_params)
+        wasm_runtime_free(owned_resource_params);
     if (result_leaves != stack_result_leaves)
         wasm_runtime_free(result_leaves);
     return call_succeeded;
