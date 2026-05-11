@@ -591,12 +591,12 @@ What is still missing:
   canon-lowered callback borrow results for the current scalar local-resource
   subset,
   plus fresh imported own results)
-- runtime enforcement of richer resource lifecycle rules beyond the current local
-  outstanding-borrow subset
-- no full lend-count or borrow-scope enforcement yet: the current local resource
-  subset now rejects owned drops/transfers while tracked borrowed aliases are
-  still live, but broader outstanding-borrow tracking and lifetime enforcement
-  still remain incomplete
+- runtime enforcement of richer resource lifecycle rules beyond the current
+  outstanding-borrow subset for local and imported owned handles
+- no full lend-count or borrow-scope enforcement yet: the current supported
+  local/imported resource subset now rejects owned drops/transfers while tracked
+  borrowed aliases are still live, but broader outstanding-borrow tracking and
+  lifetime enforcement still remain incomplete
 - public resource-aware callable component APIs beyond the new
   owned-result drop helper, top-level imported-resource binding, and the current
   owned-resource / borrowed-parameter call subset; broader borrow/lend behavior,
