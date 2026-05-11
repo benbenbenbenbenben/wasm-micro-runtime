@@ -14543,6 +14543,12 @@ validate_component_resource_type_bound_supported(
     const char *member_name, char *error_buf, uint32 error_buf_size);
 
 static bool
+validate_component_resource_type_bound_against_bound(
+    const WASMComponentTypeBound *expected_bound,
+    const WASMComponentTypeBound *actual_bound, const char *import_name,
+    const char *member_name, char *error_buf, uint32 error_buf_size);
+
+static bool
 validate_runtime_component_against_type(
     const WASMComponent *expected_component, const WASMComponent *actual_component,
     const WASMComponentComponentType *expected_type, const char *import_name,
@@ -14918,9 +14924,11 @@ validate_component_type_against_type(
                                                          : "<unnamed>",
                                              expected_export_name);
 
-                        if (!validate_component_resource_type_bound_supported(
+                        if (!validate_component_resource_type_bound_against_bound(
                                 expected_export_decl->extern_desc->extern_desc
                                     .type.type_bound,
+                                actual_export_decl->extern_desc->extern_desc.type
+                                    .type_bound,
                                 import_name, member_name, error_buf,
                                 error_buf_size))
                             return false;
@@ -15813,6 +15821,37 @@ validate_component_resource_type_bound_supported(
                 member_name ? member_name : "",
                 (unsigned)type_bound->tag);
     }
+}
+
+/* Metadata-only componenttype matching can only compare bound shape here; the
+   runtime resource-identity check lives in
+   validate_component_runtime_resource_type_against_bound(). */
+static bool
+validate_component_resource_type_bound_against_bound(
+    const WASMComponentTypeBound *expected_bound,
+    const WASMComponentTypeBound *actual_bound, const char *import_name,
+    const char *member_name, char *error_buf, uint32 error_buf_size)
+{
+    if (!validate_component_resource_type_bound_supported(
+            expected_bound, import_name, member_name, error_buf, error_buf_size))
+        return false;
+
+    if (!validate_component_resource_type_bound_supported(
+            actual_bound, import_name, member_name, error_buf, error_buf_size))
+        return false;
+
+    if (expected_bound->tag == WASM_COMP_TYPEBOUND_EQ
+        && actual_bound->tag != WASM_COMP_TYPEBOUND_EQ)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            member_name ? "component import \"%s\" instance export \"%s\" "
+                          "expects an eq-bound resource type export"
+                        : "component import \"%s\" expects an eq-bound resource "
+                          "type export",
+            import_name ? import_name : "<unnamed>",
+            member_name ? member_name : "");
+
+    return true;
 }
 
 static bool

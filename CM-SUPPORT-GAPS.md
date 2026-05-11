@@ -455,7 +455,8 @@ Current limitations include:
   members, and the first typed `component` subset: top-level component imports
   plus typed `instance` component members whose expected component types have no
   imports and only recurse through typed `component` exports with explicit
-  component type metadata; broader pure componenttype matching and resource type
+  component type metadata plus the current metadata-only eq-bound resource
+  subset; broader pure componenttype identity/rebinding and runtime resource
   rebinding are still unsupported
 - host-import tuple/record values are still limited to the current scalar /
   UTF-8 string / nested `list<scalar>` / `list<string>` subset
@@ -573,12 +574,12 @@ What is still missing:
 - resource imports/exports as a complete **public** host feature beyond the
    current top-level imported-resource-type binding, public resource-type export
    lookup, the current typed resource-member matching subset (top-level
-   `instance`/`component` imports plus nested component-type matching with
-   expected-side abstract `type` bounds only), and host-callback imported
-   own-result subset
+   `instance`/`component` imports plus nested component-type matching with the
+   current abstract-`type` / metadata-eq-bound subset), and host-callback
+   imported own-result subset
 - resource-type identity/rebinding beyond the current name/sort plus the
-  current abstract-`type` / runtime-eq-bound matching subset is still
-  unsupported
+  current abstract-`type` / metadata-eq-bound / runtime-eq-bound matching
+  subset is still unsupported
 - borrowed resource values and the rest of general own/borrow public value
   transport beyond the current supported subset (host-callback borrowed
   parameters, host-callback round-tripping of existing owned handles, public

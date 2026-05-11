@@ -9666,7 +9666,8 @@ append_typed_component_export_source_sections(
 
 static bool
 append_typed_resource_component_export_source_sections(
-    WASMComponentModule *component_module, const char *resource_export_name)
+    WASMComponentModule *component_module, const char *resource_export_name,
+    WASMComponentTypeBoundTag bound_tag)
 {
     WASMComponent *component = &component_module->component;
     const uint32_t component_idx =
@@ -9749,12 +9750,226 @@ append_typed_resource_component_export_source_sections(
         create_sort_idx(WASM_COMP_SORT_TYPE, 0);
     leaf_component_section->parsed.component->sections[1]
         .parsed.export_section->exports[0].extern_desc =
-        create_resource_type_extern_desc(WASM_COMP_TYPEBOUND_TYPE, 0);
+        create_resource_type_extern_desc(bound_tag, 0);
     if (!leaf_component_section->parsed.component->sections[1]
              .parsed.export_section->exports[0].export_name
         || !leaf_component_section->parsed.component->sections[1]
                  .parsed.export_section->exports[0].sort_idx
         || !leaf_component_section->parsed.component->sections[1]
+                 .parsed.export_section->exports[0].extern_desc) {
+        return false;
+    }
+
+    export_section->id = WASM_COMP_SECTION_EXPORTS;
+    export_section->parsed.export_section =
+        (WASMComponentExportSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentExportSection));
+    if (!export_section->parsed.export_section) {
+        return false;
+    }
+    memset(export_section->parsed.export_section, 0,
+           sizeof(WASMComponentExportSection));
+    export_section->parsed.export_section->count = 1;
+    export_section->parsed.export_section->exports =
+        (WASMComponentExport *)wasm_runtime_malloc(sizeof(WASMComponentExport));
+    if (!export_section->parsed.export_section->exports) {
+        return false;
+    }
+    memset(export_section->parsed.export_section->exports, 0,
+           sizeof(WASMComponentExport));
+    export_section->parsed.export_section->exports[0].export_name =
+        create_export_name("typed-source");
+    export_section->parsed.export_section->exports[0].sort_idx =
+        create_sort_idx(WASM_COMP_SORT_COMPONENT, component_idx);
+    return export_section->parsed.export_section->exports[0].export_name
+           && export_section->parsed.export_section->exports[0].sort_idx;
+}
+
+static bool
+append_typed_nested_resource_component_export_source_sections(
+    WASMComponentModule *component_module, const char *nested_component_export_name,
+    const char *resource_export_name, WASMComponentTypeBoundTag bound_tag)
+{
+    WASMComponent *component = &component_module->component;
+    const uint32_t component_idx =
+        count_top_level_sort_entries(component, WASM_COMP_SORT_COMPONENT);
+    const uint32_t old_count = component->section_count;
+    const uint32_t new_count = old_count + 2;
+    auto *new_sections = (WASMComponentSection *)wasm_runtime_malloc(
+        sizeof(WASMComponentSection) * new_count);
+    if (!new_sections) {
+        return false;
+    }
+
+    memset(new_sections, 0, sizeof(WASMComponentSection) * new_count);
+    memcpy(new_sections, component->sections,
+           sizeof(WASMComponentSection) * old_count);
+    wasm_runtime_free(component->sections);
+    component->sections = new_sections;
+    component->section_count = new_count;
+
+    auto *wrapper_component_section = &component->sections[old_count];
+    auto *export_section = &component->sections[old_count + 1];
+
+    wrapper_component_section->id = WASM_COMP_SECTION_COMPONENT;
+    wrapper_component_section->parsed.component = create_empty_component();
+    if (!wrapper_component_section->parsed.component) {
+        return false;
+    }
+    wrapper_component_section->parsed.component->section_count = 3;
+    wrapper_component_section->parsed.component->sections =
+        (WASMComponentSection *)wasm_runtime_malloc(sizeof(WASMComponentSection) * 3);
+    if (!wrapper_component_section->parsed.component->sections) {
+        return false;
+    }
+    memset(wrapper_component_section->parsed.component->sections, 0,
+           sizeof(WASMComponentSection) * 3);
+
+    wrapper_component_section->parsed.component->sections[0].id =
+        WASM_COMP_SECTION_TYPE;
+    wrapper_component_section->parsed.component->sections[0].parsed.type_section =
+        (WASMComponentTypeSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentTypeSection));
+    if (!wrapper_component_section->parsed.component->sections[0]
+             .parsed.type_section) {
+        return false;
+    }
+    if (!init_single_component_type_section(
+            wrapper_component_section->parsed.component->sections[0]
+                .parsed.type_section,
+            resource_export_name, create_resource_type_extern_desc(bound_tag, 0))) {
+        return false;
+    }
+
+    wrapper_component_section->parsed.component->sections[1].id =
+        WASM_COMP_SECTION_COMPONENT;
+    wrapper_component_section->parsed.component->sections[1].parsed.component =
+        create_empty_component();
+    if (!wrapper_component_section->parsed.component->sections[1]
+             .parsed.component) {
+        return false;
+    }
+    wrapper_component_section->parsed.component->sections[1]
+        .parsed.component->section_count = 2;
+    wrapper_component_section->parsed.component->sections[1]
+        .parsed.component->sections =
+        (WASMComponentSection *)wasm_runtime_malloc(sizeof(WASMComponentSection) * 2);
+    if (!wrapper_component_section->parsed.component->sections[1]
+             .parsed.component->sections) {
+        return false;
+    }
+    memset(wrapper_component_section->parsed.component->sections[1]
+               .parsed.component->sections,
+           0, sizeof(WASMComponentSection) * 2);
+
+    wrapper_component_section->parsed.component->sections[1]
+        .parsed.component->sections[0].id = WASM_COMP_SECTION_TYPE;
+    wrapper_component_section->parsed.component->sections[1]
+        .parsed.component->sections[0].parsed.type_section =
+        (WASMComponentTypeSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentTypeSection));
+    if (!wrapper_component_section->parsed.component->sections[1]
+             .parsed.component->sections[0]
+             .parsed.type_section) {
+        return false;
+    }
+    if (!init_resource_type_section(
+            wrapper_component_section->parsed.component->sections[1]
+                .parsed.component->sections[0].parsed.type_section,
+            1, false, 0)) {
+        return false;
+    }
+
+    wrapper_component_section->parsed.component->sections[1]
+        .parsed.component->sections[1].id = WASM_COMP_SECTION_EXPORTS;
+    wrapper_component_section->parsed.component->sections[1]
+        .parsed.component->sections[1].parsed.export_section =
+        (WASMComponentExportSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentExportSection));
+    if (!wrapper_component_section->parsed.component->sections[1]
+             .parsed.component->sections[1]
+             .parsed.export_section) {
+        return false;
+    }
+    memset(wrapper_component_section->parsed.component->sections[1]
+               .parsed.component->sections[1]
+               .parsed.export_section,
+           0, sizeof(WASMComponentExportSection));
+    wrapper_component_section->parsed.component->sections[1]
+        .parsed.component->sections[1].parsed.export_section->count = 1;
+    wrapper_component_section->parsed.component->sections[1]
+        .parsed.component->sections[1].parsed.export_section->exports =
+        (WASMComponentExport *)wasm_runtime_malloc(sizeof(WASMComponentExport));
+    if (!wrapper_component_section->parsed.component->sections[1]
+             .parsed.component->sections[1]
+             .parsed.export_section->exports) {
+        return false;
+    }
+    memset(wrapper_component_section->parsed.component->sections[1]
+               .parsed.component->sections[1]
+               .parsed.export_section->exports,
+           0, sizeof(WASMComponentExport));
+    wrapper_component_section->parsed.component->sections[1]
+        .parsed.component->sections[1].parsed.export_section->exports[0]
+        .export_name = create_export_name(resource_export_name);
+    wrapper_component_section->parsed.component->sections[1]
+        .parsed.component->sections[1].parsed.export_section->exports[0].sort_idx =
+        create_sort_idx(WASM_COMP_SORT_TYPE, 0);
+    wrapper_component_section->parsed.component->sections[1]
+        .parsed.component->sections[1].parsed.export_section->exports[0]
+        .extern_desc = create_resource_type_extern_desc(bound_tag, 0);
+    if (!wrapper_component_section->parsed.component->sections[1]
+             .parsed.component->sections[1].parsed.export_section->exports[0]
+             .export_name
+        || !wrapper_component_section->parsed.component->sections[1]
+                 .parsed.component->sections[1]
+                 .parsed.export_section->exports[0]
+                 .sort_idx
+        || !wrapper_component_section->parsed.component->sections[1]
+                 .parsed.component->sections[1]
+                 .parsed.export_section->exports[0]
+                 .extern_desc) {
+        return false;
+    }
+
+    wrapper_component_section->parsed.component->sections[2].id =
+        WASM_COMP_SECTION_EXPORTS;
+    wrapper_component_section->parsed.component->sections[2].parsed.export_section =
+        (WASMComponentExportSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentExportSection));
+    if (!wrapper_component_section->parsed.component->sections[2]
+             .parsed.export_section) {
+        return false;
+    }
+    memset(wrapper_component_section->parsed.component->sections[2]
+               .parsed.export_section,
+           0, sizeof(WASMComponentExportSection));
+    wrapper_component_section->parsed.component->sections[2]
+        .parsed.export_section->count = 1;
+    wrapper_component_section->parsed.component->sections[2]
+        .parsed.export_section->exports =
+        (WASMComponentExport *)wasm_runtime_malloc(sizeof(WASMComponentExport));
+    if (!wrapper_component_section->parsed.component->sections[2]
+             .parsed.export_section->exports) {
+        return false;
+    }
+    memset(wrapper_component_section->parsed.component->sections[2]
+               .parsed.export_section->exports,
+           0, sizeof(WASMComponentExport));
+    wrapper_component_section->parsed.component->sections[2]
+        .parsed.export_section->exports[0].export_name =
+        create_export_name(nested_component_export_name);
+    wrapper_component_section->parsed.component->sections[2]
+        .parsed.export_section->exports[0].sort_idx =
+        create_sort_idx(WASM_COMP_SORT_COMPONENT, 0);
+    wrapper_component_section->parsed.component->sections[2]
+        .parsed.export_section->exports[0].extern_desc =
+        create_component_extern_desc(0);
+    if (!wrapper_component_section->parsed.component->sections[2]
+             .parsed.export_section->exports[0].export_name
+        || !wrapper_component_section->parsed.component->sections[2]
+                 .parsed.export_section->exports[0].sort_idx
+        || !wrapper_component_section->parsed.component->sections[2]
                  .parsed.export_section->exports[0].extern_desc) {
         return false;
     }
@@ -10761,7 +10976,8 @@ append_top_level_typed_component_import_sections(
 
 static bool
 append_top_level_typed_resource_component_import_sections(
-    WASMComponentModule *component_module, const char *resource_export_name)
+    WASMComponentModule *component_module, const char *resource_export_name,
+    WASMComponentTypeBoundTag bound_tag)
 {
     WASMComponent *component = &component_module->component;
     const uint32_t imported_component_idx =
@@ -10795,7 +11011,7 @@ append_top_level_typed_resource_component_import_sections(
     }
     if (!init_single_component_type_section(
             type_section->parsed.type_section, resource_export_name,
-            create_resource_type_extern_desc(WASM_COMP_TYPEBOUND_TYPE, 0))) {
+            create_resource_type_extern_desc(bound_tag, 0))) {
         return false;
     }
 
@@ -10820,6 +11036,104 @@ append_top_level_typed_resource_component_import_sections(
         create_import_name("source");
     import_section->parsed.import_section->imports[0].extern_desc =
         create_component_extern_desc(component_type_idx);
+    if (!import_section->parsed.import_section->imports[0].import_name
+        || !import_section->parsed.import_section->imports[0].extern_desc) {
+        return false;
+    }
+
+    export_section->id = WASM_COMP_SECTION_EXPORTS;
+    export_section->parsed.export_section =
+        (WASMComponentExportSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentExportSection));
+    if (!export_section->parsed.export_section) {
+        return false;
+    }
+    memset(export_section->parsed.export_section, 0,
+           sizeof(WASMComponentExportSection));
+    export_section->parsed.export_section->count = 1;
+    export_section->parsed.export_section->exports =
+        (WASMComponentExport *)wasm_runtime_malloc(sizeof(WASMComponentExport));
+    if (!export_section->parsed.export_section->exports) {
+        return false;
+    }
+    memset(export_section->parsed.export_section->exports, 0,
+           sizeof(WASMComponentExport));
+    export_section->parsed.export_section->exports[0].export_name =
+        create_export_name("forwarded-source");
+    export_section->parsed.export_section->exports[0].sort_idx =
+        create_sort_idx(WASM_COMP_SORT_COMPONENT, imported_component_idx);
+    return export_section->parsed.export_section->exports[0].export_name
+           && export_section->parsed.export_section->exports[0].sort_idx;
+}
+
+static bool
+append_top_level_typed_nested_resource_component_import_sections(
+    WASMComponentModule *component_module, const char *nested_component_export_name,
+    const char *resource_export_name, WASMComponentTypeBoundTag bound_tag)
+{
+    WASMComponent *component = &component_module->component;
+    const uint32_t imported_component_idx =
+        count_top_level_sort_entries(component, WASM_COMP_SORT_COMPONENT);
+    const uint32_t leaf_component_type_idx = count_component_types(component);
+    const uint32_t wrapper_component_type_idx = leaf_component_type_idx + 1;
+    const uint32_t old_count = component->section_count;
+    const uint32_t new_count = old_count + 3;
+    auto *new_sections = (WASMComponentSection *)wasm_runtime_malloc(
+        sizeof(WASMComponentSection) * new_count);
+    if (!new_sections) {
+        return false;
+    }
+
+    memset(new_sections, 0, sizeof(WASMComponentSection) * new_count);
+    memcpy(new_sections, component->sections,
+           sizeof(WASMComponentSection) * old_count);
+    wasm_runtime_free(component->sections);
+    component->sections = new_sections;
+    component->section_count = new_count;
+
+    auto *type_section = &component->sections[old_count];
+    auto *import_section = &component->sections[old_count + 1];
+    auto *export_section = &component->sections[old_count + 2];
+
+    type_section->id = WASM_COMP_SECTION_TYPE;
+    type_section->parsed.type_section =
+        (WASMComponentTypeSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentTypeSection));
+    if (!type_section->parsed.type_section) {
+        return false;
+    }
+    if (!init_single_component_type_section(
+            type_section->parsed.type_section, resource_export_name,
+            create_resource_type_extern_desc(bound_tag, 0))) {
+        return false;
+    }
+    if (!append_component_type_to_type_section(
+            type_section->parsed.type_section, nested_component_export_name,
+            create_component_extern_desc(leaf_component_type_idx))) {
+        return false;
+    }
+
+    import_section->id = WASM_COMP_SECTION_IMPORTS;
+    import_section->parsed.import_section =
+        (WASMComponentImportSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentImportSection));
+    if (!import_section->parsed.import_section) {
+        return false;
+    }
+    memset(import_section->parsed.import_section, 0,
+           sizeof(WASMComponentImportSection));
+    import_section->parsed.import_section->count = 1;
+    import_section->parsed.import_section->imports =
+        (WASMComponentImport *)wasm_runtime_malloc(sizeof(WASMComponentImport));
+    if (!import_section->parsed.import_section->imports) {
+        return false;
+    }
+    memset(import_section->parsed.import_section->imports, 0,
+           sizeof(WASMComponentImport));
+    import_section->parsed.import_section->imports[0].import_name =
+        create_import_name("source");
+    import_section->parsed.import_section->imports[0].extern_desc =
+        create_component_extern_desc(wrapper_component_type_idx);
     if (!import_section->parsed.import_section->imports[0].import_name
         || !import_section->parsed.import_section->imports[0].extern_desc) {
         return false;
@@ -30373,7 +30687,8 @@ TEST_F(BinaryParserTest,
         helper->error_buf, (uint32_t)sizeof(helper->error_buf));
     ASSERT_NE(source_module, nullptr) << helper->error_buf;
     ASSERT_TRUE(append_typed_resource_component_export_source_sections(
-        (WASMComponentModule *)source_module, "forwarded-resource-type"));
+        (WASMComponentModule *)source_module, "forwarded-resource-type",
+        WASM_COMP_TYPEBOUND_TYPE));
 
     wasm_module_inst_t source_inst =
         wasm_runtime_instantiate(source_module, helper->stack_size,
@@ -30398,7 +30713,8 @@ TEST_F(BinaryParserTest,
         helper->error_buf, (uint32_t)sizeof(helper->error_buf));
     ASSERT_NE(target_module, nullptr) << helper->error_buf;
     ASSERT_TRUE(append_top_level_typed_resource_component_import_sections(
-        (WASMComponentModule *)target_module, "forwarded-resource-type"));
+        (WASMComponentModule *)target_module, "forwarded-resource-type",
+        WASM_COMP_TYPEBOUND_TYPE));
 
     struct InstantiationArgs2 *inst_args = nullptr;
     ASSERT_TRUE(wasm_runtime_instantiation_args_create(&inst_args));
@@ -30447,7 +30763,8 @@ TEST_F(BinaryParserTest,
         helper->error_buf, (uint32_t)sizeof(helper->error_buf));
     ASSERT_NE(source_module, nullptr) << helper->error_buf;
     ASSERT_TRUE(append_typed_resource_component_export_source_sections(
-        (WASMComponentModule *)source_module, "forwarded-resource-type"));
+        (WASMComponentModule *)source_module, "forwarded-resource-type",
+        WASM_COMP_TYPEBOUND_TYPE));
 
     wasm_module_inst_t source_inst =
         wasm_runtime_instantiate(source_module, helper->stack_size,
@@ -30472,7 +30789,8 @@ TEST_F(BinaryParserTest,
         helper->error_buf, (uint32_t)sizeof(helper->error_buf));
     ASSERT_NE(target_module, nullptr) << helper->error_buf;
     ASSERT_TRUE(append_top_level_typed_resource_component_import_sections(
-        (WASMComponentModule *)target_module, "missing-resource-type"));
+        (WASMComponentModule *)target_module, "missing-resource-type",
+        WASM_COMP_TYPEBOUND_TYPE));
 
     struct InstantiationArgs2 *inst_args = nullptr;
     ASSERT_TRUE(wasm_runtime_instantiation_args_create(&inst_args));
@@ -30493,6 +30811,241 @@ TEST_F(BinaryParserTest,
                                      (uint32_t)sizeof(helper->error_buf));
     ASSERT_EQ(target_inst, nullptr);
     ASSERT_NE(strstr(helper->error_buf, "missing-resource-type"), nullptr);
+
+    wasm_runtime_instantiation_args_destroy(inst_args);
+    wasm_runtime_unload(target_module);
+    BH_FREE(target_component_raw);
+    wasm_runtime_deinstantiate(source_inst);
+    wasm_runtime_unload(source_module);
+}
+
+TEST_F(BinaryParserTest,
+       TestPublicComponentInstantiationBindsEqActualTypedNestedResourceComponentImports)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs source_load_args = {};
+    char source_module_name[] =
+        "typed-nested-resource-component-import-source-eq-actual";
+    source_load_args.name = source_module_name;
+    wasm_module_t source_module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &source_load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(source_module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(append_typed_nested_resource_component_export_source_sections(
+        (WASMComponentModule *)source_module, "forwarded-component",
+        "forwarded-resource-type",
+        WASM_COMP_TYPEBOUND_EQ));
+
+    wasm_module_inst_t source_inst =
+        wasm_runtime_instantiate(source_module, helper->stack_size,
+                                 helper->heap_size, helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(source_inst, nullptr) << helper->error_buf;
+
+    wasm_component_component_t imported_component =
+        wasm_runtime_lookup_component_component(source_inst, "typed-source");
+    ASSERT_NE(imported_component, nullptr);
+
+    uint32_t target_wasm_file_size = 0;
+    auto *target_component_raw =
+        (unsigned char *)bh_read_file_to_buffer("add.wasm", &target_wasm_file_size);
+    ASSERT_NE(target_component_raw, nullptr);
+
+    LoadArgs target_load_args = {};
+    char target_module_name[] =
+        "typed-nested-resource-component-import-target-eq-actual";
+    target_load_args.name = target_module_name;
+    wasm_module_t target_module = wasm_runtime_load_ex(
+        target_component_raw, target_wasm_file_size, &target_load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(target_module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(append_top_level_typed_nested_resource_component_import_sections(
+        (WASMComponentModule *)target_module, "forwarded-component",
+        "forwarded-resource-type",
+        WASM_COMP_TYPEBOUND_TYPE));
+
+    struct InstantiationArgs2 *inst_args = nullptr;
+    ASSERT_TRUE(wasm_runtime_instantiation_args_create(&inst_args));
+    wasm_runtime_instantiation_args_set_default_stack_size(inst_args,
+                                                           helper->stack_size);
+    wasm_runtime_instantiation_args_set_host_managed_heap_size(
+        inst_args, helper->heap_size);
+
+    wasm_component_import_binding_t import_binding = {};
+    import_binding.name = "source";
+    import_binding.kind = WASM_COMPONENT_EXTERN_KIND_COMPONENT;
+    import_binding.value.component = imported_component;
+    wasm_runtime_instantiation_args_set_component_imports(inst_args,
+                                                          &import_binding, 1);
+
+    wasm_module_inst_t target_inst =
+        wasm_runtime_instantiate_ex2(target_module, inst_args, helper->error_buf,
+                                     (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(target_inst, nullptr) << helper->error_buf;
+
+    wasm_component_component_t forwarded_component =
+        wasm_runtime_lookup_component_component(target_inst, "forwarded-source");
+    ASSERT_NE(forwarded_component, nullptr);
+    ASSERT_EQ(forwarded_component->component, imported_component->component);
+    ASSERT_EQ(forwarded_component->scope, imported_component->scope);
+
+    wasm_runtime_instantiation_args_destroy(inst_args);
+    wasm_runtime_deinstantiate(target_inst);
+    wasm_runtime_unload(target_module);
+    BH_FREE(target_component_raw);
+    wasm_runtime_deinstantiate(source_inst);
+    wasm_runtime_unload(source_module);
+}
+
+TEST_F(BinaryParserTest,
+       TestPublicComponentInstantiationBindsEqBoundTypedNestedResourceComponentImports)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs source_load_args = {};
+    char source_module_name[] =
+        "typed-nested-resource-component-import-source-eq-bound";
+    source_load_args.name = source_module_name;
+    wasm_module_t source_module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &source_load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(source_module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(append_typed_nested_resource_component_export_source_sections(
+        (WASMComponentModule *)source_module, "forwarded-component",
+        "forwarded-resource-type",
+        WASM_COMP_TYPEBOUND_EQ));
+
+    wasm_module_inst_t source_inst =
+        wasm_runtime_instantiate(source_module, helper->stack_size,
+                                 helper->heap_size, helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(source_inst, nullptr) << helper->error_buf;
+
+    wasm_component_component_t imported_component =
+        wasm_runtime_lookup_component_component(source_inst, "typed-source");
+    ASSERT_NE(imported_component, nullptr);
+
+    uint32_t target_wasm_file_size = 0;
+    auto *target_component_raw =
+        (unsigned char *)bh_read_file_to_buffer("add.wasm", &target_wasm_file_size);
+    ASSERT_NE(target_component_raw, nullptr);
+
+    LoadArgs target_load_args = {};
+    char target_module_name[] =
+        "typed-nested-resource-component-import-target-eq-bound";
+    target_load_args.name = target_module_name;
+    wasm_module_t target_module = wasm_runtime_load_ex(
+        target_component_raw, target_wasm_file_size, &target_load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(target_module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(append_top_level_typed_nested_resource_component_import_sections(
+        (WASMComponentModule *)target_module, "forwarded-component",
+        "forwarded-resource-type",
+        WASM_COMP_TYPEBOUND_EQ));
+
+    struct InstantiationArgs2 *inst_args = nullptr;
+    ASSERT_TRUE(wasm_runtime_instantiation_args_create(&inst_args));
+    wasm_runtime_instantiation_args_set_default_stack_size(inst_args,
+                                                           helper->stack_size);
+    wasm_runtime_instantiation_args_set_host_managed_heap_size(
+        inst_args, helper->heap_size);
+
+    wasm_component_import_binding_t import_binding = {};
+    import_binding.name = "source";
+    import_binding.kind = WASM_COMPONENT_EXTERN_KIND_COMPONENT;
+    import_binding.value.component = imported_component;
+    wasm_runtime_instantiation_args_set_component_imports(inst_args,
+                                                          &import_binding, 1);
+
+    wasm_module_inst_t target_inst =
+        wasm_runtime_instantiate_ex2(target_module, inst_args, helper->error_buf,
+                                     (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(target_inst, nullptr) << helper->error_buf;
+
+    wasm_component_component_t forwarded_component =
+        wasm_runtime_lookup_component_component(target_inst, "forwarded-source");
+    ASSERT_NE(forwarded_component, nullptr);
+    ASSERT_EQ(forwarded_component->component, imported_component->component);
+    ASSERT_EQ(forwarded_component->scope, imported_component->scope);
+
+    wasm_runtime_instantiation_args_destroy(inst_args);
+    wasm_runtime_deinstantiate(target_inst);
+    wasm_runtime_unload(target_module);
+    BH_FREE(target_component_raw);
+    wasm_runtime_deinstantiate(source_inst);
+    wasm_runtime_unload(source_module);
+}
+
+TEST_F(BinaryParserTest,
+       TestPublicComponentInstantiationRejectsAbstractActualForEqBoundTypedNestedResourceComponentImports)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs source_load_args = {};
+    char source_module_name[] =
+        "typed-nested-resource-component-import-source-eq-bound-mismatch";
+    source_load_args.name = source_module_name;
+    wasm_module_t source_module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &source_load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(source_module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(append_typed_nested_resource_component_export_source_sections(
+        (WASMComponentModule *)source_module, "forwarded-component",
+        "forwarded-resource-type",
+        WASM_COMP_TYPEBOUND_TYPE));
+
+    wasm_module_inst_t source_inst =
+        wasm_runtime_instantiate(source_module, helper->stack_size,
+                                 helper->heap_size, helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(source_inst, nullptr) << helper->error_buf;
+
+    wasm_component_component_t imported_component =
+        wasm_runtime_lookup_component_component(source_inst, "typed-source");
+    ASSERT_NE(imported_component, nullptr);
+
+    uint32_t target_wasm_file_size = 0;
+    auto *target_component_raw =
+        (unsigned char *)bh_read_file_to_buffer("add.wasm", &target_wasm_file_size);
+    ASSERT_NE(target_component_raw, nullptr);
+
+    LoadArgs target_load_args = {};
+    char target_module_name[] =
+        "typed-nested-resource-component-import-target-eq-bound-mismatch";
+    target_load_args.name = target_module_name;
+    wasm_module_t target_module = wasm_runtime_load_ex(
+        target_component_raw, target_wasm_file_size, &target_load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(target_module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(append_top_level_typed_nested_resource_component_import_sections(
+        (WASMComponentModule *)target_module, "forwarded-component",
+        "forwarded-resource-type",
+        WASM_COMP_TYPEBOUND_EQ));
+
+    struct InstantiationArgs2 *inst_args = nullptr;
+    ASSERT_TRUE(wasm_runtime_instantiation_args_create(&inst_args));
+    wasm_runtime_instantiation_args_set_default_stack_size(inst_args,
+                                                           helper->stack_size);
+    wasm_runtime_instantiation_args_set_host_managed_heap_size(
+        inst_args, helper->heap_size);
+
+    wasm_component_import_binding_t import_binding = {};
+    import_binding.name = "source";
+    import_binding.kind = WASM_COMPONENT_EXTERN_KIND_COMPONENT;
+    import_binding.value.component = imported_component;
+    wasm_runtime_instantiation_args_set_component_imports(inst_args,
+                                                          &import_binding, 1);
+
+    wasm_module_inst_t target_inst =
+        wasm_runtime_instantiate_ex2(target_module, inst_args, helper->error_buf,
+                                     (uint32_t)sizeof(helper->error_buf));
+    ASSERT_EQ(target_inst, nullptr);
+    ASSERT_NE(strstr(helper->error_buf, "eq-bound resource type export"), nullptr)
+        << helper->error_buf;
 
     wasm_runtime_instantiation_args_destroy(inst_args);
     wasm_runtime_unload(target_module);
