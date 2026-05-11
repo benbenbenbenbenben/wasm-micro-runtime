@@ -186,6 +186,10 @@ typedef struct WASMComponentRuntimeInstance *wasm_component_instance_t;
 struct WASMComponentRuntimeComponent;
 typedef struct WASMComponentRuntimeComponent *wasm_component_component_t;
 
+struct WASMComponentRuntimeResourceType;
+typedef const struct WASMComponentRuntimeResourceType *
+    wasm_component_resource_type_t;
+
 typedef enum {
     WASM_COMPONENT_EXTERN_KIND_FUNC = 0,
     WASM_COMPONENT_EXTERN_KIND_VALUE,
@@ -212,6 +216,7 @@ typedef struct wasm_component_export_t {
         wasm_component_instance_t instance;
         wasm_component_component_t component;
         wasm_module_t core_module;
+        wasm_component_resource_type_t resource_type;
     } value;
 } wasm_component_export_t;
 

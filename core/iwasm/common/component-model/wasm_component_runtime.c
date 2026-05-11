@@ -1593,6 +1593,21 @@ resolve_component_sort_idx(const WASMComponentInstance *inst,
             out_ref->type = WASM_COMP_RUNTIME_REF_COMPONENT;
             out_ref->of.component = &inst->components[sort_idx->idx];
             return true;
+        case WASM_COMP_SORT_TYPE:
+            if (!inst->resource_state)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "component type index %u could not resolve resource state",
+                    sort_idx->idx);
+            out_ref->of.resource_type =
+                wasm_component_resource_lookup_runtime_type_const(
+                    inst->resource_state, sort_idx->idx);
+            if (!out_ref->of.resource_type)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "component type index %u is out of bounds", sort_idx->idx);
+            out_ref->type = WASM_COMP_RUNTIME_REF_RESOURCE_TYPE;
+            return true;
         default:
             return set_component_runtime_error_fmt(
                 error_buf, error_buf_size,
@@ -1653,6 +1668,10 @@ component_runtime_ref_to_public_export(const char *name,
         case WASM_COMP_RUNTIME_REF_CORE_MODULE:
             export_type->kind = WASM_COMPONENT_EXTERN_KIND_CORE_MODULE;
             export_type->value.core_module = ref.of.core_module;
+            return true;
+        case WASM_COMP_RUNTIME_REF_RESOURCE_TYPE:
+            export_type->kind = WASM_COMPONENT_EXTERN_KIND_RESOURCE_TYPE;
+            export_type->value.resource_type = ref.of.resource_type;
             return true;
         default:
             return false;
@@ -13043,6 +13062,10 @@ resolve_nested_component_exports(
                 expected_type = WASM_COMP_RUNTIME_REF_COMPONENT;
                 sort_name = "component";
                 break;
+            case WASM_COMP_SORT_TYPE:
+                expected_type = WASM_COMP_RUNTIME_REF_RESOURCE_TYPE;
+                sort_name = "resource type";
+                break;
             default:
                 return set_component_runtime_error_fmt(
                     error_buf, error_buf_size,
@@ -13050,9 +13073,27 @@ resolve_nested_component_exports(
                     (unsigned)component_export->sort_idx->sort->sort);
         }
 
-        if (!resolve_nested_component_local_sort_idx(
-                bindings, component_export->sort_idx, &ref, error_buf,
-                error_buf_size))
+        if (component_export->sort_idx->sort->sort == WASM_COMP_SORT_TYPE) {
+            if (!runtime_inst->resource_state)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "nested component export \"%s\" could not resolve resource "
+                    "state",
+                    get_component_export_name(component_export->export_name));
+            memset(&ref, 0, sizeof(ref));
+            ref.type = WASM_COMP_RUNTIME_REF_RESOURCE_TYPE;
+            ref.of.resource_type = wasm_component_resource_lookup_runtime_type_const(
+                runtime_inst->resource_state, component_export->sort_idx->idx);
+            if (!ref.of.resource_type)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "nested component export \"%s\" type index %u is out of bounds",
+                    get_component_export_name(component_export->export_name),
+                    component_export->sort_idx->idx);
+        }
+        else if (!resolve_nested_component_local_sort_idx(
+                     bindings, component_export->sort_idx, &ref, error_buf,
+                     error_buf_size))
             return false;
 
         if (ref.type != expected_type)
@@ -13944,6 +13985,11 @@ static bool
 count_component_imports(const WASMComponent *component, uint32 *import_count);
 
 static bool
+validate_component_resource_type_bound_supported(
+    const WASMComponentTypeBound *type_bound, const char *import_name,
+    const char *member_name, char *error_buf, uint32 error_buf_size);
+
+static bool
 validate_runtime_component_against_type(
     const WASMComponent *expected_component, const WASMComponent *actual_component,
     const WASMComponentComponentType *expected_type, const char *import_name,
@@ -14021,11 +14067,10 @@ validate_runtime_component_against_type(
                     || instance_decl->tag
                            != WASM_COMP_COMPONENT_DECL_INSTANCE_EXPORTDECL
                     || !export_decl || !export_decl->extern_desc
-                    || export_decl->extern_desc->type != WASM_COMP_EXTERN_COMPONENT
                     || !expected_export_name)
                     return member_name
                                ? set_component_runtime_error_fmt(
-                                     error_buf, error_buf_size,
+                                      error_buf, error_buf_size,
                                      "component import \"%s\" instance export "
                                      "\"%s\" uses unsupported typed component "
                                      "export matching",
@@ -14034,58 +14079,123 @@ validate_runtime_component_against_type(
                                : set_component_runtime_error_fmt(
                                      error_buf, error_buf_size,
                                      "component import \"%s\" uses unsupported "
-                                     "typed component export matching",
-                                     import_name ? import_name : "<unnamed>");
+                                      "typed component export matching",
+                                      import_name ? import_name : "<unnamed>");
 
-                actual_export = lookup_component_export_by_name(
-                    actual_component, expected_export_name, WASM_COMP_SORT_COMPONENT);
-                if (!actual_export)
-                    return member_name
-                               ? set_component_runtime_error_fmt(
-                                     error_buf, error_buf_size,
-                                     "component import \"%s\" instance export "
-                                     "\"%s\" expects component export \"%s\"",
-                                     import_name ? import_name : "<unnamed>",
-                                     member_name, expected_export_name)
-                               : set_component_runtime_error_fmt(
-                                     error_buf, error_buf_size,
-                                     "component import \"%s\" expects component "
-                                     "export \"%s\"",
-                                     import_name ? import_name : "<unnamed>",
-                                     expected_export_name);
+                switch (export_decl->extern_desc->type) {
+                    case WASM_COMP_EXTERN_COMPONENT:
+                        actual_export = lookup_component_export_by_name(
+                            actual_component, expected_export_name,
+                            WASM_COMP_SORT_COMPONENT);
+                        if (!actual_export)
+                            return member_name
+                                       ? set_component_runtime_error_fmt(
+                                             error_buf, error_buf_size,
+                                             "component import \"%s\" instance "
+                                             "export \"%s\" expects component "
+                                             "export \"%s\"",
+                                             import_name ? import_name
+                                                         : "<unnamed>",
+                                             member_name, expected_export_name)
+                                       : set_component_runtime_error_fmt(
+                                             error_buf, error_buf_size,
+                                             "component import \"%s\" expects "
+                                             "component export \"%s\"",
+                                             import_name ? import_name
+                                                         : "<unnamed>",
+                                             expected_export_name);
 
-                if (!actual_export->extern_desc
-                    || actual_export->extern_desc->type != WASM_COMP_EXTERN_COMPONENT)
-                    return member_name
-                               ? set_component_runtime_error_fmt(
-                                     error_buf, error_buf_size,
-                                     "component import \"%s\" instance export "
-                                     "\"%s\" component export \"%s\" is missing "
-                                     "component type metadata",
-                                     import_name ? import_name : "<unnamed>",
-                                     member_name, expected_export_name)
-                               : set_component_runtime_error_fmt(
-                                     error_buf, error_buf_size,
-                                     "component import \"%s\" component export "
-                                     "\"%s\" is missing component type metadata",
-                                     import_name ? import_name : "<unnamed>",
-                                     expected_export_name);
+                        if (!actual_export->extern_desc
+                            || actual_export->extern_desc->type
+                                   != WASM_COMP_EXTERN_COMPONENT)
+                            return member_name
+                                       ? set_component_runtime_error_fmt(
+                                             error_buf, error_buf_size,
+                                             "component import \"%s\" instance "
+                                             "export \"%s\" component export "
+                                             "\"%s\" is missing component type "
+                                             "metadata",
+                                             import_name ? import_name
+                                                         : "<unnamed>",
+                                             member_name, expected_export_name)
+                                       : set_component_runtime_error_fmt(
+                                             error_buf, error_buf_size,
+                                             "component import \"%s\" component "
+                                             "export \"%s\" is missing component "
+                                             "type metadata",
+                                             import_name ? import_name
+                                                         : "<unnamed>",
+                                             expected_export_name);
 
-                if (!resolve_component_component_type(
-                        expected_component,
-                        export_decl->extern_desc->extern_desc.component.type_idx,
-                        import_name, member_name, "expected", &expected_nested_type,
-                        error_buf, error_buf_size)
-                    || !resolve_component_component_type(
-                        actual_component,
-                        actual_export->extern_desc->extern_desc.component.type_idx,
-                        import_name, member_name, "actual", &actual_nested_type,
-                        error_buf, error_buf_size)
-                    || !validate_component_type_against_type(
-                        expected_component, expected_nested_type, actual_component,
-                        actual_nested_type, import_name, member_name,
-                        remaining_depth - 1, error_buf, error_buf_size))
-                    return false;
+                        if (!resolve_component_component_type(
+                                expected_component,
+                                export_decl->extern_desc->extern_desc.component
+                                    .type_idx,
+                                import_name, member_name, "expected",
+                                &expected_nested_type, error_buf,
+                                error_buf_size)
+                            || !resolve_component_component_type(
+                                actual_component,
+                                actual_export->extern_desc->extern_desc.component
+                                    .type_idx,
+                                import_name, member_name, "actual",
+                                &actual_nested_type, error_buf, error_buf_size)
+                            || !validate_component_type_against_type(
+                                expected_component, expected_nested_type,
+                                actual_component, actual_nested_type,
+                                import_name, member_name, remaining_depth - 1,
+                                error_buf, error_buf_size))
+                            return false;
+                        break;
+                    case WASM_COMP_EXTERN_TYPE:
+                        actual_export = lookup_component_export_by_name(
+                            actual_component, expected_export_name,
+                            WASM_COMP_SORT_TYPE);
+                        if (!actual_export)
+                            return member_name
+                                       ? set_component_runtime_error_fmt(
+                                             error_buf, error_buf_size,
+                                             "component import \"%s\" instance "
+                                             "export \"%s\" expects resource "
+                                             "type export \"%s\"",
+                                             import_name ? import_name
+                                                         : "<unnamed>",
+                                             member_name, expected_export_name)
+                                       : set_component_runtime_error_fmt(
+                                             error_buf, error_buf_size,
+                                             "component import \"%s\" expects "
+                                             "resource type export \"%s\"",
+                                             import_name ? import_name
+                                                         : "<unnamed>",
+                                             expected_export_name);
+
+                        if (!validate_component_resource_type_bound_supported(
+                                export_decl->extern_desc->extern_desc.type
+                                    .type_bound,
+                                import_name, member_name, error_buf,
+                                error_buf_size))
+                            return false;
+                        break;
+                    default:
+                        return member_name
+                                   ? set_component_runtime_error_fmt(
+                                         error_buf, error_buf_size,
+                                         "component import \"%s\" instance "
+                                         "export \"%s\" uses unsupported typed "
+                                         "component export member type 0x%02x",
+                                         import_name ? import_name
+                                                     : "<unnamed>",
+                                         member_name,
+                                         (unsigned)export_decl->extern_desc->type)
+                                   : set_component_runtime_error_fmt(
+                                         error_buf, error_buf_size,
+                                         "component import \"%s\" uses "
+                                         "unsupported typed component export "
+                                         "member type 0x%02x",
+                                         import_name ? import_name
+                                                     : "<unnamed>",
+                                         (unsigned)export_decl->extern_desc->type);
+                }
                 break;
             }
             default:
@@ -14142,8 +14252,17 @@ validate_component_type_against_type(
         switch (decl->tag) {
             case WASM_COMP_COMPONENT_DECL_TYPE:
             case WASM_COMP_COMPONENT_DECL_ALIAS:
-            case WASM_COMP_COMPONENT_DECL_IMPORT:
                 break;
+            case WASM_COMP_COMPONENT_DECL_IMPORT:
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    member_name
+                        ? "component import \"%s\" instance export \"%s\" uses "
+                          "unsupported expected component imports"
+                        : "component import \"%s\" uses unsupported expected "
+                          "component imports",
+                    import_name ? import_name : "<unnamed>",
+                    member_name ? member_name : "");
             case WASM_COMP_COMPONENT_DECL_EXPORT:
             {
                 const WASMComponentInstDecl *expected_instance_decl =
@@ -14166,13 +14285,11 @@ validate_component_type_against_type(
                            != WASM_COMP_COMPONENT_DECL_INSTANCE_EXPORTDECL
                     || !expected_export_decl
                     || !expected_export_decl->extern_desc
-                    || expected_export_decl->extern_desc->type
-                           != WASM_COMP_EXTERN_COMPONENT
                     || !expected_export_name)
                     return member_name
                                ? set_component_runtime_error_fmt(
-                                     error_buf, error_buf_size,
-                                     "component import \"%s\" instance export "
+                                      error_buf, error_buf_size,
+                                      "component import \"%s\" instance export "
                                      "\"%s\" uses unsupported typed component "
                                      "export matching",
                                      import_name ? import_name : "<unnamed>",
@@ -14180,43 +14297,103 @@ validate_component_type_against_type(
                                : set_component_runtime_error_fmt(
                                      error_buf, error_buf_size,
                                      "component import \"%s\" uses unsupported "
-                                     "typed component export matching",
-                                     import_name ? import_name : "<unnamed>");
+                                      "typed component export matching",
+                                      import_name ? import_name : "<unnamed>");
 
-                actual_export_decl = lookup_component_type_export_decl(
-                    actual_type, expected_export_name, WASM_COMP_EXTERN_COMPONENT);
-                if (!actual_export_decl)
-                    return member_name
-                               ? set_component_runtime_error_fmt(
-                                     error_buf, error_buf_size,
-                                     "component import \"%s\" instance export "
-                                     "\"%s\" expects component export \"%s\"",
-                                     import_name ? import_name : "<unnamed>",
-                                     member_name, expected_export_name)
-                               : set_component_runtime_error_fmt(
-                                     error_buf, error_buf_size,
-                                     "component import \"%s\" expects component "
-                                     "export \"%s\"",
-                                     import_name ? import_name : "<unnamed>",
-                                     expected_export_name);
+                switch (expected_export_decl->extern_desc->type) {
+                    case WASM_COMP_EXTERN_COMPONENT:
+                        actual_export_decl = lookup_component_type_export_decl(
+                            actual_type, expected_export_name,
+                            WASM_COMP_EXTERN_COMPONENT);
+                        if (!actual_export_decl)
+                            return member_name
+                                       ? set_component_runtime_error_fmt(
+                                             error_buf, error_buf_size,
+                                             "component import \"%s\" instance "
+                                             "export \"%s\" expects component "
+                                             "export \"%s\"",
+                                             import_name ? import_name
+                                                         : "<unnamed>",
+                                             member_name, expected_export_name)
+                                       : set_component_runtime_error_fmt(
+                                             error_buf, error_buf_size,
+                                             "component import \"%s\" expects "
+                                             "component export \"%s\"",
+                                             import_name ? import_name
+                                                         : "<unnamed>",
+                                             expected_export_name);
 
-                if (!resolve_component_component_type(
-                        expected_component,
-                        expected_export_decl->extern_desc->extern_desc.component
-                            .type_idx,
-                        import_name, member_name, "expected", &expected_nested_type,
-                        error_buf, error_buf_size)
-                    || !resolve_component_component_type(
-                        actual_component,
-                        actual_export_decl->extern_desc->extern_desc.component
-                            .type_idx,
-                        import_name, member_name, "actual", &actual_nested_type,
-                        error_buf, error_buf_size)
-                    || !validate_component_type_against_type(
-                        expected_component, expected_nested_type, actual_component,
-                        actual_nested_type, import_name, member_name,
-                        remaining_depth - 1, error_buf, error_buf_size))
-                    return false;
+                        if (!resolve_component_component_type(
+                                expected_component,
+                                expected_export_decl->extern_desc->extern_desc
+                                    .component.type_idx,
+                                import_name, member_name, "expected",
+                                &expected_nested_type, error_buf,
+                                error_buf_size)
+                            || !resolve_component_component_type(
+                                actual_component,
+                                actual_export_decl->extern_desc->extern_desc
+                                    .component.type_idx,
+                                import_name, member_name, "actual",
+                                &actual_nested_type, error_buf, error_buf_size)
+                            || !validate_component_type_against_type(
+                                expected_component, expected_nested_type,
+                                actual_component, actual_nested_type,
+                                import_name, member_name, remaining_depth - 1,
+                                error_buf, error_buf_size))
+                            return false;
+                        break;
+                    case WASM_COMP_EXTERN_TYPE:
+                        actual_export_decl = lookup_component_type_export_decl(
+                            actual_type, expected_export_name,
+                            WASM_COMP_EXTERN_TYPE);
+                        if (!actual_export_decl)
+                            return member_name
+                                       ? set_component_runtime_error_fmt(
+                                             error_buf, error_buf_size,
+                                             "component import \"%s\" instance "
+                                             "export \"%s\" expects resource "
+                                             "type export \"%s\"",
+                                             import_name ? import_name
+                                                         : "<unnamed>",
+                                             member_name, expected_export_name)
+                                       : set_component_runtime_error_fmt(
+                                             error_buf, error_buf_size,
+                                             "component import \"%s\" expects "
+                                             "resource type export \"%s\"",
+                                             import_name ? import_name
+                                                         : "<unnamed>",
+                                             expected_export_name);
+
+                        if (!validate_component_resource_type_bound_supported(
+                                expected_export_decl->extern_desc->extern_desc
+                                    .type.type_bound,
+                                import_name, member_name, error_buf,
+                                error_buf_size))
+                            return false;
+                        break;
+                    default:
+                        return member_name
+                                   ? set_component_runtime_error_fmt(
+                                         error_buf, error_buf_size,
+                                         "component import \"%s\" instance "
+                                         "export \"%s\" uses unsupported typed "
+                                         "component export member type 0x%02x",
+                                         import_name ? import_name
+                                                     : "<unnamed>",
+                                         member_name,
+                                         (unsigned)expected_export_decl
+                                             ->extern_desc->type)
+                                   : set_component_runtime_error_fmt(
+                                         error_buf, error_buf_size,
+                                         "component import \"%s\" uses "
+                                         "unsupported typed component export "
+                                         "member type 0x%02x",
+                                         import_name ? import_name
+                                                     : "<unnamed>",
+                                         (unsigned)expected_export_decl
+                                             ->extern_desc->type);
+                }
                 break;
             }
             default:
@@ -15054,6 +15231,66 @@ validate_component_runtime_value_against_bound(
 }
 
 static bool
+validate_component_resource_type_bound_supported(
+    const WASMComponentTypeBound *type_bound, const char *import_name,
+    const char *member_name, char *error_buf, uint32 error_buf_size)
+{
+    if (!type_bound)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            member_name ? "component import \"%s\" instance export \"%s\" is "
+                          "missing a resource type bound"
+                        : "component import \"%s\" is missing a resource type "
+                          "bound",
+            import_name ? import_name : "<unnamed>",
+            member_name ? member_name : "");
+
+    switch (type_bound->tag) {
+        case WASM_COMP_TYPEBOUND_TYPE:
+            return true;
+        case WASM_COMP_TYPEBOUND_EQ:
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                member_name ? "component import \"%s\" instance export \"%s\" "
+                              "uses unsupported eq-bound resource type matching"
+                            : "component import \"%s\" uses unsupported eq-bound "
+                              "resource type matching",
+                import_name ? import_name : "<unnamed>",
+                member_name ? member_name : "");
+        default:
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                member_name ? "component import \"%s\" instance export \"%s\" "
+                              "uses unsupported resource type bound tag 0x%02x"
+                            : "component import \"%s\" uses unsupported resource "
+                              "type bound tag 0x%02x",
+                import_name ? import_name : "<unnamed>",
+                member_name ? member_name : "",
+                (unsigned)type_bound->tag);
+    }
+}
+
+static bool
+validate_component_runtime_resource_type_against_bound(
+    const WASMComponentRuntimeResourceType *runtime_resource_type,
+    const WASMComponentTypeBound *type_bound, const char *import_name,
+    const char *member_name, char *error_buf, uint32 error_buf_size)
+{
+    if (!runtime_resource_type)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            member_name ? "component import \"%s\" instance export \"%s\" is "
+                          "missing resource type metadata"
+                        : "component import \"%s\" is missing resource type "
+                          "metadata",
+            import_name ? import_name : "<unnamed>",
+            member_name ? member_name : "");
+
+    return validate_component_resource_type_bound_supported(
+        type_bound, import_name, member_name, error_buf, error_buf_size);
+}
+
+static bool
 validate_component_instance_against_type(
     const WASMComponent *component,
     const WASMComponentRuntimeInstance *component_inst,
@@ -15207,6 +15444,19 @@ validate_component_instance_against_type(
                             return false;
                         break;
                     }
+                    case WASM_COMP_EXTERN_TYPE:
+                        if (!lookup_component_instance_export(
+                                component_inst, member_name,
+                                WASM_COMP_RUNTIME_REF_RESOURCE_TYPE, &ref,
+                                error_buf, error_buf_size))
+                            return false;
+                        if (!validate_component_runtime_resource_type_against_bound(
+                                ref.of.resource_type,
+                                export_decl->extern_desc->extern_desc.type.type_bound,
+                                import_name, member_name, error_buf,
+                                error_buf_size))
+                            return false;
+                        break;
                     default:
                         return set_component_runtime_error_fmt(
                             error_buf, error_buf_size,

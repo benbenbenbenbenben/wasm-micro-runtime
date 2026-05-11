@@ -448,17 +448,21 @@ Current limitations include:
   same-module plus cross-component nested typed `instance` import `func`
   members for the current scalar / UTF-8 string / variable-length `list<scalar>` /
   `list<string>` / tuple-record leaf subset; typed `instance` import matching is otherwise
-  limited to exported `core module`, scalar / variable-length `list<scalar>` /
-  `list<string>` /
-  current tuple-record-subset `value`, nested `instance` members, and the first
-  typed `component` subset: top-level component imports plus typed `instance`
-  component members whose expected component types have no imports and only
-  recurse through typed `component` exports with explicit component type
-  metadata; broader componenttype matching is still unsupported
+  limited to exported `core module`, exported `resource type` members with
+  abstract `type` bounds, scalar / variable-length `list<scalar>` /
+  `list<string>` / current tuple-record-subset `value`, nested `instance`
+  members, and the first typed `component` subset: top-level component imports
+  plus typed `instance` component members whose expected component types have no
+  imports and only recurse through typed `component` exports with explicit
+  component type metadata; broader componenttype matching and eq-bound resource
+  type matching are still unsupported
 - host-import tuple/record values are still limited to the current scalar /
   UTF-8 string / nested `list<scalar>` / `list<string>` subset
-- there is still no public resource import/export contract comparable to the
-  current function/value/instance/component/core-module surface
+- public resource-type exports are now enumerable through
+  `wasm_runtime_get_component_export_type(...)` /
+  `wasm_component_instance_get_export_type(...)`, but the broader public
+  resource import/export contract is still incomplete compared to the current
+  function/value/instance/component/core-module surface
 
 ## 5. Broader component values are still missing
 
@@ -535,6 +539,13 @@ What exists:
 - top-level public host binding of imported resource types through
   `wasm_component_import_binding_t`, for the same imported `resource.drop`
   subset
+- top-level and nested public resource-type export lookup through
+  `wasm_runtime_get_component_export_type(...)` and
+  `wasm_component_instance_get_export_type(...)`
+- typed top-level `instance` and `component` import matching for exported
+  resource-type members with abstract `type` bounds
+- recursive component-type matching for nested component exports whose own
+  component types export resource-type members with abstract `type` bounds
 - synchronous host callback round-tripping of existing `own<resource>` handles
   through `wasm_runtime_call_component_values(...)` for host function imports
 - synchronous host callback transport of borrowed resource parameters for host
@@ -556,8 +567,14 @@ What is still missing:
 - full ownership/borrow/lend semantics
 - live Canonical ABI resource lowering/lifting
 - resource imports/exports as a complete **public** host feature beyond the
-  current top-level imported-resource-type binding plus host-callback imported
-  own-result subset
+   current top-level imported-resource-type binding, public resource-type export
+   lookup, the current typed resource-member matching subset (top-level
+   `instance`/`component` imports plus nested component-type matching with
+   expected-side abstract `type` bounds only), and host-callback imported
+   own-result subset
+- resource-type identity/rebinding beyond the current name/sort plus
+  expected-bound-shape matching subset; eq-bound matching is still explicitly
+  unsupported
 - borrowed resource values and general own/borrow public value transport beyond
   the current callback subset (borrowed parameters, round-tripping existing
   owned handles, plus fresh imported own results)
