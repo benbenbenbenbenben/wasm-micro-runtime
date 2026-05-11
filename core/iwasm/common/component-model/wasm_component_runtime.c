@@ -6730,6 +6730,7 @@ resolve_component_canon_lift_type(WASMComponentInstance *inst,
                                   WASMFuncType **out_core_type)
 {
     WASMModuleInstanceCommon *core_module_inst;
+
     if (!resolve_component_func_type(inst, function, "component canon lift function",
                                      out_component_type))
         return false;
@@ -8801,6 +8802,71 @@ compute_component_canon_abi_layout(WASMComponentInstance *inst,
     }
 }
 
+static bool
+compute_component_canon_abi_result_vector_layout(
+    WASMComponentInstance *inst, const WASMComponent *component,
+    const WASMComponentValueType *result_types, uint32 result_count,
+    uint32 *size_out, uint32 *align_out, uint32 *offsets_out,
+    uint32 *result_sizes_out, bool *has_string_leaf_out,
+    bool *has_list_scalar_leaf_out, bool *has_list_string_leaf_out)
+{
+    uint32 size = 0, max_align = 1;
+
+    if (!size_out || !align_out || !has_string_leaf_out
+        || !has_list_scalar_leaf_out || !has_list_string_leaf_out)
+        return false;
+
+    *size_out = 0;
+    *align_out = 1;
+    *has_string_leaf_out = false;
+    *has_list_scalar_leaf_out = false;
+    *has_list_string_leaf_out = false;
+
+    for (uint32 i = 0; i < result_count; i++) {
+        uint32 result_size = 0, result_align = 1, result_offset = 0;
+        bool result_has_string = false;
+        bool result_has_list_scalar = false;
+        bool result_has_list_string = false;
+        uint64 next_size;
+
+        if (!compute_component_canon_abi_layout(
+                inst, component, &result_types[i], i, &result_size, &result_align,
+                &result_has_string, &result_has_list_scalar,
+                &result_has_list_string))
+            return false;
+
+        if (!align_component_canon_abi_offset(size, result_align, &result_offset))
+            return set_component_call_error(
+                inst, "component canon lift function result area is too large");
+
+        next_size = (uint64)result_offset + result_size;
+        if (next_size > UINT32_MAX)
+            return set_component_call_error(
+                inst, "component canon lift function result area is too large");
+
+        if (offsets_out)
+            offsets_out[i] = result_offset;
+        if (result_sizes_out)
+            result_sizes_out[i] = result_size;
+
+        size = (uint32)next_size;
+        if (result_align > max_align)
+            max_align = result_align;
+        *has_string_leaf_out = *has_string_leaf_out || result_has_string;
+        *has_list_scalar_leaf_out =
+            *has_list_scalar_leaf_out || result_has_list_scalar;
+        *has_list_string_leaf_out =
+            *has_list_string_leaf_out || result_has_list_string;
+    }
+
+    if (!align_component_canon_abi_offset(size, max_align, size_out))
+        return set_component_call_error(
+            inst, "component canon lift function result area is too large");
+
+    *align_out = max_align;
+    return true;
+}
+
 static void
 init_component_result_payload_builder(
     WASMComponentResultPayloadBuilder *builder)
@@ -9893,6 +9959,90 @@ init_component_public_memory_composite_result(
 }
 
 static bool
+load_component_canon_memory_scalar_value(WASMComponentInstance *inst,
+                                         uint8 prim_type,
+                                         wasm_valkind_t public_kind,
+                                         const uint8 *in_bytes, uint32 in_size,
+                                         wasm_val_t *out)
+{
+    uint32 expected_size = 0, ignored_align = 1;
+    uint16 u16 = 0;
+    uint32 u32 = 0;
+    uint64 u64 = 0;
+
+    if (!out || (in_size > 0 && !in_bytes)
+        || !lookup_component_canon_abi_scalar_size_align(prim_type,
+                                                         &expected_size,
+                                                         &ignored_align)
+        || in_size != expected_size)
+        return set_component_call_error(
+            inst, "component canon lift function could not decode a scalar "
+                  "result from the result area");
+
+    memset(out, 0, sizeof(*out));
+    out->kind = public_kind;
+
+    switch (prim_type) {
+        case WASM_COMP_PRIMVAL_BOOL:
+            out->of.i32 = (int32)in_bytes[0];
+            return true;
+        case WASM_COMP_PRIMVAL_S8:
+            out->of.i32 = (int32)(int8)in_bytes[0];
+            return true;
+        case WASM_COMP_PRIMVAL_U8:
+            out->of.i32 = (int32)in_bytes[0];
+            return true;
+        case WASM_COMP_PRIMVAL_S16:
+            u16 = (uint16)((uint16)in_bytes[0] | ((uint16)in_bytes[1] << 8));
+            out->of.i32 = (int32)(int16)u16;
+            return true;
+        case WASM_COMP_PRIMVAL_U16:
+            u16 = (uint16)((uint16)in_bytes[0] | ((uint16)in_bytes[1] << 8));
+            out->of.i32 = (int32)u16;
+            return true;
+        case WASM_COMP_PRIMVAL_S32:
+            u32 = (uint32)in_bytes[0] | ((uint32)in_bytes[1] << 8)
+                  | ((uint32)in_bytes[2] << 16)
+                  | ((uint32)in_bytes[3] << 24);
+            out->of.i32 = (int32)u32;
+            return true;
+        case WASM_COMP_PRIMVAL_U32:
+        case WASM_COMP_PRIMVAL_CHAR:
+            u32 = (uint32)in_bytes[0] | ((uint32)in_bytes[1] << 8)
+                  | ((uint32)in_bytes[2] << 16)
+                  | ((uint32)in_bytes[3] << 24);
+            out->of.i32 = (int32)u32;
+            return true;
+        case WASM_COMP_PRIMVAL_S64:
+            u64 = (uint64)in_bytes[0] | ((uint64)in_bytes[1] << 8)
+                  | ((uint64)in_bytes[2] << 16) | ((uint64)in_bytes[3] << 24)
+                  | ((uint64)in_bytes[4] << 32) | ((uint64)in_bytes[5] << 40)
+                  | ((uint64)in_bytes[6] << 48) | ((uint64)in_bytes[7] << 56);
+            out->of.i64 = (int64)u64;
+            return true;
+        case WASM_COMP_PRIMVAL_U64:
+            u64 = (uint64)in_bytes[0] | ((uint64)in_bytes[1] << 8)
+                  | ((uint64)in_bytes[2] << 16) | ((uint64)in_bytes[3] << 24)
+                  | ((uint64)in_bytes[4] << 32) | ((uint64)in_bytes[5] << 40)
+                  | ((uint64)in_bytes[6] << 48) | ((uint64)in_bytes[7] << 56);
+            out->of.i64 = (int64)u64;
+            return true;
+        case WASM_COMP_PRIMVAL_F32:
+            memcpy(&out->of.f32, in_bytes, sizeof(float32));
+            return true;
+        case WASM_COMP_PRIMVAL_F64:
+            memcpy(&out->of.f64, in_bytes, sizeof(float64));
+            return true;
+        default:
+            break;
+    }
+
+    return set_component_call_error(
+        inst, "component canon lift function could not decode a scalar "
+              "result from the result area");
+}
+
+static bool
 store_component_canon_memory_scalar_value(WASMComponentInstance *inst,
                                           uint8 prim_type,
                                           const wasm_val_t *value, uint8 *out_bytes,
@@ -10661,14 +10811,173 @@ init_component_public_list_scalar_result(
 }
 
 static bool
+resolve_component_canon_memory_ref(WASMComponentInstance *inst,
+                                   const WASMComponentRuntimeFunc *function,
+                                   WASMComponentCoreRuntimeRef *out_ref,
+                                   bool *found_out)
+{
+    if (found_out)
+        *found_out = false;
+    if (out_ref)
+        memset(out_ref, 0, sizeof(*out_ref));
+
+    if (function->canon_memory_ref.type == WASM_COMP_CORE_RUNTIME_REF_MEMORY
+        && function->canon_memory_ref.of.memory) {
+        if (found_out)
+            *found_out = true;
+        if (out_ref)
+            *out_ref = function->canon_memory_ref;
+        return true;
+    }
+
+    if (!function->canon_opts)
+        return true;
+
+    for (uint32 i = 0; i < function->canon_opts->canon_opts_count; i++) {
+        const WASMComponentCanonOpt *opt = &function->canon_opts->canon_opts[i];
+
+        if (opt->tag != WASM_COMP_CANON_OPT_MEMORY)
+            continue;
+        if (opt->payload.memory.mem_idx >= inst->core_memory_count)
+            return set_component_call_error_fmt(
+                inst, "component canon lift memory index %u is out of bounds",
+                opt->payload.memory.mem_idx);
+
+        if (inst->core_memories[opt->payload.memory.mem_idx].type
+                != WASM_COMP_CORE_RUNTIME_REF_MEMORY
+            || !inst->core_memories[opt->payload.memory.mem_idx].of.memory)
+            return set_component_call_error_fmt(
+                inst, "component canon lift memory index %u does not resolve to "
+                      "memory",
+                opt->payload.memory.mem_idx);
+
+        if (found_out)
+            *found_out = true;
+        if (out_ref)
+            *out_ref = inst->core_memories[opt->payload.memory.mem_idx];
+        return true;
+    }
+
+    return true;
+}
+
+static bool
+resolve_component_canon_realloc_ref(WASMComponentInstance *inst,
+                                    const WASMComponentRuntimeFunc *function,
+                                    WASMComponentCoreRuntimeRef *out_ref,
+                                    bool *found_out)
+{
+    if (found_out)
+        *found_out = false;
+    if (out_ref)
+        memset(out_ref, 0, sizeof(*out_ref));
+
+    if (function->canon_realloc_ref.type == WASM_COMP_CORE_RUNTIME_REF_FUNC
+        && function->canon_realloc_ref.of.function) {
+        if (found_out)
+            *found_out = true;
+        if (out_ref)
+            *out_ref = function->canon_realloc_ref;
+        return true;
+    }
+
+    if (!function->canon_opts)
+        return true;
+
+    for (uint32 i = 0; i < function->canon_opts->canon_opts_count; i++) {
+        const WASMComponentCanonOpt *opt = &function->canon_opts->canon_opts[i];
+
+        if (opt->tag != WASM_COMP_CANON_OPT_REALLOC)
+            continue;
+        if (opt->payload.realloc_opt.func_idx >= inst->core_func_count)
+            return set_component_call_error_fmt(
+                inst, "component canon lift realloc func index %u is out of "
+                      "bounds",
+                opt->payload.realloc_opt.func_idx);
+
+        if (inst->core_funcs[opt->payload.realloc_opt.func_idx].type
+                != WASM_COMP_CORE_RUNTIME_REF_FUNC
+            || !inst->core_funcs[opt->payload.realloc_opt.func_idx].of.function)
+            return set_component_call_error_fmt(
+                inst, "component canon lift realloc func index %u does not "
+                      "resolve to a function",
+                opt->payload.realloc_opt.func_idx);
+
+        if (found_out)
+            *found_out = true;
+        if (out_ref)
+            *out_ref = inst->core_funcs[opt->payload.realloc_opt.func_idx];
+        return true;
+    }
+
+    return true;
+}
+
+static bool
+resolve_component_canon_post_return_ref(
+    WASMComponentInstance *inst, const WASMComponentRuntimeFunc *function,
+    WASMComponentCoreRuntimeRef *out_ref, bool *found_out)
+{
+    if (found_out)
+        *found_out = false;
+    if (out_ref)
+        memset(out_ref, 0, sizeof(*out_ref));
+
+    if (function->canon_post_return_ref.type == WASM_COMP_CORE_RUNTIME_REF_FUNC
+        && function->canon_post_return_ref.of.function) {
+        if (found_out)
+            *found_out = true;
+        if (out_ref)
+            *out_ref = function->canon_post_return_ref;
+        return true;
+    }
+
+    if (!function->canon_opts)
+        return true;
+
+    for (uint32 i = 0; i < function->canon_opts->canon_opts_count; i++) {
+        const WASMComponentCanonOpt *opt = &function->canon_opts->canon_opts[i];
+
+        if (opt->tag != WASM_COMP_CANON_OPT_POST_RETURN)
+            continue;
+        if (opt->payload.post_return.func_idx >= inst->core_func_count)
+            return set_component_call_error_fmt(
+                inst, "component canon lift post-return func index %u is out of "
+                      "bounds",
+                opt->payload.post_return.func_idx);
+
+        if (inst->core_funcs[opt->payload.post_return.func_idx].type
+                != WASM_COMP_CORE_RUNTIME_REF_FUNC
+            || !inst->core_funcs[opt->payload.post_return.func_idx].of.function)
+            return set_component_call_error_fmt(
+                inst, "component canon lift post-return func index %u does not "
+                      "resolve to a function",
+                opt->payload.post_return.func_idx);
+
+        if (found_out)
+            *found_out = true;
+        if (out_ref)
+            *out_ref = inst->core_funcs[opt->payload.post_return.func_idx];
+        return true;
+    }
+
+    return true;
+}
+
+static bool
 get_component_canon_memory_bytes(WASMComponentInstance *inst,
                                  const WASMComponentRuntimeFunc *function,
                                  uint32 offset, uint32 size,
                                  const char *description, uint8 **bytes_out)
 {
-    WASMMemoryInstance *memory = function->canon_memory_ref.of.memory;
+    WASMComponentCoreRuntimeRef memory_ref;
+    WASMMemoryInstance *memory = NULL;
     uint64 memory_size;
 
+    if (!resolve_component_canon_memory_ref(inst, function, &memory_ref, NULL))
+        return false;
+
+    memory = memory_ref.of.memory;
     if (!memory || !memory->memory_data)
         return set_component_call_error(
             inst, "component canon lift function memory is unavailable");
@@ -10736,8 +11045,17 @@ call_component_canon_realloc_raw(WASMComponentInstance *inst,
                                  uint32 old_ptr, uint32 old_size, uint32 align,
                                  uint32 new_size, uint32 *ptr_out)
 {
+    WASMComponentCoreRuntimeRef realloc_ref;
+    bool have_realloc = false;
     wasm_val_t args[4] = { 0 };
     wasm_val_t result = { 0 };
+
+    if (!resolve_component_canon_realloc_ref(inst, function, &realloc_ref,
+                                             &have_realloc))
+        return false;
+    if (!have_realloc)
+        return set_component_call_error(
+            inst, "component canon lift realloc is unavailable");
 
     args[0].kind = WASM_I32;
     args[1].kind = WASM_I32;
@@ -10749,7 +11067,7 @@ call_component_canon_realloc_raw(WASMComponentInstance *inst,
     args[3].of.i32 = (int32)new_size;
 
     if (!call_component_core_function_with_current_exec_env(
-            inst, &function->canon_realloc_ref,
+            inst, &realloc_ref,
             "component canon lift function could not acquire a realloc "
             "execution environment",
             "component canon lift realloc failed", 1, &result, 4, args)) {
@@ -10799,12 +11117,19 @@ cleanup_component_canon_param_allocations(
     WASMComponentInstance *inst, const WASMComponentRuntimeFunc *function,
     WASMComponentCanonParamAllocationTracker *allocation_tracker)
 {
+    WASMComponentCoreRuntimeRef realloc_ref;
+    bool have_realloc = false;
     char saved_exception[256];
     const char *exception = wasm_runtime_get_exception((WASMModuleInstanceCommon *)inst);
     uint32 i;
 
     if (!allocation_tracker || !allocation_tracker->allocations
         || allocation_tracker->count == 0)
+        return;
+
+    if (!resolve_component_canon_realloc_ref(inst, function, &realloc_ref,
+                                             &have_realloc)
+        || !have_realloc)
         return;
 
     if (exception && exception[0]) {
@@ -10824,15 +11149,13 @@ cleanup_component_canon_param_allocations(
 
         wasm_runtime_clear_exception((WASMModuleInstanceCommon *)inst);
         wasm_runtime_clear_exception(
-            (WASMModuleInstanceCommon *)function->canon_realloc_ref.owner_instance
-                ->module_inst);
+            (WASMModuleInstanceCommon *)realloc_ref.owner_instance->module_inst);
         if (!call_component_canon_realloc_raw(inst, function, allocation->ptr,
                                               allocation->size, 1, 0,
                                               &ignored_ptr)) {
             wasm_runtime_clear_exception((WASMModuleInstanceCommon *)inst);
             wasm_runtime_clear_exception(
-                (WASMModuleInstanceCommon *)function->canon_realloc_ref
-                    .owner_instance->module_inst);
+                (WASMModuleInstanceCommon *)realloc_ref.owner_instance->module_inst);
         }
     }
 
@@ -10850,15 +11173,21 @@ call_component_canon_post_return(WASMComponentInstance *inst,
                                  const WASMComponentRuntimeFunc *function,
                                  uint32 retptr)
 {
+    WASMComponentCoreRuntimeRef post_return_ref;
+    bool have_post_return = false;
     wasm_val_t arg = { 0 };
 
-    if (!function->canon_post_return_ref.of.function)
+    if (!resolve_component_canon_post_return_ref(inst, function,
+                                                 &post_return_ref,
+                                                 &have_post_return))
+        return false;
+    if (!have_post_return)
         return true;
 
     arg.kind = WASM_I32;
     arg.of.i32 = (int32)retptr;
     if (!call_component_core_function_with_current_exec_env(
-            inst, &function->canon_post_return_ref,
+            inst, &post_return_ref,
             "component canon lift function could not acquire a post-return "
             "execution environment",
             "component canon lift post-return failed", 0, NULL, 1, &arg)) {
@@ -10886,6 +11215,10 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
     WASMComponentCanonLiftValueShape result_shape;
     WASMComponentCompositeFlatLeaf stack_result_leaves[16];
     WASMComponentCompositeFlatLeaf *result_leaves = stack_result_leaves;
+    uint32 stack_result_layout[32];
+    uint32 *result_layout = stack_result_layout;
+    uint32 *result_offsets = stack_result_layout;
+    uint32 *result_sizes = stack_result_layout + 16;
     WASMComponentCanonLiftValueInfo result_info;
     wasm_val_t stack_args[16];
     wasm_val_t *core_args = stack_args;
@@ -10916,9 +11249,11 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
     bool has_owned_resource_result = false;
     bool has_borrowed_resource_result = false;
     bool multi_result_scalar_only = false;
+    bool multi_result_retptr_scalar = false;
     uint32 borrowed_result_resource_type_idx =
         WASM_COMPONENT_RESOURCE_INVALID_TYPE_IDX;
     uint32 memory_result_retptr = 0;
+    uint32 result_vector_size = 0, result_vector_align = 1;
 
     if (!inst)
         return false;
@@ -11421,25 +11756,76 @@ host_import_cleanup_fail:
             inst, "component canon lift function results buffer is null");
 
     if (expected_result_count > 1) {
-        if (core_type->result_count != expected_result_count)
+        if (core_type->result_count == expected_result_count) {
+            for (i = 0; i < expected_result_count; i++) {
+                if (!lookup_component_canon_lift_value_type(
+                        component, &component_type->results->results[i], "result",
+                        i, true, false, false, false, &result_info, inst))
+                    return false;
+                if (result_info.kind != WASM_COMP_CANON_LIFT_VALUE_SCALAR
+                    || core_type->types[core_type->param_count + i]
+                           != result_info.core_type)
+                    return set_component_call_error(
+                        inst, "component canon lift function only supports "
+                              "scalar multi-result signatures");
+            }
+
+            multi_result_scalar_only = true;
+        }
+        else if (core_type->result_count == 1
+                 && core_type->types[core_type->param_count] == VALUE_TYPE_I32) {
+            bool has_string_leaf = false;
+            bool has_list_scalar_leaf = false;
+            bool has_list_string_leaf = false;
+            WASMComponentCoreRuntimeRef ignored_ref;
+            bool have_retptr_memory = false;
+            bool have_retptr_post_return = false;
+
+            if (!resolve_component_canon_memory_ref(inst, function, &ignored_ref,
+                                                    &have_retptr_memory)
+                || !resolve_component_canon_post_return_ref(
+                    inst, function, &ignored_ref, &have_retptr_post_return))
+                goto cleanup;
+            if (!have_retptr_memory || !have_retptr_post_return)
+                return set_component_call_error(
+                    inst, "component canon lift function only supports direct "
+                          "scalar multi-value or retptr-backed scalar "
+                          "multi-result signatures");
+
+            if (expected_result_count > 16) {
+                result_layout = wasm_runtime_malloc(sizeof(uint32)
+                                                   * expected_result_count * 2);
+                if (!result_layout)
+                    return set_component_call_error(
+                        inst, "component canon lift function could not allocate "
+                              "retptr result layout metadata");
+                result_offsets = result_layout;
+                result_sizes = result_layout + expected_result_count;
+            }
+
+            if (!compute_component_canon_abi_result_vector_layout(
+                    inst, component, component_type->results->results,
+                    expected_result_count, &result_vector_size,
+                    &result_vector_align, result_offsets, result_sizes,
+                    &has_string_leaf, &has_list_scalar_leaf,
+                    &has_list_string_leaf))
+                goto cleanup;
+            (void)result_vector_align;
+
+            if (has_string_leaf || has_list_scalar_leaf || has_list_string_leaf) {
+                set_component_call_error(
+                    inst, "component canon lift function only supports "
+                          "retptr-backed scalar multi-result signatures");
+                goto cleanup;
+            }
+
+            multi_result_retptr_scalar = true;
+        }
+        else
             return set_component_call_error(
                 inst, "component canon lift function only supports direct "
-                      "scalar multi-value results");
-
-        for (i = 0; i < expected_result_count; i++) {
-            if (!lookup_component_canon_lift_value_type(
-                    component, &component_type->results->results[i], "result", i,
-                    true, false, false, false, &result_info, inst))
-                return false;
-            if (result_info.kind != WASM_COMP_CANON_LIFT_VALUE_SCALAR
-                || core_type->types[core_type->param_count + i]
-                       != result_info.core_type)
-                return set_component_call_error(
-                    inst, "component canon lift function only supports scalar "
-                          "multi-result signatures");
-        }
-
-        multi_result_scalar_only = true;
+                      "scalar multi-value or retptr-backed scalar multi-result "
+                      "signatures");
     }
 
     if (!multi_result_scalar_only && expected_result_count == 1) {
@@ -11543,7 +11929,8 @@ host_import_cleanup_fail:
             }
         }
     }
-    else if (!multi_result_scalar_only && core_type->result_count != 0)
+    else if (!multi_result_scalar_only && !multi_result_retptr_scalar
+             && core_type->result_count != 0)
         return set_component_call_error(
             inst, "component canon lift function only supports at most one "
                   "result");
@@ -11558,7 +11945,7 @@ host_import_cleanup_fail:
     if ((function->has_string_params || function->has_list_scalar_params
          || function->memory_result_kind
                 != WASM_COMP_RUNTIME_CANON_LIFT_MEMORY_RESULT_NONE
-         || composite_result_needs_memory)
+         || composite_result_needs_memory || multi_result_retptr_scalar)
         && function->canon_memory_ref.of.memory
         && function->canon_memory_ref.of.memory->is_memory64)
         return set_component_call_error(
@@ -11696,6 +12083,52 @@ host_import_cleanup_fail:
                     result_info_local.prim_type, "result", i)
                 || !init_component_public_scalar_result(
                     inst, &result_info_local, &core_results[i], &results[i])) {
+                for (uint32 j = 0; j < i; j++)
+                    wasm_component_value_destroy(&results[j]);
+                call_succeeded = false;
+                goto cleanup;
+            }
+        }
+    }
+    else if (multi_result_retptr_scalar) {
+        uint8 *ret_area_bytes = NULL;
+
+        if (core_results[0].kind != WASM_I32) {
+            set_component_call_error(
+                inst, "component canon lift function multi-result retptr "
+                      "returned an unexpected result kind");
+            call_succeeded = false;
+            goto cleanup;
+        }
+
+        memory_result_retptr = (uint32)core_results[0].of.i32;
+        have_memory_result_ptr = true;
+        if (!get_component_canon_memory_bytes(inst, function,
+                                              memory_result_retptr,
+                                              result_vector_size,
+                                              "multi-result result area",
+                                              &ret_area_bytes)) {
+            call_succeeded = false;
+            goto cleanup;
+        }
+
+        for (i = 0; i < expected_result_count; i++) {
+            WASMComponentCanonLiftValueInfo result_info_local;
+            wasm_val_t scalar_value = { 0 };
+
+            if (!lookup_component_canon_lift_value_type(
+                    component, &component_type->results->results[i], "result", i,
+                    true, false, false, false, &result_info_local, inst)
+                || !load_component_canon_memory_scalar_value(
+                    inst, result_info_local.prim_type,
+                    result_info_local.public_kind,
+                    ret_area_bytes + result_offsets[i], result_sizes[i],
+                    &scalar_value)
+                || !validate_component_scalar_value(
+                    inst, &scalar_value, result_info_local.public_kind,
+                    result_info_local.prim_type, "result", i)
+                || !init_component_public_scalar_result(
+                    inst, &result_info_local, &scalar_value, &results[i])) {
                 for (uint32 j = 0; j < i; j++)
                     wasm_component_value_destroy(&results[j]);
                 call_succeeded = false;
@@ -11927,6 +12360,8 @@ cleanup:
         wasm_runtime_free(borrowed_resource_params);
     if (result_leaves != stack_result_leaves)
         wasm_runtime_free(result_leaves);
+    if (result_layout != stack_result_layout)
+        wasm_runtime_free(result_layout);
     return call_succeeded;
 }
 
@@ -12132,8 +12567,10 @@ wasm_component_call_internal(WASMComponentInstance *inst,
             inst, "component canon lift function is not bound to a core function");
 
     if (function->has_string_params || function->has_list_scalar_params
-        || function->memory_result_kind
-               != WASM_COMP_RUNTIME_CANON_LIFT_MEMORY_RESULT_NONE)
+        || (function->memory_result_kind
+                != WASM_COMP_RUNTIME_CANON_LIFT_MEMORY_RESULT_NONE
+            && function->memory_result_kind
+                   != WASM_COMP_RUNTIME_CANON_LIFT_MEMORY_RESULT_RETPTR_VECTOR))
         return set_component_call_error(
             inst, function->has_string_params || function->has_string_result
                        ? "component canon lift function uses string values; call "
@@ -12154,6 +12591,136 @@ wasm_component_call_internal(WASMComponentInstance *inst,
             inst, "component canon lift function is missing type metadata");
 
     expected_result_count = get_component_func_result_count(component_type);
+
+    {
+        WASMComponentCoreRuntimeRef ignored_ref;
+        bool have_retptr_memory = false;
+        bool have_retptr_post_return = false;
+
+        if (!resolve_component_canon_memory_ref(inst, function, &ignored_ref,
+                                                &have_retptr_memory)
+            || !resolve_component_canon_post_return_ref(inst, function,
+                                                        &ignored_ref,
+                                                        &have_retptr_post_return))
+            return false;
+
+        if (expected_result_count > 1 && core_type->result_count == 1
+            && core_type->types[core_type->param_count] == VALUE_TYPE_I32
+            && have_retptr_memory && have_retptr_post_return) {
+        wasm_component_value_t stack_public_args[16];
+        wasm_component_value_t *public_args = stack_public_args;
+        wasm_component_value_t stack_public_results[4];
+        wasm_component_value_t *public_results = stack_public_results;
+
+        if (num_args != (component_type->params ? component_type->params->count : 0))
+            return set_component_call_error_fmt(
+                inst,
+                "component canon lift function expects %u arguments but received %u",
+                component_type->params ? component_type->params->count : 0,
+                num_args);
+        if (num_results != expected_result_count)
+            return set_component_call_error_fmt(
+                inst,
+                "component canon lift function expects %u results but received %u",
+                expected_result_count, num_results);
+        if (num_args > 0 && !args)
+            return set_component_call_error(
+                inst, "component canon lift function arguments buffer is null");
+        if (num_results > 0 && !results)
+            return set_component_call_error(
+                inst, "component canon lift function results buffer is null");
+
+        if (expected_result_count
+            > sizeof(stack_public_results) / sizeof(stack_public_results[0])) {
+            public_results = wasm_runtime_malloc(sizeof(wasm_component_value_t)
+                                                 * expected_result_count);
+            if (!public_results)
+                return set_component_call_error(
+                    inst, "component canon lift function could not allocate "
+                          "result storage");
+        }
+        memset(public_results, 0,
+               sizeof(wasm_component_value_t) * expected_result_count);
+
+        if (num_args > sizeof(stack_public_args) / sizeof(stack_public_args[0])) {
+            public_args =
+                wasm_runtime_malloc(sizeof(wasm_component_value_t) * num_args);
+            if (!public_args) {
+                if (public_results != stack_public_results)
+                    wasm_runtime_free(public_results);
+                return set_component_call_error(
+                    inst, "component canon lift function could not allocate "
+                          "argument storage");
+            }
+        }
+        memset(public_args, 0, sizeof(wasm_component_value_t) * num_args);
+
+        for (i = 0; component_type->params && i < component_type->params->count;
+             i++) {
+            WASMComponentCanonLiftValueInfo type_info;
+
+            if (!lookup_component_canon_lift_value_type(
+                    component, component_type->params->params[i].value_type,
+                    "parameter", i, false, false, false, false, &type_info, inst)
+                || !validate_component_scalar_value(inst, &args[i],
+                                                    type_info.public_kind,
+                                                    type_info.prim_type,
+                                                    "parameter", i)
+                || !encode_component_public_scalar_value(&type_info, &args[i],
+                                                         &public_args[i])) {
+                for (uint32 j = 0; j < num_args; j++)
+                    wasm_component_value_destroy(&public_args[j]);
+                if (public_args != stack_public_args)
+                    wasm_runtime_free(public_args);
+                if (public_results != stack_public_results)
+                    wasm_runtime_free(public_results);
+                return false;
+            }
+        }
+
+        if (!wasm_component_call_values_internal(inst, function, expected_result_count,
+                                                 expected_result_count
+                                                     ? public_results
+                                                     : NULL,
+                                                 num_args, public_args, false)) {
+            for (uint32 j = 0; j < num_args; j++)
+                wasm_component_value_destroy(&public_args[j]);
+            if (public_args != stack_public_args)
+                wasm_runtime_free(public_args);
+            destroy_component_public_values(public_results, expected_result_count);
+            if (public_results != stack_public_results)
+                wasm_runtime_free(public_results);
+            return false;
+        }
+
+        for (uint32 j = 0; j < num_args; j++)
+            wasm_component_value_destroy(&public_args[j]);
+        if (public_args != stack_public_args)
+            wasm_runtime_free(public_args);
+
+        for (uint32 j = 0; j < expected_result_count; j++) {
+            WASMComponentCanonLiftValueInfo result_info_local;
+
+            if (!lookup_component_canon_lift_value_type(
+                    component, &component_type->results->results[j], "result", j,
+                    false, false, false, false, &result_info_local, inst)
+                || !decode_component_public_scalar_value(
+                    inst, &public_results[j], &result_info_local, "result", j,
+                    &results[j])) {
+                destroy_component_public_values(public_results,
+                                                expected_result_count);
+                if (public_results != stack_public_results)
+                    wasm_runtime_free(public_results);
+                return false;
+            }
+        }
+
+        destroy_component_public_values(public_results, expected_result_count);
+        if (public_results != stack_public_results)
+            wasm_runtime_free(public_results);
+        return true;
+    }
+    }
 
     if (core_type->param_count
         != (component_type->params ? component_type->params->count : 0))

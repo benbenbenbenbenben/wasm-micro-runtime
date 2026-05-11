@@ -352,6 +352,9 @@ static uint32_t
 count_top_level_core_func_entries(const WASMComponent *component);
 
 static uint32_t
+count_top_level_core_memory_entries(const WASMComponent *component);
+
+static uint32_t
 count_top_level_core_module_entries(const WASMComponent *component);
 
 static bool
@@ -2630,6 +2633,38 @@ count_top_level_core_func_entries(const WASMComponent *component)
 }
 
 static uint32_t
+count_top_level_core_memory_entries(const WASMComponent *component)
+{
+    uint32_t count = 0;
+
+    if (!component) {
+        return 0;
+    }
+
+    for (uint32_t i = 0; i < component->section_count; i++) {
+        const WASMComponentSection *section = &component->sections[i];
+
+        if (section->id != WASM_COMP_SECTION_ALIASES
+            || !section->parsed.alias_section) {
+            continue;
+        }
+
+        for (uint32_t j = 0; j < section->parsed.alias_section->count; j++) {
+            const WASMComponentAliasDefinition *alias_def =
+                &section->parsed.alias_section->aliases[j];
+            if (alias_def->alias_target_type == WASM_COMP_ALIAS_TARGET_CORE_EXPORT
+                && alias_def->sort
+                && alias_def->sort->sort == WASM_COMP_SORT_CORE_SORT
+                && alias_def->sort->core_sort == WASM_COMP_CORE_SORT_MEMORY) {
+                count++;
+            }
+        }
+    }
+
+    return count;
+}
+
+static uint32_t
 count_top_level_core_module_entries(const WASMComponent *component)
 {
     uint32_t count = 0;
@@ -2794,6 +2829,220 @@ append_top_level_scalar_multi_result_lift(WASMComponentModule *component_module,
         || !append_top_level_core_export_lift_sections(
             component_module, core_instance_idx, "pair", (uint32_t)lift_type_idx,
             component_export_name)) {
+        return false;
+    }
+
+    if (lifted_func_idx_out) {
+        *lifted_func_idx_out = lifted_func_idx;
+    }
+    return true;
+}
+
+static bool
+append_top_level_scalar_multi_result_retptr_lift(
+    WASMComponentModule *component_module, const char *component_export_name,
+    uint32_t *lifted_func_idx_out)
+{
+    static const uint8_t multi_result_retptr_core_module[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x09, 0x02, 0x60,
+        0x00, 0x01, 0x7f, 0x60, 0x01, 0x7f, 0x00, 0x03, 0x03, 0x02, 0x00, 0x01,
+        0x05, 0x03, 0x01, 0x00, 0x01, 0x07, 0x22, 0x03, 0x06, 0x6d, 0x65, 0x6d,
+        0x6f, 0x72, 0x79, 0x02, 0x00, 0x04, 0x70, 0x61, 0x69, 0x72, 0x00, 0x00,
+        0x0e, 0x63, 0x61, 0x62, 0x69, 0x5f, 0x70, 0x6f, 0x73, 0x74, 0x5f, 0x70,
+        0x61, 0x69, 0x72, 0x00, 0x01, 0x0a, 0x1e, 0x02, 0x12, 0x00, 0x41, 0x00,
+        0x41, 0x02, 0x36, 0x02, 0x00, 0x41, 0x04, 0x41, 0x05, 0x36, 0x02, 0x00,
+        0x41, 0x00, 0x0b, 0x09, 0x00, 0x20, 0x00, 0x42, 0x00, 0x37, 0x03, 0x00,
+        0x0b
+    };
+    WASMComponent *component = &component_module->component;
+    uint32_t core_instance_idx = UINT32_MAX;
+    uint32_t lifted_func_idx =
+        count_top_level_sort_entries(component, WASM_COMP_SORT_FUNC);
+    int32_t lift_type_idx = append_component_scalar_func_type(
+        component_module, {}, WASM_COMP_PRIMVAL_S32);
+    WASMComponentFuncType *func_type;
+
+    if (lift_type_idx < 0) {
+        return false;
+    }
+
+    func_type = lookup_local_component_func_type(component_module,
+                                                 (uint32_t)lift_type_idx);
+    if (!func_type || !expand_func_type_to_two_results(func_type)
+        || !append_top_level_core_module_instance_sections_from_bytes(
+            component_module, multi_result_retptr_core_module,
+            (uint32_t)sizeof(multi_result_retptr_core_module), "pair-retptr-core",
+            &core_instance_idx)) {
+        return false;
+    }
+
+    const uint32_t aliased_core_func_idx =
+        count_top_level_core_func_entries(component);
+    const uint32_t aliased_core_memory_idx =
+        count_top_level_core_memory_entries(component);
+    const uint32_t aliased_post_return_idx = aliased_core_func_idx + 1;
+    const uint32_t old_count = component->section_count;
+    auto *new_sections = (WASMComponentSection *)wasm_runtime_malloc(
+        sizeof(WASMComponentSection) * (old_count + 3));
+
+    if (!new_sections) {
+        return false;
+    }
+
+    memset(new_sections, 0, sizeof(WASMComponentSection) * (old_count + 3));
+    memcpy(new_sections, component->sections,
+           sizeof(WASMComponentSection) * old_count);
+    wasm_runtime_free(component->sections);
+    component->sections = new_sections;
+    component->section_count = old_count + 3;
+
+    auto *alias_section = &component->sections[old_count];
+    auto *canon_section = &component->sections[old_count + 1];
+    auto *export_section = &component->sections[old_count + 2];
+
+    alias_section->id = WASM_COMP_SECTION_ALIASES;
+    alias_section->parsed.alias_section =
+        (WASMComponentAliasSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentAliasSection));
+    if (!alias_section->parsed.alias_section) {
+        return false;
+    }
+    memset(alias_section->parsed.alias_section, 0,
+           sizeof(WASMComponentAliasSection));
+    alias_section->parsed.alias_section->count = 3;
+    alias_section->parsed.alias_section->aliases =
+        (WASMComponentAliasDefinition *)wasm_runtime_malloc(
+            sizeof(WASMComponentAliasDefinition) * 3);
+    if (!alias_section->parsed.alias_section->aliases) {
+        return false;
+    }
+    memset(alias_section->parsed.alias_section->aliases, 0,
+           sizeof(WASMComponentAliasDefinition) * 3);
+
+    alias_section->parsed.alias_section->aliases[0].sort =
+        create_sort(WASM_COMP_SORT_CORE_SORT);
+    alias_section->parsed.alias_section->aliases[0].sort->core_sort =
+        WASM_COMP_CORE_SORT_FUNC;
+    alias_section->parsed.alias_section->aliases[0].alias_target_type =
+        WASM_COMP_ALIAS_TARGET_CORE_EXPORT;
+    alias_section->parsed.alias_section->aliases[0]
+        .target.core_exported.instance_idx = core_instance_idx;
+    alias_section->parsed.alias_section->aliases[0].target.core_exported.name =
+        clone_core_name("pair");
+
+    alias_section->parsed.alias_section->aliases[1].sort =
+        create_sort(WASM_COMP_SORT_CORE_SORT);
+    alias_section->parsed.alias_section->aliases[1].sort->core_sort =
+        WASM_COMP_CORE_SORT_MEMORY;
+    alias_section->parsed.alias_section->aliases[1].alias_target_type =
+        WASM_COMP_ALIAS_TARGET_CORE_EXPORT;
+    alias_section->parsed.alias_section->aliases[1]
+        .target.core_exported.instance_idx = core_instance_idx;
+    alias_section->parsed.alias_section->aliases[1].target.core_exported.name =
+        clone_core_name("memory");
+
+    alias_section->parsed.alias_section->aliases[2].sort =
+        create_sort(WASM_COMP_SORT_CORE_SORT);
+    alias_section->parsed.alias_section->aliases[2].sort->core_sort =
+        WASM_COMP_CORE_SORT_FUNC;
+    alias_section->parsed.alias_section->aliases[2].alias_target_type =
+        WASM_COMP_ALIAS_TARGET_CORE_EXPORT;
+    alias_section->parsed.alias_section->aliases[2]
+        .target.core_exported.instance_idx = core_instance_idx;
+    alias_section->parsed.alias_section->aliases[2].target.core_exported.name =
+        clone_core_name("cabi_post_pair");
+
+    if (!alias_section->parsed.alias_section->aliases[0].sort
+        || !alias_section->parsed.alias_section->aliases[0]
+                .target.core_exported.name
+        || !alias_section->parsed.alias_section->aliases[1].sort
+        || !alias_section->parsed.alias_section->aliases[1]
+                .target.core_exported.name
+        || !alias_section->parsed.alias_section->aliases[2].sort
+        || !alias_section->parsed.alias_section->aliases[2]
+                .target.core_exported.name) {
+        return false;
+    }
+
+    canon_section->id = WASM_COMP_SECTION_CANONS;
+    canon_section->parsed.canon_section =
+        (WASMComponentCanonSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentCanonSection));
+    if (!canon_section->parsed.canon_section) {
+        return false;
+    }
+    memset(canon_section->parsed.canon_section, 0,
+           sizeof(WASMComponentCanonSection));
+    canon_section->parsed.canon_section->count = 1;
+    canon_section->parsed.canon_section->canons =
+        (WASMComponentCanon *)wasm_runtime_malloc(sizeof(WASMComponentCanon));
+    if (!canon_section->parsed.canon_section->canons) {
+        return false;
+    }
+    memset(canon_section->parsed.canon_section->canons, 0,
+           sizeof(WASMComponentCanon));
+    canon_section->parsed.canon_section->canons[0].tag = WASM_COMP_CANON_LIFT;
+    canon_section->parsed.canon_section->canons[0].canon_data.lift.core_func_idx =
+        aliased_core_func_idx;
+    canon_section->parsed.canon_section->canons[0].canon_data.lift.type_idx =
+        (uint32_t)lift_type_idx;
+    canon_section->parsed.canon_section->canons[0].canon_data.lift.canon_opts =
+        (WASMComponentCanonOpts *)wasm_runtime_malloc(
+            sizeof(WASMComponentCanonOpts));
+    if (!canon_section->parsed.canon_section->canons[0].canon_data.lift.canon_opts) {
+        return false;
+    }
+    memset(canon_section->parsed.canon_section->canons[0].canon_data.lift.canon_opts,
+           0, sizeof(WASMComponentCanonOpts));
+    canon_section->parsed.canon_section->canons[0]
+        .canon_data.lift.canon_opts->canon_opts_count = 2;
+    canon_section->parsed.canon_section->canons[0]
+        .canon_data.lift.canon_opts->canon_opts =
+        (WASMComponentCanonOpt *)wasm_runtime_malloc(
+            sizeof(WASMComponentCanonOpt) * 2);
+    if (!canon_section->parsed.canon_section->canons[0]
+             .canon_data.lift.canon_opts->canon_opts) {
+        return false;
+    }
+    memset(canon_section->parsed.canon_section->canons[0]
+               .canon_data.lift.canon_opts->canon_opts,
+           0, sizeof(WASMComponentCanonOpt) * 2);
+    canon_section->parsed.canon_section->canons[0]
+        .canon_data.lift.canon_opts->canon_opts[0]
+        .tag = WASM_COMP_CANON_OPT_MEMORY;
+    canon_section->parsed.canon_section->canons[0]
+        .canon_data.lift.canon_opts->canon_opts[0]
+        .payload.memory.mem_idx = aliased_core_memory_idx;
+    canon_section->parsed.canon_section->canons[0]
+        .canon_data.lift.canon_opts->canon_opts[1]
+        .tag = WASM_COMP_CANON_OPT_POST_RETURN;
+    canon_section->parsed.canon_section->canons[0]
+        .canon_data.lift.canon_opts->canon_opts[1]
+        .payload.post_return.func_idx = aliased_post_return_idx;
+
+    export_section->id = WASM_COMP_SECTION_EXPORTS;
+    export_section->parsed.export_section =
+        (WASMComponentExportSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentExportSection));
+    if (!export_section->parsed.export_section) {
+        return false;
+    }
+    memset(export_section->parsed.export_section, 0,
+           sizeof(WASMComponentExportSection));
+    export_section->parsed.export_section->count = 1;
+    export_section->parsed.export_section->exports =
+        (WASMComponentExport *)wasm_runtime_malloc(sizeof(WASMComponentExport));
+    if (!export_section->parsed.export_section->exports) {
+        return false;
+    }
+    memset(export_section->parsed.export_section->exports, 0,
+           sizeof(WASMComponentExport));
+    export_section->parsed.export_section->exports[0].export_name =
+        create_export_name(component_export_name);
+    export_section->parsed.export_section->exports[0].sort_idx =
+        create_sort_idx(WASM_COMP_SORT_FUNC, lifted_func_idx);
+    if (!export_section->parsed.export_section->exports[0].export_name
+        || !export_section->parsed.export_section->exports[0].sort_idx) {
         return false;
     }
 
@@ -40873,6 +41122,147 @@ TEST_F(BinaryParserTest,
     wasm_component_value_t second = {};
     ASSERT_TRUE(
         wasm_runtime_lookup_component_value(module_inst, "second-result", &second));
+    ASSERT_EQ(second.type.kind, WASM_COMPONENT_VALUE_TYPE_PRIMITIVE);
+    ASSERT_EQ(second.type.type.primitive_type,
+              WASM_COMPONENT_PRIMITIVE_VALUE_S32);
+    ASSERT_EQ(*(int32_t *)wasm_component_value_get_data(&second), 5);
+
+    wasm_component_value_destroy(&first);
+    wasm_component_value_destroy(&second);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestRuntimeCallsTopLevelScalarRetptrMultiResultCanonLift)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "runtime-top-level-retptr-multi-result-call";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    ASSERT_TRUE(append_top_level_scalar_multi_result_retptr_lift(
+        (WASMComponentModule *)module, "pair-retptr-results", nullptr));
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func =
+        wasm_runtime_lookup_component_function(module_inst, "pair-retptr-results");
+    ASSERT_NE(func, nullptr);
+    ASSERT_EQ(func->kind, WASM_COMP_RUNTIME_FUNC_LIFT);
+    ASSERT_NE(func->canon_opts, nullptr);
+    ASSERT_EQ(func->canon_opts->canon_opts_count, 2u);
+    ASSERT_EQ(func->canon_opts->canon_opts[0].tag, WASM_COMP_CANON_OPT_MEMORY);
+    ASSERT_EQ(func->canon_opts->canon_opts[1].tag,
+              WASM_COMP_CANON_OPT_POST_RETURN);
+
+    auto *component_inst = (WASMComponentInstance *)module_inst;
+    uint32_t memory_idx = func->canon_opts->canon_opts[0].payload.memory.mem_idx;
+    uint32_t post_return_idx =
+        func->canon_opts->canon_opts[1].payload.post_return.func_idx;
+    ASSERT_GT(component_inst->core_memory_count, memory_idx);
+    ASSERT_GT(component_inst->core_func_count, post_return_idx);
+    ASSERT_EQ(component_inst->core_memories[memory_idx].type,
+              WASM_COMP_CORE_RUNTIME_REF_MEMORY);
+    ASSERT_NE(component_inst->core_memories[memory_idx].of.memory, nullptr);
+    ASSERT_EQ(component_inst->core_funcs[post_return_idx].type,
+              WASM_COMP_CORE_RUNTIME_REF_FUNC);
+    ASSERT_NE(component_inst->core_funcs[post_return_idx].of.function, nullptr);
+
+    WASMFuncType *core_type = wasm_runtime_get_function_type(
+        func->core_func_ref.of.function,
+        ((WASMModuleInstanceCommon *)func->core_func_ref.owner_instance->module_inst)
+            ->module_type);
+    ASSERT_NE(core_type, nullptr);
+    ASSERT_EQ(core_type->result_count, 1u);
+    ASSERT_EQ(core_type->types[core_type->param_count], VALUE_TYPE_I32);
+
+    wasm_val_t results[2] = {};
+    ASSERT_TRUE(
+        wasm_runtime_call_component(module_inst, func, 2, results, 0, nullptr))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(results[0].kind, WASM_I32);
+    ASSERT_EQ(results[0].of.i32, 2);
+    ASSERT_EQ(results[1].kind, WASM_I32);
+    ASSERT_EQ(results[1].of.i32, 5);
+
+    wasm_component_value_t public_results[2] = {};
+    ASSERT_TRUE(wasm_runtime_call_component_values(module_inst, func, 2,
+                                                   public_results, 0, nullptr))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(public_results[0].type.kind, WASM_COMPONENT_VALUE_TYPE_PRIMITIVE);
+    ASSERT_EQ(public_results[0].type.type.primitive_type,
+              WASM_COMPONENT_PRIMITIVE_VALUE_S32);
+    ASSERT_EQ(*(int32_t *)wasm_component_value_get_data(&public_results[0]), 2);
+    ASSERT_EQ(public_results[1].type.kind, WASM_COMPONENT_VALUE_TYPE_PRIMITIVE);
+    ASSERT_EQ(public_results[1].type.type.primitive_type,
+              WASM_COMPONENT_PRIMITIVE_VALUE_S32);
+    ASSERT_EQ(*(int32_t *)wasm_component_value_get_data(&public_results[1]), 5);
+
+    wasm_component_value_destroy(&public_results[0]);
+    wasm_component_value_destroy(&public_results[1]);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestRuntimeExecutesTopLevelScalarRetptrMultiResultStartSections)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "runtime-top-level-retptr-multi-result-start";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    uint32_t start_func_idx = UINT32_MAX;
+    uint32_t base_value_idx = count_top_level_sort_entries(
+        &((WASMComponentModule *)module)->component, WASM_COMP_SORT_VALUE);
+    ASSERT_TRUE(append_top_level_scalar_multi_result_retptr_lift(
+        (WASMComponentModule *)module, "pair-retptr-results", &start_func_idx));
+    ASSERT_TRUE(append_top_level_start_section((WASMComponentModule *)module,
+                                               start_func_idx, nullptr, 0, 2));
+    ASSERT_TRUE(append_top_level_value_export_section(
+        (WASMComponentModule *)module, "first-retptr-result", base_value_idx));
+    ASSERT_TRUE(append_top_level_value_export_section(
+        (WASMComponentModule *)module, "second-retptr-result",
+        base_value_idx + 1));
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_value_t first = {};
+    ASSERT_TRUE(wasm_runtime_lookup_component_value(module_inst,
+                                                    "first-retptr-result",
+                                                    &first));
+    ASSERT_EQ(first.type.kind, WASM_COMPONENT_VALUE_TYPE_PRIMITIVE);
+    ASSERT_EQ(first.type.type.primitive_type,
+              WASM_COMPONENT_PRIMITIVE_VALUE_S32);
+    ASSERT_EQ(*(int32_t *)wasm_component_value_get_data(&first), 2);
+
+    wasm_component_value_t second = {};
+    ASSERT_TRUE(wasm_runtime_lookup_component_value(module_inst,
+                                                    "second-retptr-result",
+                                                    &second));
     ASSERT_EQ(second.type.kind, WASM_COMPONENT_VALUE_TYPE_PRIMITIVE);
     ASSERT_EQ(second.type.type.primitive_type,
               WASM_COMPONENT_PRIMITIVE_VALUE_S32);
