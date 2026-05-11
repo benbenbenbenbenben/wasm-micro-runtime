@@ -107,6 +107,7 @@ typedef struct WASMComponentRuntimeFunc {
     bool has_list_scalar_result;
     bool has_composite_result;
     bool has_owned_resource_result;
+    bool has_borrowed_resource_result;
     bool is_top_level_export;
     wasm_component_host_func_callback_t host_callback;
     void *host_user_data;

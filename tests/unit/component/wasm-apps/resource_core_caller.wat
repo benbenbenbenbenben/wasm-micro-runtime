@@ -38,4 +38,7 @@
   (func (export "drop-handle-param") (param i32) (result i32)
     local.get 0
     call $resource_drop
-    i32.const 0))
+    i32.const 0)
+
+  (func (export "forward-handle-param") (param i32) (result i32)
+    local.get 0))

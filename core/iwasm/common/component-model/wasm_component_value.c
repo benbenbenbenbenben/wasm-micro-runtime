@@ -342,6 +342,18 @@ wasm_component_value_destroy(wasm_component_value_t *value)
             && resource_value->data && resource_value->finalizer)
             resource_value->finalizer(resource_value->data,
                                       resource_value->finalizer_ctx);
+        else if (resource_value->magic == WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_MAGIC
+                 && resource_value->kind
+                        == WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_BORROWED
+                 && resource_value->resource_state
+                 && resource_value->handle > 0) {
+            char error_buf[128];
+
+            error_buf[0] = '\0';
+            (void)wasm_component_resource_release_borrowed_handle(
+                resource_value->resource_state, resource_value->resource_type_idx,
+                resource_value->handle, error_buf, (uint32)sizeof(error_buf));
+        }
     }
 
     if ((value->storage_kind == WASM_COMPONENT_VALUE_STORAGE_OWNED
