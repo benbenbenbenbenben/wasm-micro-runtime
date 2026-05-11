@@ -94,6 +94,10 @@ try_lookup_component_owned_resource_transfer_type(
     const char *position, uint32 index,
     bool *is_owned_resource_out, WASMComponentCanonLiftValueInfo *type_info_out,
     uint32 *resource_type_idx_out);
+static WASMComponentPublicResourceValue *
+get_component_public_resource_value(const wasm_component_value_t *value);
+static void
+clear_component_public_resource_value(wasm_component_value_t *value);
 
 typedef struct WASMComponentCanonLiftValueShape {
     bool declared_as_defined;
@@ -3108,11 +3112,16 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
     wasm_component_value_t stack_args[16];
     wasm_component_value_t stack_results[1];
     wasm_component_value_t *call_args = stack_args;
+    uint32 stack_borrow_arg_caller_handles[16];
+    uint32 *borrow_arg_caller_handles = stack_borrow_arg_caller_handles;
     uint32 param_count, expected_result_count, core_param_index = 0, i;
     bool call_ok;
     WASMComponentCanonLiftValueShape result_shape;
     WASMComponentCanonLiftValueInfo result_type_info;
     bool has_result_type = false;
+    bool has_borrowed_resource_result = false;
+    uint32 borrowed_result_resource_type_idx =
+        WASM_COMPONENT_RESOURCE_INVALID_TYPE_IDX;
     bool expects_memory_result_ptr = false;
     bool has_composite_memory_result = false;
     WASMComponentRuntimeStringEncoding lower_string_encoding;
@@ -3201,6 +3210,21 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
     }
     memset(call_args, 0, sizeof(wasm_component_value_t) * param_count);
     memset(stack_results, 0, sizeof(stack_results));
+    if (param_count > sizeof(stack_borrow_arg_caller_handles)
+                          / sizeof(stack_borrow_arg_caller_handles[0])) {
+        borrow_arg_caller_handles =
+            wasm_runtime_malloc(sizeof(uint32) * param_count);
+        if (!borrow_arg_caller_handles) {
+            if (call_args != stack_args)
+                wasm_runtime_free(call_args);
+            wasm_runtime_set_exception(
+                caller_module_inst,
+                "component lowered core-call trampoline could not allocate "
+                "borrowed argument tracking");
+            return;
+        }
+    }
+    memset(borrow_arg_caller_handles, 0, sizeof(uint32) * param_count);
 
     if (expected_result_count == 1) {
         if (!resolve_component_canon_lift_value_shape(
@@ -3260,6 +3284,13 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
                     component_type->results->results, "result", 0,
                     &has_owned_resource_result, &result_type_info, NULL)
                 || (!has_owned_resource_result
+                    && !try_lookup_component_borrowed_resource_param_type(
+                        component_inst, lowered_function->resource_state, component,
+                        component_type->results->results, "result", 0,
+                        &has_borrowed_resource_result, &result_type_info,
+                        &borrowed_result_resource_type_idx))
+                || (!has_owned_resource_result
+                    && !has_borrowed_resource_result
                     && !lookup_component_canon_lift_value_type(
                         component, component_type->results->results, "result", 0,
                         true, false, true, true, &result_type_info,
@@ -3343,12 +3374,18 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
 
         {
             bool has_owned_resource_param = false;
+            bool has_borrowed_resource_param = false;
 
             if (!try_lookup_component_owned_resource_transfer_type(
                     component_inst, lowered_function->resource_state, component,
                     component_type->params->params[i].value_type, "parameter", i,
                     &has_owned_resource_param, &type_info, NULL)
                 || (!has_owned_resource_param
+                    && !try_lookup_component_borrowed_resource_param_type(
+                        component_inst, lowered_function->resource_state, component,
+                        component_type->params->params[i].value_type, "parameter",
+                        i, &has_borrowed_resource_param, &type_info, NULL))
+                || (!has_owned_resource_param && !has_borrowed_resource_param
                     && !lookup_component_canon_lift_value_type(
                         component, component_type->params->params[i].value_type,
                         "parameter", i, true, true, true, false, &type_info,
@@ -3366,6 +3403,10 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
                     (WASMModuleInstanceCommon *)component_inst);
                 return;
             }
+
+            if (has_borrowed_resource_param
+                && func_type->types[core_param_index] == VALUE_TYPE_I32)
+                borrow_arg_caller_handles[i] = (uint32)raw_args[core_param_index];
         }
 
         if (type_info.kind == WASM_COMP_CANON_LIFT_VALUE_SCALAR) {
@@ -3757,14 +3798,16 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
     call_ok = wasm_component_call_values_internal(
         component_inst, lowered_function->lowered_target, expected_result_count,
         stack_results, param_count, call_args, false);
-    for (i = 0; i < param_count; i++)
-        wasm_component_value_destroy(&call_args[i]);
-    if (call_args != stack_args)
-        wasm_runtime_free(call_args);
 
     if (!call_ok) {
         const char *component_exception =
             wasm_runtime_get_exception((WASMModuleInstanceCommon *)component_inst);
+        for (i = 0; i < param_count; i++)
+            wasm_component_value_destroy(&call_args[i]);
+        if (call_args != stack_args)
+            wasm_runtime_free(call_args);
+        if (borrow_arg_caller_handles != stack_borrow_arg_caller_handles)
+            wasm_runtime_free(borrow_arg_caller_handles);
         wasm_runtime_set_exception(caller_module_inst,
                                    component_exception
                                        ? component_exception
@@ -3772,19 +3815,104 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
         return;
     }
 
+    if (!has_borrowed_resource_result) {
+        for (i = 0; i < param_count; i++)
+            wasm_component_value_destroy(&call_args[i]);
+        if (call_args != stack_args)
+            wasm_runtime_free(call_args);
+        if (borrow_arg_caller_handles != stack_borrow_arg_caller_handles)
+            wasm_runtime_free(borrow_arg_caller_handles);
+    }
+
     if (has_result_type && !has_composite_memory_result
         && result_type_info.kind == WASM_COMP_CANON_LIFT_VALUE_SCALAR) {
         wasm_val_t core_result = { 0 };
 
+        if (has_borrowed_resource_result) {
+            WASMComponentPublicResourceValue *resource_value =
+                get_component_public_resource_value(&stack_results[0]);
+            uint32 matched_arg_index = UINT32_MAX;
+
+            if (func_type->result_count != 1
+                || func_type->types[func_type->param_count] != VALUE_TYPE_I32
+                || !resource_value
+                || resource_value->kind != WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_BORROWED
+                || resource_value->resource_state != lowered_function->resource_state
+                || resource_value->resource_type_idx
+                       != borrowed_result_resource_type_idx) {
+                const char *component_exception =
+                    wasm_runtime_get_exception(
+                        (WASMModuleInstanceCommon *)component_inst);
+                for (i = 0; i < param_count; i++)
+                    wasm_component_value_destroy(&call_args[i]);
+                if (call_args != stack_args)
+                    wasm_runtime_free(call_args);
+                if (borrow_arg_caller_handles != stack_borrow_arg_caller_handles)
+                    wasm_runtime_free(borrow_arg_caller_handles);
+                wasm_component_value_destroy(&stack_results[0]);
+                wasm_runtime_set_exception(
+                    caller_module_inst,
+                    component_exception
+                        ? component_exception
+                        : "component lowered core-call trampoline borrowed result "
+                          "must alias a current borrowed argument");
+                wasm_runtime_clear_exception(
+                    (WASMModuleInstanceCommon *)component_inst);
+                return;
+            }
+
+            for (uint32 arg_i = 0; arg_i < param_count; arg_i++) {
+                if (get_component_public_resource_value(&call_args[arg_i])
+                        == resource_value
+                    && borrow_arg_caller_handles[arg_i] > 0) {
+                    matched_arg_index = arg_i;
+                    break;
+                }
+            }
+            if (matched_arg_index == UINT32_MAX) {
+                for (i = 0; i < param_count; i++)
+                    wasm_component_value_destroy(&call_args[i]);
+                if (call_args != stack_args)
+                    wasm_runtime_free(call_args);
+                if (borrow_arg_caller_handles != stack_borrow_arg_caller_handles)
+                    wasm_runtime_free(borrow_arg_caller_handles);
+                wasm_component_value_destroy(&stack_results[0]);
+                wasm_runtime_set_exception(
+                    caller_module_inst,
+                    "component lowered core-call trampoline borrowed result "
+                    "must alias a current borrowed argument");
+                return;
+            }
+
+            raw_args[0] = borrow_arg_caller_handles[matched_arg_index];
+            clear_component_public_resource_value(&call_args[matched_arg_index]);
+            for (i = 0; i < param_count; i++)
+                wasm_component_value_destroy(&call_args[i]);
+            if (call_args != stack_args)
+                wasm_runtime_free(call_args);
+            if (borrow_arg_caller_handles != stack_borrow_arg_caller_handles)
+                wasm_runtime_free(borrow_arg_caller_handles);
+            wasm_component_value_destroy(&stack_results[0]);
+            return;
+        }
+
         if ((!result_shape.is_primitive && result_shape.def_type
              && (result_shape.def_type->tag == WASM_COMP_DEF_VAL_RECORD
-                 || result_shape.def_type->tag == WASM_COMP_DEF_VAL_TUPLE))
+                  || result_shape.def_type->tag == WASM_COMP_DEF_VAL_TUPLE))
             || func_type->result_count != 1
             || !decode_component_public_scalar_value(component_inst, &stack_results[0],
                                                      &result_type_info, "result", 0,
                                                      &core_result)) {
             const char *component_exception =
                 wasm_runtime_get_exception((WASMModuleInstanceCommon *)component_inst);
+            if (has_borrowed_resource_result) {
+                for (i = 0; i < param_count; i++)
+                    wasm_component_value_destroy(&call_args[i]);
+                if (call_args != stack_args)
+                    wasm_runtime_free(call_args);
+                if (borrow_arg_caller_handles != stack_borrow_arg_caller_handles)
+                    wasm_runtime_free(borrow_arg_caller_handles);
+            }
             wasm_component_value_destroy(&stack_results[0]);
             wasm_runtime_set_exception(caller_module_inst,
                                        component_exception
@@ -3813,6 +3941,14 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
                             &core_result.of.f64, sizeof(float64));
                 break;
             default:
+                if (has_borrowed_resource_result) {
+                    for (i = 0; i < param_count; i++)
+                        wasm_component_value_destroy(&call_args[i]);
+                    if (call_args != stack_args)
+                        wasm_runtime_free(call_args);
+                    if (borrow_arg_caller_handles != stack_borrow_arg_caller_handles)
+                        wasm_runtime_free(borrow_arg_caller_handles);
+                }
                 wasm_component_value_destroy(&stack_results[0]);
                 wasm_runtime_set_exception(
                     caller_module_inst,
@@ -3821,6 +3957,14 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
                 return;
         }
 
+        if (has_borrowed_resource_result) {
+            for (i = 0; i < param_count; i++)
+                wasm_component_value_destroy(&call_args[i]);
+            if (call_args != stack_args)
+                wasm_runtime_free(call_args);
+            if (borrow_arg_caller_handles != stack_borrow_arg_caller_handles)
+                wasm_runtime_free(borrow_arg_caller_handles);
+        }
         wasm_component_value_destroy(&stack_results[0]);
     }
     else if (has_result_type && has_composite_memory_result) {
