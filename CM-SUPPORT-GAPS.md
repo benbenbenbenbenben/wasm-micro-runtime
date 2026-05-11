@@ -581,13 +581,14 @@ What is still missing:
 - borrowed resource values and the rest of general own/borrow public value
   transport beyond the current supported subset (host-callback borrowed
   parameters, host-callback round-tripping of existing owned handles, public
-  call lowering of existing owned handles into exported canon-lifted functions,
-  plus fresh imported own results)
+  call lowering of existing live owned handles into exported canon-lifted
+  `own<resource>` and `borrow<resource>` parameters, plus fresh imported own
+  results)
 - runtime enforcement of richer resource lifecycle rules
 - public resource-aware callable component APIs beyond the new
   owned-result drop helper, top-level imported-resource binding, and the current
-  owned-resource call subset; borrowed public call parameters and stricter
-  caller-side ownership/consumption semantics still remain open
+  owned-resource / borrowed-parameter call subset; broader borrow/lend behavior
+  and stricter caller-side ownership/consumption semantics still remain open
 - full trap/failure-path operational cleanup semantics
 
 So resources now have a narrow executable seam, not a finished runtime.

@@ -912,3 +912,113 @@ wasm_component_resource_borrow_handle(
     resource_value_out->finalizer_ctx = entry->finalizer_ctx;
     return true;
 }
+
+bool
+wasm_component_resource_create_borrowed_handle(
+    WASMComponentRuntimeResourceState *resource_state, uint32 type_idx,
+    uint32 source_handle, uint32 *out_handle, char *error_buf,
+    uint32 error_buf_size)
+{
+    WASMComponentRuntimeResourceType *resource_type;
+    WASMComponentRuntimeResourceType *canonical_type;
+    WASMComponentResourceHandleEntry *source_entry, *entry;
+    uint32 handle;
+
+    if (!resource_state || !out_handle || source_handle == 0)
+        return set_component_resource_error(
+            error_buf, error_buf_size,
+            "component resource borrowed handle creation is invalid");
+
+    resource_type = wasm_component_resource_lookup_runtime_type(resource_state, type_idx);
+    if (!resource_type)
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "component type index %u is not a runtime resource type", type_idx);
+
+    canonical_type =
+        resolve_canonical_resource_type(resource_state, resource_type->type_idx);
+    if (!canonical_type)
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "component type index %u is not a canonical resource type", type_idx);
+
+    if (source_handle - 1 >= canonical_type->handle_table.entry_count)
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "component resource handle %u is out of bounds", source_handle);
+
+    source_entry = &canonical_type->handle_table.entries[source_handle - 1];
+    if (!source_entry->is_live)
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "component resource handle %u is not a live handle", source_handle);
+
+    handle = canonical_type->handle_table.next_handle++;
+    if (!ensure_handle_entry_capacity(&canonical_type->handle_table, handle, error_buf,
+                                      error_buf_size))
+        return false;
+
+    entry = &canonical_type->handle_table.entries[handle - 1];
+    if (entry->is_live)
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "component resource handle %u is already live", handle);
+
+    entry->is_live = true;
+    entry->is_owned = false;
+    entry->handle = handle;
+    entry->data = source_entry->data;
+    entry->finalizer = NULL;
+    entry->finalizer_ctx = NULL;
+    canonical_type->handle_table.live_handle_count++;
+
+    *out_handle = handle;
+    return true;
+}
+
+bool
+wasm_component_resource_release_borrowed_handle(
+    WASMComponentRuntimeResourceState *resource_state, uint32 type_idx,
+    uint32 handle, char *error_buf, uint32 error_buf_size)
+{
+    WASMComponentRuntimeResourceType *resource_type;
+    WASMComponentRuntimeResourceType *canonical_type;
+    WASMComponentResourceHandleEntry *entry;
+
+    if (!resource_state || handle == 0)
+        return set_component_resource_error(
+            error_buf, error_buf_size,
+            "component resource borrowed handle release is invalid");
+
+    resource_type = wasm_component_resource_lookup_runtime_type(resource_state, type_idx);
+    if (!resource_type)
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "component type index %u is not a runtime resource type", type_idx);
+
+    canonical_type =
+        resolve_canonical_resource_type(resource_state, resource_type->type_idx);
+    if (!canonical_type)
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "component type index %u is not a canonical resource type", type_idx);
+
+    if (handle - 1 >= canonical_type->handle_table.entry_count)
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "component resource handle %u is out of bounds", handle);
+
+    entry = &canonical_type->handle_table.entries[handle - 1];
+    if (!entry->is_live)
+        return true;
+
+    if (entry->is_owned)
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "component resource handle %u is not a borrowed live handle", handle);
+
+    release_handle_entry(entry);
+    if (canonical_type->handle_table.live_handle_count > 0)
+        canonical_type->handle_table.live_handle_count--;
+    return true;
+}

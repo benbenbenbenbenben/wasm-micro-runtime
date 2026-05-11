@@ -4311,6 +4311,18 @@ typedef struct WASMComponentCanonOwnedResourceParamTracker {
     uint32 capacity;
 } WASMComponentCanonOwnedResourceParamTracker;
 
+typedef struct WASMComponentCanonBorrowedResourceParam {
+    WASMComponentRuntimeResourceState *resource_state;
+    uint32 resource_type_idx;
+    uint32 handle;
+} WASMComponentCanonBorrowedResourceParam;
+
+typedef struct WASMComponentCanonBorrowedResourceParamTracker {
+    WASMComponentCanonBorrowedResourceParam *params;
+    uint32 count;
+    uint32 capacity;
+} WASMComponentCanonBorrowedResourceParamTracker;
+
 static bool
 lookup_component_call_primitive_type(const WASMComponent *component,
                                      const WASMComponentValueType *value_type,
@@ -5701,6 +5713,53 @@ consume_component_owned_resource_params(
     for (i = 0; i < tracker->count; i++) {
         if (tracker->values[i])
             wasm_component_value_destroy(tracker->values[i]);
+    }
+
+    tracker->count = 0;
+}
+
+static bool
+track_component_borrowed_resource_param(
+    WASMComponentCanonBorrowedResourceParamTracker *tracker,
+    WASMComponentRuntimeResourceState *resource_state, uint32 resource_type_idx,
+    uint32 handle)
+{
+    if (!tracker || !tracker->params || tracker->count >= tracker->capacity
+        || !resource_state || handle == 0)
+        return false;
+
+    tracker->params[tracker->count].resource_state = resource_state;
+    tracker->params[tracker->count].resource_type_idx = resource_type_idx;
+    tracker->params[tracker->count].handle = handle;
+    tracker->count++;
+    return true;
+}
+
+static void
+cleanup_component_borrowed_resource_params(
+    WASMComponentInstance *inst,
+    WASMComponentCanonBorrowedResourceParamTracker *tracker)
+{
+    char error_buf[128];
+    uint32 i;
+
+    if (!tracker || !tracker->params)
+        return;
+
+    for (i = tracker->count; i > 0; i--) {
+        WASMComponentCanonBorrowedResourceParam *param = &tracker->params[i - 1];
+
+        if (!param->resource_state || param->handle == 0)
+            continue;
+
+        error_buf[0] = '\0';
+        if (!wasm_component_resource_release_borrowed_handle(
+                param->resource_state, param->resource_type_idx, param->handle,
+                error_buf, (uint32)sizeof(error_buf))
+            && !wasm_runtime_get_exception((WASMModuleInstanceCommon *)inst)
+            && error_buf[0]) {
+            set_component_call_error(inst, error_buf);
+        }
     }
 
     tracker->count = 0;
@@ -8109,11 +8168,13 @@ flatten_component_public_param_value(
     uint32 *core_arg_index_io,
     WASMComponentCanonParamAllocationTracker *allocation_tracker,
     const WASMComponentRuntimeResourceState *resource_state,
-    WASMComponentCanonOwnedResourceParamTracker *owned_resource_tracker)
+    WASMComponentCanonOwnedResourceParamTracker *owned_resource_tracker,
+    WASMComponentCanonBorrowedResourceParamTracker *borrowed_resource_tracker)
 {
     WASMComponentCanonLiftValueShape shape;
     WASMComponentCanonLiftValueInfo type_info;
     bool has_owned_resource_param = false;
+    bool has_borrowed_resource_param = false;
     uint32 resource_type_idx = WASM_COMPONENT_RESOURCE_INVALID_TYPE_IDX;
 
     if (!resolve_component_canon_lift_value_shape(component, value_type, "parameter",
@@ -8189,6 +8250,60 @@ flatten_component_public_param_value(
                 param_index);
 
         core_args[*core_arg_index_io] = handle_value;
+        (*core_arg_index_io)++;
+        return true;
+    }
+
+    if (!try_lookup_component_borrowed_resource_param_type(
+            inst, resource_state, component, value_type, "parameter", param_index,
+            &has_borrowed_resource_param, &type_info, &resource_type_idx))
+        return false;
+
+    if (has_borrowed_resource_param) {
+        wasm_val_t source_handle_value = { 0 };
+        uint32 borrowed_handle = 0;
+        char error_buf[128];
+
+        if (*core_arg_index_io >= core_type->param_count)
+            return set_component_param_flattening_error(inst);
+
+        if (!decode_component_public_scalar_value(inst, value, &type_info,
+                                                  "parameter", param_index,
+                                                  &source_handle_value)
+            || !validate_component_public_owned_resource_handle(
+                inst, resource_state, resource_type_idx,
+                (uint32)source_handle_value.of.i32))
+            return false;
+
+        error_buf[0] = '\0';
+        if (!wasm_component_resource_create_borrowed_handle(
+                (WASMComponentRuntimeResourceState *)resource_state,
+                resource_type_idx, (uint32)source_handle_value.of.i32,
+                &borrowed_handle, error_buf, (uint32)sizeof(error_buf)))
+            return set_component_call_error(inst, error_buf);
+
+        if (!track_component_borrowed_resource_param(
+                borrowed_resource_tracker,
+                (WASMComponentRuntimeResourceState *)resource_state,
+                resource_type_idx, borrowed_handle)) {
+            error_buf[0] = '\0';
+            wasm_component_resource_release_borrowed_handle(
+                (WASMComponentRuntimeResourceState *)resource_state,
+                resource_type_idx, borrowed_handle, error_buf,
+                (uint32)sizeof(error_buf));
+            return set_component_call_error(
+                inst, "component canon lift function could not track borrowed "
+                      "resource parameters");
+        }
+
+        if (core_type->types[*core_arg_index_io] != VALUE_TYPE_I32)
+            return set_component_call_error_fmt(
+                inst, "component canon lift function parameter %u does not match "
+                      "the core function signature",
+                param_index);
+
+        core_args[*core_arg_index_io].kind = WASM_I32;
+        core_args[*core_arg_index_io].of.i32 = (int32)borrowed_handle;
         (*core_arg_index_io)++;
         return true;
     }
@@ -10866,7 +10981,11 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
     WASMComponentCanonParamAllocationTracker param_allocation_tracker;
     wasm_component_value_t *stack_owned_resource_params[16];
     wasm_component_value_t **owned_resource_params = stack_owned_resource_params;
-    WASMComponentCanonOwnedResourceParamTracker owned_resource_tracker;
+    WASMComponentCanonBorrowedResourceParam stack_borrowed_resource_params[16];
+    WASMComponentCanonBorrowedResourceParam *borrowed_resource_params =
+        stack_borrowed_resource_params;
+    WASMComponentCanonOwnedResourceParamTracker owned_resource_tracker = { 0 };
+    WASMComponentCanonBorrowedResourceParamTracker borrowed_resource_tracker = { 0 };
     const WASMComponentRuntimeResourceState *call_resource_state =
         function->resource_state ? function->resource_state : inst->resource_state;
     uint32 expected_result_count;
@@ -11461,6 +11580,24 @@ host_import_cleanup_fail:
     owned_resource_tracker.values = owned_resource_params;
     owned_resource_tracker.count = 0;
     owned_resource_tracker.capacity = component_type->params->count;
+    if (component_type->params->count
+        > sizeof(stack_borrowed_resource_params)
+              / sizeof(stack_borrowed_resource_params[0])) {
+        borrowed_resource_params =
+            wasm_runtime_malloc(sizeof(*borrowed_resource_params)
+                                * component_type->params->count);
+        if (!borrowed_resource_params) {
+            set_component_call_error(
+                inst, "component canon lift function could not allocate borrowed "
+                      "resource parameter tracking");
+            goto cleanup;
+        }
+    }
+    memset(borrowed_resource_params, 0,
+           sizeof(*borrowed_resource_params) * component_type->params->count);
+    borrowed_resource_tracker.params = borrowed_resource_params;
+    borrowed_resource_tracker.count = 0;
+    borrowed_resource_tracker.capacity = component_type->params->count;
     if (core_type->result_count
         > sizeof(stack_results) / sizeof(stack_results[0])) {
         core_results =
@@ -11480,7 +11617,7 @@ host_import_cleanup_fail:
                 component_type->params->params[i].value_type, &args[i], i,
                 core_type, core_args, &core_arg_index,
                 &param_allocation_tracker, call_resource_state,
-                &owned_resource_tracker)) {
+                &owned_resource_tracker, &borrowed_resource_tracker)) {
             call_succeeded = false;
             goto cleanup;
         }
@@ -11661,6 +11798,7 @@ host_import_cleanup_fail:
 cleanup:
     if (core_call_attempted)
         consume_component_owned_resource_params(&owned_resource_tracker);
+    cleanup_component_borrowed_resource_params(inst, &borrowed_resource_tracker);
     if (!core_call_attempted)
         cleanup_component_canon_param_allocations(inst, function,
                                                   &param_allocation_tracker);
@@ -11694,6 +11832,8 @@ cleanup:
         wasm_runtime_free(param_allocations);
     if (owned_resource_params != stack_owned_resource_params)
         wasm_runtime_free(owned_resource_params);
+    if (borrowed_resource_params != stack_borrowed_resource_params)
+        wasm_runtime_free(borrowed_resource_params);
     if (result_leaves != stack_result_leaves)
         wasm_runtime_free(result_leaves);
     return call_succeeded;

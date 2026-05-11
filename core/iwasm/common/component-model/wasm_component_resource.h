@@ -152,6 +152,17 @@ wasm_component_resource_borrow_handle(
     uint32 handle, WASMComponentPublicResourceValue *resource_value_out,
     char *error_buf, uint32 error_buf_size);
 
+bool
+wasm_component_resource_create_borrowed_handle(
+    WASMComponentRuntimeResourceState *resource_state, uint32 type_idx,
+    uint32 source_handle, uint32 *out_handle, char *error_buf,
+    uint32 error_buf_size);
+
+bool
+wasm_component_resource_release_borrowed_handle(
+    WASMComponentRuntimeResourceState *resource_state, uint32 type_idx,
+    uint32 handle, char *error_buf, uint32 error_buf_size);
+
 #ifdef __cplusplus
 }
 #endif
