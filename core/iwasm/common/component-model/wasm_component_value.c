@@ -326,6 +326,45 @@ wasm_component_value_init_owned_imported_resource_result(
     return true;
 }
 
+WASM_RUNTIME_API_EXTERN bool
+wasm_component_value_init_borrowed_resource_result(
+    wasm_component_value_t *value, const wasm_component_value_t *borrowed_value)
+{
+    WASMComponentPublicResourceValue *resource_value;
+    WASMComponentPublicResourceValue *source_value;
+    char error_buf[128] = { 0 };
+
+    if (!value || !borrowed_value
+        || borrowed_value->storage_kind != WASM_COMPONENT_VALUE_STORAGE_RESOURCE
+        || !borrowed_value->storage.owned_data)
+        return false;
+
+    source_value =
+        (WASMComponentPublicResourceValue *)borrowed_value->storage.owned_data;
+    if (source_value->magic != WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_MAGIC
+        || source_value->kind != WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_BORROWED)
+        return false;
+
+    wasm_component_value_destroy(value);
+    resource_value =
+        (WASMComponentPublicResourceValue *)wasm_runtime_malloc(
+            sizeof(WASMComponentPublicResourceValue));
+    if (!resource_value)
+        return false;
+
+    if (!wasm_component_resource_clone_borrowed_value(
+            source_value, resource_value, error_buf, (uint32)sizeof(error_buf))) {
+        wasm_runtime_free(resource_value);
+        return false;
+    }
+
+    value->type.kind = WASM_COMPONENT_VALUE_TYPE_DEFINED;
+    value->storage_kind = WASM_COMPONENT_VALUE_STORAGE_RESOURCE;
+    value->byte_size = 0;
+    value->storage.owned_data = resource_value;
+    return true;
+}
+
 WASM_RUNTIME_API_EXTERN void
 wasm_component_value_destroy(wasm_component_value_t *value)
 {

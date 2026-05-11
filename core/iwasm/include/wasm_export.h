@@ -1846,6 +1846,10 @@ wasm_component_value_init_owned_imported_resource_result(
     wasm_component_value_t *value, void *data,
     wasm_component_resource_value_finalizer_t finalizer, void *finalizer_ctx);
 
+WASM_RUNTIME_API_EXTERN bool
+wasm_component_value_init_borrowed_resource_result(
+    wasm_component_value_t *value, const wasm_component_value_t *borrowed_value);
+
 WASM_RUNTIME_API_EXTERN void
 wasm_component_value_destroy(wasm_component_value_t *value);
 

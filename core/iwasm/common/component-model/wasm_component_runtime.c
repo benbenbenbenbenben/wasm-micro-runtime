@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "bh_leb128.h"
+#include "wasm_component_resource_call.h"
 #include "wasm_component_resource.h"
 #include "wasm_export.h"
 #include "wasm_memory.h"
@@ -94,10 +95,6 @@ try_lookup_component_owned_resource_transfer_type(
     const char *position, uint32 index,
     bool *is_owned_resource_out, WASMComponentCanonLiftValueInfo *type_info_out,
     uint32 *resource_type_idx_out);
-static WASMComponentPublicResourceValue *
-get_component_public_resource_value(const wasm_component_value_t *value);
-static void
-clear_component_public_resource_value(wasm_component_value_t *value);
 
 typedef struct WASMComponentCanonLiftValueShape {
     bool declared_as_defined;
@@ -3830,16 +3827,14 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
 
         if (has_borrowed_resource_result) {
             WASMComponentPublicResourceValue *resource_value =
-                get_component_public_resource_value(&stack_results[0]);
+                wasm_component_get_public_resource_value(&stack_results[0]);
             uint32 matched_arg_index = UINT32_MAX;
 
             if (func_type->result_count != 1
                 || func_type->types[func_type->param_count] != VALUE_TYPE_I32
                 || !resource_value
-                || resource_value->kind != WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_BORROWED
-                || resource_value->resource_state != lowered_function->resource_state
-                || resource_value->resource_type_idx
-                       != borrowed_result_resource_type_idx) {
+                || resource_value->kind
+                       != WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_BORROWED) {
                 const char *component_exception =
                     wasm_runtime_get_exception(
                         (WASMModuleInstanceCommon *)component_inst);
@@ -3862,8 +3857,10 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
             }
 
             for (uint32 arg_i = 0; arg_i < param_count; arg_i++) {
-                if (get_component_public_resource_value(&call_args[arg_i])
-                        == resource_value
+                if (wasm_component_public_resource_values_have_same_borrowed_owner(
+                        resource_value,
+                        wasm_component_get_public_resource_value(
+                            &call_args[arg_i]))
                     && borrow_arg_caller_handles[arg_i] > 0) {
                     matched_arg_index = arg_i;
                     break;
@@ -3885,7 +3882,10 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
             }
 
             raw_args[0] = borrow_arg_caller_handles[matched_arg_index];
-            clear_component_public_resource_value(&call_args[matched_arg_index]);
+            if (wasm_component_get_public_resource_value(
+                    &call_args[matched_arg_index]) == resource_value)
+                wasm_component_clear_public_resource_value(
+                    &call_args[matched_arg_index]);
             for (i = 0; i < param_count; i++)
                 wasm_component_value_destroy(&call_args[i]);
             if (call_args != stack_args)
@@ -4468,27 +4468,6 @@ typedef struct WASMComponentCanonParamAllocationTracker {
     uint32 count;
     uint32 capacity;
 } WASMComponentCanonParamAllocationTracker;
-
-typedef struct WASMComponentCanonOwnedResourceParamTracker {
-    wasm_component_value_t **values;
-    uint32 count;
-    uint32 capacity;
-} WASMComponentCanonOwnedResourceParamTracker;
-
-typedef struct WASMComponentCanonBorrowedResourceParam {
-    WASMComponentRuntimeResourceState *resource_state;
-    uint32 resource_type_idx;
-    uint32 handle;
-    WASMComponentRuntimeResourceState *owner_resource_state;
-    uint32 owner_resource_type_idx;
-    uint32 owner_handle;
-} WASMComponentCanonBorrowedResourceParam;
-
-typedef struct WASMComponentCanonBorrowedResourceParamTracker {
-    WASMComponentCanonBorrowedResourceParam *params;
-    uint32 count;
-    uint32 capacity;
-} WASMComponentCanonBorrowedResourceParamTracker;
 
 static bool
 lookup_component_call_primitive_type(const WASMComponent *component,
@@ -5670,318 +5649,6 @@ drop_component_owned_resource_handle_internal(
     return true;
 }
 
-static WASMComponentPublicResourceValue *
-get_component_public_resource_value(const wasm_component_value_t *value)
-{
-    WASMComponentPublicResourceValue *resource_value;
-
-    if (!value || value->storage_kind != WASM_COMPONENT_VALUE_STORAGE_RESOURCE
-        || !value->storage.owned_data)
-        return NULL;
-
-    resource_value =
-        (WASMComponentPublicResourceValue *)value->storage.owned_data;
-    return resource_value->magic == WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_MAGIC
-               ? resource_value
-               : NULL;
-}
-
-static void
-clear_component_public_resource_value(wasm_component_value_t *value)
-{
-    if (!value)
-        return;
-    memset(value, 0, sizeof(*value));
-}
-
-static void
-consume_component_public_resource_value(
-    WASMComponentPublicResourceValue *resource_value)
-{
-    if (!resource_value)
-        return;
-
-    resource_value->data = NULL;
-    resource_value->finalizer = NULL;
-    resource_value->finalizer_ctx = NULL;
-}
-
-static bool
-init_component_public_resource_value(
-    WASMComponentInstance *inst,
-    const WASMComponentRuntimeResourceState *resource_state, uint32 resource_type_idx,
-    uint32 handle, wasm_component_value_t *value)
-{
-    WASMComponentPublicResourceValue *resource_value;
-    char error_buf[128] = { 0 };
-
-    wasm_component_value_destroy(value);
-    resource_value = wasm_runtime_malloc(sizeof(*resource_value));
-    if (!resource_value)
-        return set_component_call_error(
-            inst, "host component function could not allocate resource value "
-                  "storage");
-
-    if (!wasm_component_resource_take_owned_handle(
-            (WASMComponentRuntimeResourceState *)resource_state, resource_type_idx,
-            handle, resource_value, error_buf, (uint32)sizeof(error_buf))) {
-        wasm_runtime_free(resource_value);
-        return set_component_call_error(inst, error_buf);
-    }
-
-    value->type.kind = WASM_COMPONENT_VALUE_TYPE_DEFINED;
-    value->storage_kind = WASM_COMPONENT_VALUE_STORAGE_RESOURCE;
-    value->storage.owned_data = resource_value;
-    value->byte_size = 0;
-    return true;
-}
-
-static bool
-init_component_public_borrowed_resource_value(
-    WASMComponentInstance *inst,
-    const WASMComponentRuntimeResourceState *resource_state, uint32 resource_type_idx,
-    uint32 handle, wasm_component_value_t *value)
-{
-    WASMComponentPublicResourceValue *resource_value;
-    uint32 borrowed_handle;
-    char error_buf[128] = { 0 };
-
-    wasm_component_value_destroy(value);
-    resource_value = wasm_runtime_malloc(sizeof(*resource_value));
-    if (!resource_value)
-        return set_component_call_error(
-            inst, "host component function could not allocate resource value "
-                  "storage");
-
-    if (!wasm_component_resource_create_borrowed_handle(
-            (WASMComponentRuntimeResourceState *)resource_state, resource_type_idx,
-            handle, &borrowed_handle, error_buf, (uint32)sizeof(error_buf))
-        || !wasm_component_resource_borrow_handle(
-            (WASMComponentRuntimeResourceState *)resource_state, resource_type_idx,
-            borrowed_handle, resource_value, error_buf, (uint32)sizeof(error_buf))) {
-        if (borrowed_handle > 0)
-            (void)wasm_component_resource_release_borrowed_handle(
-                (WASMComponentRuntimeResourceState *)resource_state,
-                resource_type_idx, borrowed_handle, error_buf,
-                (uint32)sizeof(error_buf));
-        wasm_runtime_free(resource_value);
-        return set_component_call_error(inst, error_buf);
-    }
-
-    value->type.kind = WASM_COMPONENT_VALUE_TYPE_DEFINED;
-    value->storage_kind = WASM_COMPONENT_VALUE_STORAGE_RESOURCE;
-    value->storage.owned_data = resource_value;
-    value->byte_size = 0;
-    return true;
-}
-
-static bool
-promote_pending_imported_component_resource_result(
-    WASMComponentInstance *inst,
-    const WASMComponentRuntimeResourceState *resource_state, uint32 resource_type_idx,
-    wasm_component_value_t *value, wasm_val_t *handle_value_out)
-{
-    WASMComponentPublicResourceValue *resource_value =
-        get_component_public_resource_value(value);
-    const WASMComponentRuntimeResourceType *runtime_type;
-    const WASMComponentRuntimeResourceType *canonical_type;
-    char error_buf[128] = { 0 };
-    uint32 handle;
-
-    if (!resource_value
-        || resource_value->kind
-               != WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_PENDING_IMPORTED_RESULT)
-        return set_component_call_error(
-            inst,
-            "host component function result 0 must return an owned resource "
-            "argument from the current call or a fresh imported resource result");
-
-    runtime_type = wasm_component_resource_lookup_runtime_type_const(
-        resource_state, resource_type_idx);
-    canonical_type = runtime_type
-                         ? wasm_component_resource_lookup_runtime_type_const(
-                               resource_state, runtime_type->canonical_type_idx)
-                         : NULL;
-    if (!canonical_type
-        || canonical_type->kind != WASM_COMP_RUNTIME_RESOURCE_TYPE_IMPORTED)
-        return set_component_call_error(
-            inst,
-            "host component function fresh resource results require an imported "
-            "resource type");
-
-    if (!canonical_type->imported_drop_callback)
-        return set_component_call_error(
-            inst,
-            "host component function fresh imported resource result requires a "
-            "bound imported resource drop callback");
-
-    if (!wasm_component_resource_create_imported_handle(
-            (WASMComponentRuntimeResourceState *)resource_state, resource_type_idx,
-            resource_value->data, true, &handle, error_buf,
-            (uint32)sizeof(error_buf)))
-        return set_component_call_error(inst, error_buf);
-
-    consume_component_public_resource_value(resource_value);
-    wasm_component_value_destroy(value);
-    handle_value_out->kind = WASM_I32;
-    handle_value_out->of.i32 = (int32)handle;
-    return true;
-}
-
-static bool
-restore_component_public_resource_value(WASMComponentInstance *inst,
-                                        wasm_component_value_t *value)
-{
-    WASMComponentPublicResourceValue *resource_value =
-        get_component_public_resource_value(value);
-    char error_buf[128] = { 0 };
-
-    if (!resource_value)
-        return set_component_call_error(
-            inst, "host component function resource value is invalid");
-
-    if (!wasm_component_resource_restore_owned_handle(resource_value, error_buf,
-                                                      (uint32)sizeof(error_buf)))
-        return set_component_call_error(inst, error_buf);
-
-    wasm_component_value_destroy(value);
-    return true;
-}
-
-static bool
-validate_component_public_owned_resource_handle(
-    WASMComponentInstance *inst,
-    const WASMComponentRuntimeResourceState *resource_state, uint32 resource_type_idx,
-    uint32 handle)
-{
-    WASMComponentPublicResourceValue resource_value;
-    char error_buf[128] = { 0 };
-
-    memset(&resource_value, 0, sizeof(resource_value));
-    if (!wasm_component_resource_take_owned_handle(
-            (WASMComponentRuntimeResourceState *)resource_state, resource_type_idx,
-            handle, &resource_value, error_buf, (uint32)sizeof(error_buf))
-        || !wasm_component_resource_restore_owned_handle(&resource_value, error_buf,
-                                                         (uint32)sizeof(error_buf)))
-        return set_component_call_error(inst, error_buf);
-
-    return true;
-}
-
-static bool
-track_component_owned_resource_param(
-    WASMComponentCanonOwnedResourceParamTracker *tracker,
-    wasm_component_value_t *value)
-{
-    if (!tracker || !value || tracker->count >= tracker->capacity)
-        return false;
-
-    tracker->values[tracker->count++] = value;
-    return true;
-}
-
-static void
-consume_component_owned_resource_params(
-    WASMComponentCanonOwnedResourceParamTracker *tracker)
-{
-    uint32 i;
-
-    if (!tracker || !tracker->values)
-        return;
-
-    for (i = 0; i < tracker->count; i++) {
-        if (tracker->values[i])
-            wasm_component_value_destroy(tracker->values[i]);
-    }
-
-    tracker->count = 0;
-}
-
-static bool
-track_component_borrowed_resource_param(
-    WASMComponentCanonBorrowedResourceParamTracker *tracker,
-    WASMComponentRuntimeResourceState *resource_state, uint32 resource_type_idx,
-    uint32 handle, WASMComponentRuntimeResourceState *owner_resource_state,
-    uint32 owner_resource_type_idx, uint32 owner_handle)
-{
-    if (!tracker || !tracker->params || tracker->count >= tracker->capacity
-        || !resource_state || handle == 0 || !owner_resource_state
-        || owner_handle == 0)
-        return false;
-
-    tracker->params[tracker->count].resource_state = resource_state;
-    tracker->params[tracker->count].resource_type_idx = resource_type_idx;
-    tracker->params[tracker->count].handle = handle;
-    tracker->params[tracker->count].owner_resource_state = owner_resource_state;
-    tracker->params[tracker->count].owner_resource_type_idx =
-        owner_resource_type_idx;
-    tracker->params[tracker->count].owner_handle = owner_handle;
-    tracker->count++;
-    return true;
-}
-
-static WASMComponentCanonBorrowedResourceParam *
-find_component_borrowed_resource_param(
-    WASMComponentCanonBorrowedResourceParamTracker *tracker, uint32 handle,
-    uint32 owner_resource_type_idx)
-{
-    uint32 i;
-
-    if (!tracker || !tracker->params || handle == 0)
-        return NULL;
-
-    for (i = 0; i < tracker->count; i++) {
-        if (tracker->params[i].handle == handle
-            && tracker->params[i].owner_resource_type_idx == owner_resource_type_idx)
-            return &tracker->params[i];
-    }
-    return NULL;
-}
-
-static void
-cleanup_component_borrowed_resource_params(
-    WASMComponentInstance *inst,
-    WASMComponentCanonBorrowedResourceParamTracker *tracker)
-{
-    char error_buf[128];
-    uint32 i;
-
-    if (!tracker || !tracker->params)
-        return;
-
-    for (i = tracker->count; i > 0; i--) {
-        WASMComponentCanonBorrowedResourceParam *param = &tracker->params[i - 1];
-
-        if (!param->resource_state || param->handle == 0)
-            continue;
-
-        error_buf[0] = '\0';
-        if (!wasm_component_resource_release_borrowed_handle(
-                param->resource_state, param->resource_type_idx, param->handle,
-                error_buf, (uint32)sizeof(error_buf))
-            && !wasm_runtime_get_exception((WASMModuleInstanceCommon *)inst)
-            && error_buf[0]) {
-            set_component_call_error(inst, error_buf);
-        }
-    }
-
-    tracker->count = 0;
-}
-
-static void
-detach_matching_component_public_resource_value(wasm_component_value_t *values,
-                                                uint32 count,
-                                                WASMComponentPublicResourceValue *match)
-{
-    if (!values || !match)
-        return;
-
-    for (uint32 i = 0; i < count; i++) {
-        if (get_component_public_resource_value(&values[i]) == match)
-            clear_component_public_resource_value(&values[i]);
-    }
-}
-
 static bool
 cleanup_host_component_resource_arguments(WASMComponentInstance *inst,
                                           wasm_component_value_t *args,
@@ -5989,7 +5656,7 @@ cleanup_host_component_resource_arguments(WASMComponentInstance *inst,
 {
     for (uint32 i = 0; i < arg_count; i++) {
         WASMComponentPublicResourceValue *resource_value =
-            get_component_public_resource_value(&args[i]);
+            wasm_component_get_public_resource_value(&args[i]);
         uint32 handle;
         uint32 resource_type_idx;
         const WASMComponentRuntimeResourceState *resource_state;
@@ -6007,7 +5674,7 @@ cleanup_host_component_resource_arguments(WASMComponentInstance *inst,
         handle = resource_value->handle;
         resource_type_idx = resource_value->resource_type_idx;
         resource_state = resource_value->resource_state;
-        if (!restore_component_public_resource_value(inst, &args[i]))
+        if (!wasm_component_restore_public_resource_value(inst, &args[i]))
             return false;
 
         if (!restore_only
@@ -8432,12 +8099,12 @@ flatten_component_public_param_value(
         if (!decode_component_public_scalar_value(inst, value, &type_info,
                                                   "parameter", param_index,
                                                   &handle_value)
-            || !validate_component_public_owned_resource_handle(
+            || !wasm_component_validate_public_owned_resource_handle(
                 inst, resource_state, resource_type_idx,
                 (uint32)handle_value.of.i32))
             return false;
 
-        if (!track_component_owned_resource_param(
+        if (!wasm_component_track_owned_resource_param(
                 owned_resource_tracker, (wasm_component_value_t *)value))
             return set_component_call_error(
                 inst, "component canon lift function could not track owned "
@@ -8470,7 +8137,7 @@ flatten_component_public_param_value(
         if (!decode_component_public_scalar_value(inst, value, &type_info,
                                                   "parameter", param_index,
                                                   &source_handle_value)
-            || !validate_component_public_owned_resource_handle(
+            || !wasm_component_validate_public_owned_resource_handle(
                 inst, resource_state, resource_type_idx,
                 (uint32)source_handle_value.of.i32))
             return false;
@@ -8482,7 +8149,7 @@ flatten_component_public_param_value(
                 &borrowed_handle, error_buf, (uint32)sizeof(error_buf)))
             return set_component_call_error(inst, error_buf);
 
-        if (!track_component_borrowed_resource_param(
+        if (!wasm_component_track_borrowed_resource_param(
                 borrowed_resource_tracker,
                 (WASMComponentRuntimeResourceState *)resource_state,
                 resource_type_idx, borrowed_handle,
@@ -11321,7 +10988,7 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
                 if (!decode_component_public_scalar_value(inst, &args[i], &type_info,
                                                           "parameter", i,
                                                           &handle_value)
-                    || !init_component_public_resource_value(
+                    || !wasm_component_init_public_resource_value(
                         inst, host_resource_state, resource_type_idx,
                         (uint32)handle_value.of.i32, &callback_args[i]))
                     goto host_import_param_fail;
@@ -11334,7 +11001,7 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
                 if (!decode_component_public_scalar_value(inst, &args[i], &type_info,
                                                           "parameter", i,
                                                           &handle_value)
-                    || !init_component_public_borrowed_resource_value(
+                    || !wasm_component_init_public_borrowed_resource_value(
                         inst, host_resource_state, resource_type_idx,
                         (uint32)handle_value.of.i32, &callback_args[i]))
                     goto host_import_param_fail;
@@ -11379,9 +11046,9 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
                                      expected_result_count, callback_results,
                                      num_args, callback_args, host_error_buf,
                                      (uint32)sizeof(host_error_buf))) {
-            detach_matching_component_public_resource_value(
+            wasm_component_detach_matching_public_resource_value(
                 callback_args, host_param_count,
-                get_component_public_resource_value(&callback_results[0]));
+                wasm_component_get_public_resource_value(&callback_results[0]));
             wasm_component_value_destroy(&callback_results[0]);
             if (!cleanup_host_component_resource_arguments(inst, callback_args,
                                                           host_param_count, true))
@@ -11430,7 +11097,8 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
 
                 if (host_owned_resource_result) {
                     WASMComponentPublicResourceValue *resource_value =
-                        get_component_public_resource_value(&callback_results[0]);
+                        wasm_component_get_public_resource_value(
+                            &callback_results[0]);
                     wasm_val_t handle_value = { 0 };
                     uint32 restored_handle;
 
@@ -11468,9 +11136,9 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
                         }
 
                         restored_handle = resource_value->handle;
-                        detach_matching_component_public_resource_value(
+                        wasm_component_detach_matching_public_resource_value(
                             callback_args, host_param_count, resource_value);
-                        if (!restore_component_public_resource_value(
+                        if (!wasm_component_restore_public_resource_value(
                                 inst, &callback_results[0])) {
                             wasm_component_value_destroy(&callback_results[0]);
                             goto host_import_success_fail;
@@ -11478,9 +11146,9 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
                         handle_value.kind = WASM_I32;
                         handle_value.of.i32 = (int32)restored_handle;
                     }
-                    else if (!promote_pending_imported_component_resource_result(
-                                 inst, host_resource_state, result_resource_type_idx,
-                                 &callback_results[0], &handle_value)) {
+                    else if (!wasm_component_promote_pending_imported_resource_result(
+                                  inst, host_resource_state, result_resource_type_idx,
+                                  &callback_results[0], &handle_value)) {
                         wasm_component_value_destroy(&callback_results[0]);
                         goto host_import_success_fail;
                     }
@@ -11491,15 +11159,13 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
                 }
                 else if (host_borrowed_resource_result) {
                     WASMComponentPublicResourceValue *resource_value =
-                        get_component_public_resource_value(&callback_results[0]);
+                        wasm_component_get_public_resource_value(
+                            &callback_results[0]);
                     bool matched_current_borrow_arg = false;
 
                     if (!resource_value
                         || resource_value->kind
-                               != WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_BORROWED
-                        || resource_value->resource_state != host_resource_state
-                        || resource_value->resource_type_idx
-                               != result_resource_type_idx) {
+                               != WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_BORROWED) {
                         wasm_component_value_destroy(&callback_results[0]);
                         set_component_call_error(
                             inst,
@@ -11509,8 +11175,10 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
                     }
 
                     for (uint32 arg_i = 0; arg_i < host_param_count; arg_i++) {
-                        if (get_component_public_resource_value(&callback_args[arg_i])
-                            == resource_value) {
+                        if (wasm_component_public_resource_values_have_same_borrowed_owner(
+                                resource_value,
+                                wasm_component_get_public_resource_value(
+                                    &callback_args[arg_i]))) {
                             matched_current_borrow_arg = true;
                             break;
                         }
@@ -11561,9 +11229,9 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
             memset(&callback_results[0], 0, sizeof(callback_results[0]));
         }
 
-        detach_matching_component_public_resource_value(
+        wasm_component_detach_matching_public_resource_value(
             callback_args, host_param_count,
-            get_component_public_resource_value(&results[0]));
+            wasm_component_get_public_resource_value(&results[0]));
         if (!cleanup_host_component_resource_arguments(inst, callback_args,
                                                       host_param_count, false))
             goto host_import_cleanup_fail;
@@ -11583,9 +11251,9 @@ host_import_param_fail:
         return false;
 
 host_import_success_fail:
-        detach_matching_component_public_resource_value(
+        wasm_component_detach_matching_public_resource_value(
             callback_args, host_param_count,
-            get_component_public_resource_value(&callback_results[0]));
+            wasm_component_get_public_resource_value(&callback_results[0]));
         if (!cleanup_host_component_resource_arguments(inst, callback_args,
                                                       host_param_count, true))
             goto host_import_cleanup_fail;
@@ -11594,9 +11262,9 @@ host_import_success_fail:
         return false;
 
 host_import_cleanup_fail:
-        detach_matching_component_public_resource_value(
+        wasm_component_detach_matching_public_resource_value(
             callback_args, host_param_count,
-            get_component_public_resource_value(&callback_results[0]));
+            wasm_component_get_public_resource_value(&callback_results[0]));
         wasm_component_value_destroy(&callback_results[0]);
         if (callback_args != stack_callback_args)
             wasm_runtime_free(callback_args);
@@ -11941,11 +11609,11 @@ host_import_cleanup_fail:
                     goto cleanup;
                 }
 
-                borrowed_param = find_component_borrowed_resource_param(
+                borrowed_param = wasm_component_find_borrowed_resource_param_by_handle(
                     &borrowed_resource_tracker, (uint32)core_results[0].of.i32,
                     borrowed_result_resource_type_idx);
                 if (!borrowed_param
-                    || !init_component_public_borrowed_resource_value(
+                    || !wasm_component_init_public_borrowed_resource_value(
                         inst, borrowed_param->owner_resource_state,
                         borrowed_param->owner_resource_type_idx,
                         borrowed_param->owner_handle, &results[0])) {
@@ -12085,8 +11753,9 @@ host_import_cleanup_fail:
 
 cleanup:
     if (core_call_attempted)
-        consume_component_owned_resource_params(&owned_resource_tracker);
-    cleanup_component_borrowed_resource_params(inst, &borrowed_resource_tracker);
+        wasm_component_consume_owned_resource_params(&owned_resource_tracker);
+    wasm_component_cleanup_borrowed_resource_params(inst,
+                                                    &borrowed_resource_tracker);
     if (!core_call_attempted)
         cleanup_component_canon_param_allocations(inst, function,
                                                   &param_allocation_tracker);

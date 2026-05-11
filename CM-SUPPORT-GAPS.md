@@ -556,6 +556,16 @@ What exists:
 - synchronous host callback transport of borrowed resource parameters for host
   function imports, including both local owned handles and imported handles
   without consuming ownership
+- scalar borrowed resource results that alias current borrowed arguments through
+  both direct top-level host callbacks and canon-lowered/relifted callback
+  paths, for both local and imported handles, including:
+  - public construction of those borrowed callback results through
+    `wasm_component_value_init_borrowed_resource_result(...)`
+  - identity-based matching of those returned borrows against the current call's
+    tracked borrowed arguments instead of requiring raw public-value pointer
+    reuse
+  - balanced borrowed-handle cleanup for those direct/relifted scalar callback
+    result paths
 - fresh host-created **imported** `own<resource>` results from host callbacks,
   including:
   - `wasm_component_value_init_owned_imported_resource_result(...)` for pending
@@ -587,9 +597,10 @@ What is still missing:
   `own<resource>` and `borrow<resource>` parameters, guest-side local
   `resource.rep` / borrowed `resource.drop` on those temporary borrowed handles,
   exported borrow results that alias current borrowed parameters, direct
-  top-level host-callback borrow results that alias current borrowed arguments,
-  canon-lowered callback borrow results for the current scalar local-resource
-  subset,
+  top-level and canon-lowered callback borrow results that alias current
+  borrowed arguments for the current scalar local/imported-resource subset,
+  including public construction through
+  `wasm_component_value_init_borrowed_resource_result(...)`,
   plus fresh imported own results)
 - runtime enforcement of richer resource lifecycle rules beyond the current
   outstanding-borrow subset for local and imported owned handles
@@ -598,9 +609,10 @@ What is still missing:
   borrowed aliases are still live, but broader outstanding-borrow tracking and
   lifetime enforcement still remain incomplete
 - public resource-aware callable component APIs beyond the new
-  owned-result drop helper, top-level imported-resource binding, and the current
-  owned-resource / borrowed-parameter call subset; broader borrow/lend behavior,
-  composite/non-scalar borrow-result flows, and stricter caller-side
+  owned-result drop helper, borrowed-result helper, top-level
+  imported-resource binding, and the current owned-resource /
+  borrowed-parameter / scalar borrowed-result call subset; broader borrow/lend
+  behavior, composite/non-scalar borrow-result flows, and stricter caller-side
   ownership/consumption semantics still remain open
 - full trap/failure-path operational cleanup semantics
 
@@ -676,4 +688,4 @@ If this feature is described as:
 
 The right maturity label today is:
 
-> **A real but still partial component runtime: public host APIs, scalar / UTF-8 string / `list<scalar>` / limited tuple-record canon-lift calls, a narrow executable direct-core-call `canon lower` subset, supported host-provided component-function imports, runtime values, value imports/exports, start execution slices, and resource bookkeeping foundations are implemented; full support is still blocked on broader canon-lower/imported-function lowering, broader composite Canonical ABI and value semantics, operational resources, remaining host API gaps, and nested core-runtime support.**
+> **A real but still partial component runtime: public host APIs, scalar / UTF-8 string / `list<scalar>` / limited tuple-record canon-lift calls, a narrow executable direct-core-call `canon lower` subset, supported host-provided component-function imports, runtime values, value imports/exports, start execution slices, and a narrow scalar local/imported resource-call subset (including borrowed callback results) are implemented; full support is still blocked on broader canon-lower/imported-function lowering, broader composite Canonical ABI and value semantics, operational resources, remaining host API gaps, and nested core-runtime support.**

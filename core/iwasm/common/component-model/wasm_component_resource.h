@@ -157,6 +157,19 @@ wasm_component_resource_borrow_handle(
     char *error_buf, uint32 error_buf_size);
 
 bool
+wasm_component_resource_get_borrowed_owner(
+    const WASMComponentPublicResourceValue *resource_value,
+    WASMComponentRuntimeResourceState **owner_resource_state_out,
+    uint32 *owner_resource_type_idx_out, uint32 *owner_handle_out,
+    char *error_buf, uint32 error_buf_size);
+
+bool
+wasm_component_resource_clone_borrowed_value(
+    const WASMComponentPublicResourceValue *source_value,
+    WASMComponentPublicResourceValue *resource_value_out, char *error_buf,
+    uint32 error_buf_size);
+
+bool
 wasm_component_resource_create_borrowed_handle(
     WASMComponentRuntimeResourceState *resource_state, uint32 type_idx,
     uint32 source_handle, uint32 *out_handle, char *error_buf,

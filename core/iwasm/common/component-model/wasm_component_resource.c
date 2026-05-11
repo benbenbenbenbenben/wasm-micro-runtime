@@ -943,6 +943,126 @@ wasm_component_resource_borrow_handle(
 }
 
 bool
+wasm_component_resource_get_borrowed_owner(
+    const WASMComponentPublicResourceValue *resource_value,
+    WASMComponentRuntimeResourceState **owner_resource_state_out,
+    uint32 *owner_resource_type_idx_out, uint32 *owner_handle_out,
+    char *error_buf, uint32 error_buf_size)
+{
+    WASMComponentRuntimeResourceState *resource_state;
+    WASMComponentRuntimeResourceType *resource_type;
+    WASMComponentRuntimeResourceType *canonical_type;
+    WASMComponentResourceHandleEntry *entry;
+    WASMComponentResourceHandleEntry *source_entry;
+    uint32 owner_handle;
+
+    if (!resource_value
+        || resource_value->magic != WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_MAGIC
+        || resource_value->kind != WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_BORROWED
+        || !resource_value->resource_state || resource_value->handle == 0)
+        return set_component_resource_error(
+            error_buf, error_buf_size,
+            "component public borrowed resource value is invalid");
+
+    resource_state = resource_value->resource_state;
+    resource_type = wasm_component_resource_lookup_runtime_type(
+        resource_state, resource_value->resource_type_idx);
+    if (!resource_type)
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "component type index %u is not a runtime resource type",
+            resource_value->resource_type_idx);
+
+    canonical_type = resolve_canonical_resource_type(resource_state, resource_type->type_idx);
+    if (!canonical_type)
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "component type index %u is not a canonical resource type",
+            resource_value->resource_type_idx);
+
+    if (resource_value->handle - 1 >= canonical_type->handle_table.entry_count)
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "component resource handle %u is out of bounds",
+            resource_value->handle);
+
+    entry = &canonical_type->handle_table.entries[resource_value->handle - 1];
+    if (!entry->is_live)
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "component resource handle %u is not a live handle",
+            resource_value->handle);
+
+    if (entry->is_owned) {
+        owner_handle = entry->handle;
+    }
+    else {
+        if (entry->borrowed_from_handle == 0
+            || entry->borrowed_from_handle - 1
+                   >= canonical_type->handle_table.entry_count)
+            return set_component_resource_error_fmt(
+                error_buf, error_buf_size,
+                "component borrowed resource handle %u has no owned source",
+                resource_value->handle);
+
+        source_entry =
+            &canonical_type->handle_table.entries[entry->borrowed_from_handle - 1];
+        if (!source_entry->is_live || !source_entry->is_owned
+            || source_entry->generation != entry->borrowed_from_generation)
+            return set_component_resource_error_fmt(
+                error_buf, error_buf_size,
+                "component borrowed resource handle %u has a stale owned source",
+                resource_value->handle);
+        owner_handle = source_entry->handle;
+    }
+
+    if (owner_resource_state_out)
+        *owner_resource_state_out = resource_state;
+    if (owner_resource_type_idx_out)
+        *owner_resource_type_idx_out = resource_type->type_idx;
+    if (owner_handle_out)
+        *owner_handle_out = owner_handle;
+    return true;
+}
+
+bool
+wasm_component_resource_clone_borrowed_value(
+    const WASMComponentPublicResourceValue *source_value,
+    WASMComponentPublicResourceValue *resource_value_out, char *error_buf,
+    uint32 error_buf_size)
+{
+    WASMComponentRuntimeResourceState *owner_resource_state;
+    uint32 owner_resource_type_idx, owner_handle, borrowed_handle = 0;
+
+    if (!resource_value_out)
+        return set_component_resource_error(
+            error_buf, error_buf_size,
+            "component public borrowed resource clone is invalid");
+
+    if (!wasm_component_resource_get_borrowed_owner(
+            source_value, &owner_resource_state, &owner_resource_type_idx,
+            &owner_handle, error_buf, error_buf_size))
+        return false;
+
+    if (!wasm_component_resource_create_borrowed_handle(
+            owner_resource_state, owner_resource_type_idx, owner_handle,
+            &borrowed_handle, error_buf, error_buf_size))
+        return false;
+
+    if (!wasm_component_resource_borrow_handle(
+            owner_resource_state, owner_resource_type_idx, borrowed_handle,
+            resource_value_out, error_buf, error_buf_size)) {
+        if (borrowed_handle > 0)
+            (void)wasm_component_resource_release_borrowed_handle(
+                owner_resource_state, owner_resource_type_idx, borrowed_handle,
+                error_buf, error_buf_size);
+        return false;
+    }
+
+    return true;
+}
+
+bool
 wasm_component_resource_create_borrowed_handle(
     WASMComponentRuntimeResourceState *resource_state, uint32 type_idx,
     uint32 source_handle, uint32 *out_handle, char *error_buf,
