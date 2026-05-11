@@ -582,13 +582,17 @@ What is still missing:
   transport beyond the current supported subset (host-callback borrowed
   parameters, host-callback round-tripping of existing owned handles, public
   call lowering of existing live owned handles into exported canon-lifted
-  `own<resource>` and `borrow<resource>` parameters, plus fresh imported own
-  results)
+  `own<resource>` and `borrow<resource>` parameters, guest-side local
+  `resource.rep` / borrowed `resource.drop` on those temporary borrowed handles,
+  plus fresh imported own results)
 - runtime enforcement of richer resource lifecycle rules
+- no lend-count or equivalent outstanding-borrow tracking yet: dropping an owned
+  handle while borrowed aliases are still live is not detected or prevented
 - public resource-aware callable component APIs beyond the new
   owned-result drop helper, top-level imported-resource binding, and the current
-  owned-resource / borrowed-parameter call subset; broader borrow/lend behavior
-  and stricter caller-side ownership/consumption semantics still remain open
+  owned-resource / borrowed-parameter call subset; broader borrow/lend behavior,
+  borrowed results, and stricter caller-side ownership/consumption semantics
+  still remain open
 - full trap/failure-path operational cleanup semantics
 
 So resources now have a narrow executable seam, not a finished runtime.

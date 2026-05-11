@@ -3020,9 +3020,12 @@ component_resource_builtin_trampoline(WASMModuleInstanceCommon *caller_module_in
                 return;
             }
             if (!entry->is_owned) {
-                wasm_runtime_set_exception(
-                    caller_module_inst,
-                    "component resource handle is not an owned live handle");
+                WASMComponentRuntimeResourceType *mutable_canonical_type =
+                    (WASMComponentRuntimeResourceType *)canonical_resource_type;
+
+                release_component_resource_handle_entry(entry);
+                if (mutable_canonical_type->handle_table.live_handle_count > 0)
+                    mutable_canonical_type->handle_table.live_handle_count--;
                 return;
             }
             if (canonical_resource_type->has_dtor) {
@@ -3060,10 +3063,9 @@ component_resource_builtin_trampoline(WASMModuleInstanceCommon *caller_module_in
                 return;
             }
             entry = &canonical_resource_type->handle_table.entries[handle - 1];
-            if (!entry->is_live || !entry->is_owned) {
+            if (!entry->is_live) {
                 wasm_runtime_set_exception(
-                    caller_module_inst,
-                    "component resource handle is not an owned live handle");
+                    caller_module_inst, "component resource handle is invalid");
                 return;
             }
             raw_args[0] = (uint32)(uintptr_t)entry->data;
