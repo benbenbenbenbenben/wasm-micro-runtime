@@ -296,6 +296,44 @@ create_core_module_wrapper_from_file(const char *path, const char *module_name,
     return core_module;
 }
 
+static WASMComponentCoreModuleWrapper *
+create_core_module_wrapper_from_bytes(const uint8_t *wasm_raw,
+                                      uint32_t wasm_file_size,
+                                      const char *module_name, char *error_buf,
+                                      uint32_t error_buf_size)
+{
+    auto *owned_binary =
+        wasm_raw ? (uint8_t *)BH_MALLOC(wasm_file_size) : nullptr;
+    auto *core_module = (WASMComponentCoreModuleWrapper *)wasm_runtime_malloc(
+        sizeof(WASMComponentCoreModuleWrapper));
+    LoadArgs load_args = {};
+
+    if (!wasm_raw || !owned_binary || !core_module) {
+        if (owned_binary) {
+            BH_FREE(owned_binary);
+        }
+        if (core_module) {
+            wasm_runtime_free(core_module);
+        }
+        return nullptr;
+    }
+
+    memcpy(owned_binary, wasm_raw, wasm_file_size);
+    memset(core_module, 0, sizeof(WASMComponentCoreModuleWrapper));
+    load_args.name = (char *)module_name;
+    core_module->module_handle = wasm_runtime_load_ex(
+        owned_binary, wasm_file_size, &load_args, error_buf, error_buf_size);
+    if (!core_module->module_handle) {
+        BH_FREE(owned_binary);
+        wasm_runtime_free(core_module);
+        return nullptr;
+    }
+
+    core_module->owned_binary = owned_binary;
+    core_module->owned_binary_size = wasm_file_size;
+    return core_module;
+}
+
 static WASMComponentTypeBound *
 create_type_bound(WASMComponentTypeBoundTag tag, uint32_t type_idx)
 {
@@ -705,6 +743,22 @@ append_top_level_resource_type_section(WASMComponentModule *component_module)
 
 static uint32_t
 count_top_level_sort_entries(const WASMComponent *component, uint8_t sort);
+static int32_t
+append_component_scalar_func_type(
+    WASMComponentModule *component_module,
+    const std::vector<WASMComponentPrimValType> &param_types,
+    const std::optional<WASMComponentPrimValType> &result_type);
+static bool
+append_top_level_core_module_instance_sections_from_bytes(
+    WASMComponentModule *component_module, const uint8_t *core_module_bytes,
+    uint32_t core_module_size, const char *module_name,
+    uint32_t *core_instance_idx_out);
+static bool
+append_top_level_core_export_lift_sections(WASMComponentModule *component_module,
+                                           uint32_t core_instance_idx,
+                                           const char *core_export_name,
+                                           uint32_t lift_type_idx,
+                                           const char *component_export_name);
 
 static bool
 append_resource_type_export_section(WASMComponent *component,
@@ -2676,6 +2730,51 @@ expand_func_type_to_two_results(WASMComponentFuncType *func_type)
     return true;
 }
 
+static bool
+append_top_level_scalar_multi_result_lift(WASMComponentModule *component_module,
+                                          const char *component_export_name,
+                                          uint32_t *lifted_func_idx_out)
+{
+    static const uint8_t multi_result_core_module[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01,
+        0x60, 0x00, 0x02, 0x7f, 0x7f, 0x03, 0x02, 0x01, 0x00, 0x07, 0x08,
+        0x01, 0x04, 0x70, 0x61, 0x69, 0x72, 0x00, 0x00, 0x0a, 0x08, 0x01,
+        0x06, 0x00, 0x41, 0x02, 0x41, 0x05, 0x0b
+    };
+    WASMComponent *component = &component_module->component;
+    uint32_t core_instance_idx = UINT32_MAX;
+    uint32_t lifted_func_idx =
+        count_top_level_sort_entries(component, WASM_COMP_SORT_FUNC);
+    int32_t lift_type_idx = append_component_scalar_func_type(
+        component_module, {}, WASM_COMP_PRIMVAL_S32);
+    WASMComponentFuncType *func_type;
+
+    if (lift_type_idx < 0) {
+        return false;
+    }
+
+    func_type = lookup_local_component_func_type(component_module,
+                                                 (uint32_t)lift_type_idx);
+    if (!func_type || !expand_func_type_to_two_results(func_type)) {
+        return false;
+    }
+
+    if (!append_top_level_core_module_instance_sections_from_bytes(
+            component_module, multi_result_core_module,
+            (uint32_t)sizeof(multi_result_core_module), "pair-core",
+            &core_instance_idx)
+        || !append_top_level_core_export_lift_sections(
+            component_module, core_instance_idx, "pair", (uint32_t)lift_type_idx,
+            component_export_name)) {
+        return false;
+    }
+
+    if (lifted_func_idx_out) {
+        *lifted_func_idx_out = lifted_func_idx;
+    }
+    return true;
+}
+
 static int32_t
 find_top_level_export_sort_index(WASMComponentModule *component_module,
                                  const char *export_name, uint8_t sort)
@@ -3022,6 +3121,76 @@ append_top_level_core_module_instance_sections(
     core_module_section->id = WASM_COMP_SECTION_CORE_MODULE;
     core_module_section->parsed.core_module = create_core_module_wrapper_from_file(
         core_module_path, module_name, error_buf, (uint32_t)sizeof(error_buf));
+    if (!core_module_section->parsed.core_module) {
+        return false;
+    }
+
+    core_instance_section->id = WASM_COMP_SECTION_CORE_INSTANCE;
+    core_instance_section->parsed.core_instance_section =
+        (WASMComponentCoreInstSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentCoreInstSection));
+    if (!core_instance_section->parsed.core_instance_section) {
+        return false;
+    }
+    memset(core_instance_section->parsed.core_instance_section, 0,
+           sizeof(WASMComponentCoreInstSection));
+    core_instance_section->parsed.core_instance_section->count = 1;
+    core_instance_section->parsed.core_instance_section->instances =
+        (WASMComponentCoreInst *)wasm_runtime_malloc(sizeof(WASMComponentCoreInst));
+    if (!core_instance_section->parsed.core_instance_section->instances) {
+        return false;
+    }
+    memset(core_instance_section->parsed.core_instance_section->instances, 0,
+           sizeof(WASMComponentCoreInst));
+    core_instance_section->parsed.core_instance_section->instances[0]
+        .instance_expression_tag = WASM_COMP_INSTANCE_EXPRESSION_WITH_ARGS;
+    core_instance_section->parsed.core_instance_section->instances[0]
+        .expression.with_args.idx = new_core_module_idx;
+    core_instance_section->parsed.core_instance_section->instances[0]
+        .expression.with_args.arg_len = 0;
+    core_instance_section->parsed.core_instance_section->instances[0]
+        .expression.with_args.args = NULL;
+
+    if (core_instance_idx_out) {
+        *core_instance_idx_out = new_core_instance_idx;
+    }
+    return true;
+}
+
+static bool
+append_top_level_core_module_instance_sections_from_bytes(
+    WASMComponentModule *component_module, const uint8_t *core_module_bytes,
+    uint32_t core_module_size, const char *module_name,
+    uint32_t *core_instance_idx_out)
+{
+    WASMComponent *component = &component_module->component;
+    char error_buf[128] = {};
+    const uint32_t new_core_module_idx =
+        count_top_level_core_module_entries(component);
+    const uint32_t new_core_instance_idx =
+        count_top_level_core_instance_entries(component);
+    const uint32_t old_count = component->section_count;
+    auto *new_sections = (WASMComponentSection *)wasm_runtime_malloc(
+        sizeof(WASMComponentSection) * (old_count + 2));
+
+    if (!new_sections) {
+        return false;
+    }
+
+    memset(new_sections, 0, sizeof(WASMComponentSection) * (old_count + 2));
+    memcpy(new_sections, component->sections,
+           sizeof(WASMComponentSection) * old_count);
+    wasm_runtime_free(component->sections);
+    component->sections = new_sections;
+    component->section_count = old_count + 2;
+
+    auto *core_module_section = &component->sections[old_count];
+    auto *core_instance_section = &component->sections[old_count + 1];
+
+    core_module_section->id = WASM_COMP_SECTION_CORE_MODULE;
+    core_module_section->parsed.core_module = create_core_module_wrapper_from_bytes(
+        core_module_bytes, core_module_size, module_name, error_buf,
+        (uint32_t)sizeof(error_buf));
     if (!core_module_section->parsed.core_module) {
         return false;
     }
@@ -40578,7 +40747,63 @@ TEST_F(BinaryParserTest, TestRuntimeExecutesTopLevelScalarStartSections)
 }
 
 TEST_F(BinaryParserTest,
-       TestRuntimeRejectsTopLevelMultiResultStartSectionExecution)
+       TestRuntimeCallsTopLevelScalarMultiResultCanonLift)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "runtime-top-level-multi-result-call";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    ASSERT_TRUE(append_top_level_scalar_multi_result_lift(
+        (WASMComponentModule *)module, "pair-results", nullptr));
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func =
+        wasm_runtime_lookup_component_function(module_inst, "pair-results");
+    ASSERT_NE(func, nullptr);
+
+    wasm_val_t results[2] = {};
+    ASSERT_TRUE(
+        wasm_runtime_call_component(module_inst, func, 2, results, 0, nullptr))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(results[0].kind, WASM_I32);
+    ASSERT_EQ(results[0].of.i32, 2);
+    ASSERT_EQ(results[1].kind, WASM_I32);
+    ASSERT_EQ(results[1].of.i32, 5);
+
+    wasm_component_value_t public_results[2] = {};
+    ASSERT_TRUE(wasm_runtime_call_component_values(module_inst, func, 2,
+                                                   public_results, 0, nullptr))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(public_results[0].type.kind, WASM_COMPONENT_VALUE_TYPE_PRIMITIVE);
+    ASSERT_EQ(public_results[0].type.type.primitive_type,
+              WASM_COMPONENT_PRIMITIVE_VALUE_S32);
+    ASSERT_EQ(*(int32_t *)wasm_component_value_get_data(&public_results[0]), 2);
+    ASSERT_EQ(public_results[1].type.kind, WASM_COMPONENT_VALUE_TYPE_PRIMITIVE);
+    ASSERT_EQ(public_results[1].type.type.primitive_type,
+              WASM_COMPONENT_PRIMITIVE_VALUE_S32);
+    ASSERT_EQ(*(int32_t *)wasm_component_value_get_data(&public_results[1]), 5);
+
+    wasm_component_value_destroy(&public_results[0]);
+    wasm_component_value_destroy(&public_results[1]);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestRuntimeExecutesTopLevelScalarMultiResultStartSections)
 {
     bool ret = helper->read_wasm_file("add.wasm");
     ASSERT_TRUE(ret);
@@ -40592,31 +40817,42 @@ TEST_F(BinaryParserTest,
         helper->error_buf, (uint32_t)sizeof(helper->error_buf));
     ASSERT_NE(module, nullptr) << helper->error_buf;
 
-    ASSERT_TRUE(append_top_level_s32_value_section(
-        (WASMComponentModule *)module, runtime_value_section_i32_two_bytes,
-        (uint32_t)sizeof(runtime_value_section_i32_two_bytes)));
-    ASSERT_TRUE(append_top_level_s32_value_section(
-        (WASMComponentModule *)module, runtime_value_section_i32_three_bytes,
-        (uint32_t)sizeof(runtime_value_section_i32_three_bytes)));
-    uint32_t start_args[] = { 0, 1 };
-    ASSERT_TRUE(append_top_level_start_section((WASMComponentModule *)module, 0,
-                                               start_args, 2, 2));
-
-    WASMComponentFuncType *func_type =
-        lookup_local_component_func_type((WASMComponentModule *)module, 0);
-    ASSERT_NE(func_type, nullptr);
-    ASSERT_TRUE(expand_func_type_to_two_results(func_type));
+    uint32_t start_func_idx = UINT32_MAX;
+    uint32_t base_value_idx = count_top_level_sort_entries(
+        &((WASMComponentModule *)module)->component, WASM_COMP_SORT_VALUE);
+    ASSERT_TRUE(append_top_level_scalar_multi_result_lift(
+        (WASMComponentModule *)module, "pair-results", &start_func_idx));
+    ASSERT_TRUE(append_top_level_start_section((WASMComponentModule *)module,
+                                               start_func_idx, nullptr, 0, 2));
+    ASSERT_TRUE(append_top_level_value_export_section(
+        (WASMComponentModule *)module, "first-result", base_value_idx));
+    ASSERT_TRUE(append_top_level_value_export_section(
+        (WASMComponentModule *)module, "second-result", base_value_idx + 1));
 
     wasm_module_inst_t module_inst =
         wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
                                  helper->error_buf,
                                  (uint32_t)sizeof(helper->error_buf));
-    ASSERT_EQ(module_inst, nullptr);
-    ASSERT_NE(strstr(helper->error_buf,
-                     "multi-result component signatures"),
-              nullptr)
-        << helper->error_buf;
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
 
+    wasm_component_value_t first = {};
+    ASSERT_TRUE(
+        wasm_runtime_lookup_component_value(module_inst, "first-result", &first));
+    ASSERT_EQ(first.type.kind, WASM_COMPONENT_VALUE_TYPE_PRIMITIVE);
+    ASSERT_EQ(first.type.type.primitive_type, WASM_COMPONENT_PRIMITIVE_VALUE_S32);
+    ASSERT_EQ(*(int32_t *)wasm_component_value_get_data(&first), 2);
+
+    wasm_component_value_t second = {};
+    ASSERT_TRUE(
+        wasm_runtime_lookup_component_value(module_inst, "second-result", &second));
+    ASSERT_EQ(second.type.kind, WASM_COMPONENT_VALUE_TYPE_PRIMITIVE);
+    ASSERT_EQ(second.type.type.primitive_type,
+              WASM_COMPONENT_PRIMITIVE_VALUE_S32);
+    ASSERT_EQ(*(int32_t *)wasm_component_value_get_data(&second), 5);
+
+    wasm_component_value_destroy(&first);
+    wasm_component_value_destroy(&second);
+    wasm_runtime_deinstantiate(module_inst);
     wasm_runtime_unload(module);
 }
 
@@ -47111,8 +47347,8 @@ TEST_F(BinaryParserTest, TestRuntimeRejectsUnsupportedNestedStartSectionShapes)
                                  (uint32_t)sizeof(helper->error_buf));
     ASSERT_EQ(module_inst, nullptr);
     ASSERT_NE(strstr(helper->error_buf,
-                     "nested component start section failed: expects 1 "
-                     "results but received 2"),
+                     "nested component start section failed result count 2 "
+                     "does not match function result count 1"),
               nullptr)
         << helper->error_buf;
 

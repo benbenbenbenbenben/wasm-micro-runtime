@@ -6418,13 +6418,28 @@ resolve_component_canon_lift_abi(WASMComponentInstance *inst,
         }
     }
 
-    if (func_type->results && func_type->results->count > 1)
-        return set_component_runtime_error_fmt(
-            error_buf, error_buf_size,
-            "component canon lift function uses multi-result component "
-            "signatures, which are not supported yet");
-
     if (func_type->results && func_type->results->results) {
+        if (func_type->results->count > 1) {
+            for (i = 0; i < func_type->results->count; i++) {
+                bool is_primitive_result = false;
+                uint8 result_prim_type = 0;
+
+                if (!resolve_component_runtime_primitive_type(
+                        component, &func_type->results->results[i],
+                        &is_primitive_result, &result_prim_type, error_buf,
+                        error_buf_size))
+                    return false;
+
+                if (!is_primitive_result
+                    || result_prim_type == WASM_COMP_PRIMVAL_STRING)
+                    return set_component_runtime_error_fmt(
+                        error_buf, error_buf_size,
+                        "component canon lift function only supports scalar "
+                        "multi-result signatures");
+            }
+            goto validate_required_opts;
+        }
+
         bool has_string_result = false;
         bool has_list_scalar_result = false;
         bool is_primitive_result = false;
@@ -10882,6 +10897,7 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
     bool have_memory_result_ptr = false;
     bool has_owned_resource_result = false;
     bool has_borrowed_resource_result = false;
+    bool multi_result_scalar_only = false;
     uint32 borrowed_result_resource_type_idx =
         WASM_COMPONENT_RESOURCE_INVALID_TYPE_IDX;
     uint32 memory_result_retptr = 0;
@@ -11319,22 +11335,17 @@ host_import_cleanup_fail:
                                            &core_type))
         return false;
 
-    if (!component_type || !component_type->params)
+    if (!component_type)
         return set_component_call_error(
-            inst, "component canon lift function is missing parameter metadata");
+            inst, "component canon lift function is missing type metadata");
 
-    expected_result_count = component_type->results
-                                    && component_type->results->tag
-                                           == WASM_COMP_RESULT_LIST_WITH_TYPE
-                                    && component_type->results->results
-                                ? 1
-                                : 0;
+    expected_result_count = get_component_func_result_count(component_type);
 
-    if (num_args != component_type->params->count)
+    if (num_args != (component_type->params ? component_type->params->count : 0))
         return set_component_call_error_fmt(
             inst,
             "component canon lift function expects %u arguments but received %u",
-            component_type->params->count, num_args);
+            component_type->params ? component_type->params->count : 0, num_args);
 
     if (num_results != expected_result_count)
         return set_component_call_error_fmt(
@@ -11350,7 +11361,29 @@ host_import_cleanup_fail:
         return set_component_call_error(
             inst, "component canon lift function results buffer is null");
 
-    if (expected_result_count == 1) {
+    if (expected_result_count > 1) {
+        if (core_type->result_count != expected_result_count)
+            return set_component_call_error(
+                inst, "component canon lift function only supports direct "
+                      "scalar multi-value results");
+
+        for (i = 0; i < expected_result_count; i++) {
+            if (!lookup_component_canon_lift_value_type(
+                    component, &component_type->results->results[i], "result", i,
+                    true, false, false, false, &result_info, inst))
+                return false;
+            if (result_info.kind != WASM_COMP_CANON_LIFT_VALUE_SCALAR
+                || core_type->types[core_type->param_count + i]
+                       != result_info.core_type)
+                return set_component_call_error(
+                    inst, "component canon lift function only supports scalar "
+                          "multi-result signatures");
+        }
+
+        multi_result_scalar_only = true;
+    }
+
+    if (!multi_result_scalar_only && expected_result_count == 1) {
         if (!resolve_component_canon_lift_value_shape(
                 component, component_type->results->results, "result",
                 0, &result_shape, inst))
@@ -11451,7 +11484,7 @@ host_import_cleanup_fail:
             }
         }
     }
-    else if (core_type->result_count != 0)
+    else if (!multi_result_scalar_only && core_type->result_count != 0)
         return set_component_call_error(
             inst, "component canon lift function only supports at most one "
                   "result");
@@ -11480,83 +11513,89 @@ host_import_cleanup_fail:
                                  || function->has_list_scalar_result
                              ? "component canon lift function does not support "
                                "memory64 list<scalar> Canonical ABI"
-                             : "component canon lift function does not support "
-                               "memory64 Canonical ABI");
+                              : "component canon lift function does not support "
+                                "memory64 Canonical ABI");
 
-    if (core_type->param_count > sizeof(stack_args) / sizeof(stack_args[0])) {
-        core_args = wasm_runtime_malloc(sizeof(wasm_val_t) * core_type->param_count);
-        if (!core_args)
-            return set_component_call_error(
-                inst, "component canon lift function could not allocate argument "
-                      "storage");
-    }
-    memset(core_args, 0, sizeof(wasm_val_t) * core_type->param_count);
-    if (core_type->param_count
-        > sizeof(stack_param_allocations) / sizeof(stack_param_allocations[0])) {
-        param_allocations = wasm_runtime_malloc(sizeof(*param_allocations)
-                                                * core_type->param_count);
-        if (!param_allocations) {
-            set_component_call_error(
-                inst, "component canon lift function could not allocate parameter "
-                      "allocation tracking");
-            goto cleanup;
-        }
-    }
-    memset(param_allocations, 0,
-           sizeof(*param_allocations) * core_type->param_count);
-    param_allocation_tracker.allocations = param_allocations;
-    param_allocation_tracker.count = 0;
-    param_allocation_tracker.capacity = core_type->param_count;
-    if (component_type->params->count
-        > sizeof(stack_owned_resource_params)
-              / sizeof(stack_owned_resource_params[0])) {
-        owned_resource_params =
-            wasm_runtime_malloc(sizeof(*owned_resource_params)
-                                * component_type->params->count);
-        if (!owned_resource_params) {
-            set_component_call_error(
-                inst, "component canon lift function could not allocate resource "
-                      "parameter tracking");
-            goto cleanup;
-        }
-    }
-    memset(owned_resource_params, 0,
-           sizeof(*owned_resource_params) * component_type->params->count);
-    owned_resource_tracker.values = owned_resource_params;
-    owned_resource_tracker.count = 0;
-    owned_resource_tracker.capacity = component_type->params->count;
-    if (component_type->params->count
-        > sizeof(stack_borrowed_resource_params)
-              / sizeof(stack_borrowed_resource_params[0])) {
-        borrowed_resource_params =
-            wasm_runtime_malloc(sizeof(*borrowed_resource_params)
-                                * component_type->params->count);
-        if (!borrowed_resource_params) {
-            set_component_call_error(
-                inst, "component canon lift function could not allocate borrowed "
-                      "resource parameter tracking");
-            goto cleanup;
-        }
-    }
-    memset(borrowed_resource_params, 0,
-           sizeof(*borrowed_resource_params) * component_type->params->count);
-    borrowed_resource_tracker.params = borrowed_resource_params;
-    borrowed_resource_tracker.count = 0;
-    borrowed_resource_tracker.capacity = component_type->params->count;
-    if (core_type->result_count
-        > sizeof(stack_results) / sizeof(stack_results[0])) {
-        core_results =
-            wasm_runtime_malloc(sizeof(wasm_val_t) * core_type->result_count);
-        if (!core_results) {
-            set_component_call_error(
-                inst, "component canon lift function could not allocate result "
-                      "storage");
-            goto cleanup;
-        }
-    }
-    memset(core_results, 0, sizeof(wasm_val_t) * core_type->result_count);
+    {
+        uint32 param_count = component_type->params ? component_type->params->count : 0;
 
-    for (i = 0; i < component_type->params->count; i++) {
+        if (core_type->param_count > sizeof(stack_args) / sizeof(stack_args[0])) {
+            core_args =
+                wasm_runtime_malloc(sizeof(wasm_val_t) * core_type->param_count);
+            if (!core_args)
+                return set_component_call_error(
+                    inst,
+                    "component canon lift function could not allocate argument "
+                    "storage");
+        }
+        memset(core_args, 0, sizeof(wasm_val_t) * core_type->param_count);
+        if (core_type->param_count
+            > sizeof(stack_param_allocations)
+                  / sizeof(stack_param_allocations[0])) {
+            param_allocations = wasm_runtime_malloc(sizeof(*param_allocations)
+                                                    * core_type->param_count);
+            if (!param_allocations) {
+                set_component_call_error(
+                    inst,
+                    "component canon lift function could not allocate parameter "
+                    "allocation tracking");
+                goto cleanup;
+            }
+        }
+        memset(param_allocations, 0,
+               sizeof(*param_allocations) * core_type->param_count);
+        param_allocation_tracker.allocations = param_allocations;
+        param_allocation_tracker.count = 0;
+        param_allocation_tracker.capacity = core_type->param_count;
+        if (param_count > sizeof(stack_owned_resource_params)
+                              / sizeof(stack_owned_resource_params[0])) {
+            owned_resource_params = wasm_runtime_malloc(
+                sizeof(*owned_resource_params) * param_count);
+            if (!owned_resource_params) {
+                set_component_call_error(
+                    inst,
+                    "component canon lift function could not allocate resource "
+                    "parameter tracking");
+                goto cleanup;
+            }
+        }
+        memset(owned_resource_params, 0,
+               sizeof(*owned_resource_params) * param_count);
+        owned_resource_tracker.values = owned_resource_params;
+        owned_resource_tracker.count = 0;
+        owned_resource_tracker.capacity = param_count;
+        if (param_count > sizeof(stack_borrowed_resource_params)
+                              / sizeof(stack_borrowed_resource_params[0])) {
+            borrowed_resource_params = wasm_runtime_malloc(
+                sizeof(*borrowed_resource_params) * param_count);
+            if (!borrowed_resource_params) {
+                set_component_call_error(
+                    inst,
+                    "component canon lift function could not allocate borrowed "
+                    "resource parameter tracking");
+                goto cleanup;
+            }
+        }
+        memset(borrowed_resource_params, 0,
+               sizeof(*borrowed_resource_params) * param_count);
+        borrowed_resource_tracker.params = borrowed_resource_params;
+        borrowed_resource_tracker.count = 0;
+        borrowed_resource_tracker.capacity = param_count;
+        if (core_type->result_count
+            > sizeof(stack_results) / sizeof(stack_results[0])) {
+            core_results =
+                wasm_runtime_malloc(sizeof(wasm_val_t) * core_type->result_count);
+            if (!core_results) {
+                set_component_call_error(
+                    inst, "component canon lift function could not allocate "
+                          "result storage");
+                goto cleanup;
+            }
+        }
+        memset(core_results, 0, sizeof(wasm_val_t) * core_type->result_count);
+    }
+
+    for (i = 0; component_type->params && i < component_type->params->count; i++) {
         if (!flatten_component_public_param_value(
                 inst, function, component,
                 component_type->params->params[i].value_type, &args[i], i,
@@ -11586,7 +11625,26 @@ host_import_cleanup_fail:
         goto cleanup;
     }
 
-    if (expected_result_count == 1) {
+    if (multi_result_scalar_only) {
+        for (i = 0; i < expected_result_count; i++) {
+            WASMComponentCanonLiftValueInfo result_info_local;
+
+            if (!lookup_component_canon_lift_value_type(
+                    component, &component_type->results->results[i], "result", i,
+                    true, false, false, false, &result_info_local, inst)
+                || !validate_component_scalar_value(
+                    inst, &core_results[i], result_info_local.public_kind,
+                    result_info_local.prim_type, "result", i)
+                || !init_component_public_scalar_result(
+                    inst, &result_info_local, &core_results[i], &results[i])) {
+                for (uint32 j = 0; j < i; j++)
+                    wasm_component_value_destroy(&results[j]);
+                call_succeeded = false;
+                goto cleanup;
+            }
+        }
+    }
+    else if (expected_result_count == 1) {
         if (has_composite_result) {
             if (composite_result_needs_memory) {
                 if (core_results[0].kind != WASM_I32) {
@@ -12013,32 +12071,31 @@ wasm_component_call_internal(WASMComponentInstance *inst,
                                            &core_type))
         return false;
 
-    if (!component_type || !component_type->params)
+    if (!component_type)
         return set_component_call_error(
-            inst, "component canon lift function is missing parameter metadata");
+            inst, "component canon lift function is missing type metadata");
 
-    expected_result_count = component_type->results
-                                    && component_type->results->tag
-                                           == WASM_COMP_RESULT_LIST_WITH_TYPE
-                                    && component_type->results->results
-                                ? 1
-                                : 0;
+    expected_result_count = get_component_func_result_count(component_type);
 
-    if (core_type->param_count != component_type->params->count)
+    if (core_type->param_count
+        != (component_type->params ? component_type->params->count : 0))
         return set_component_call_error(
             inst, "component canon lift function uses unsupported scalar "
                   "flattening for parameters");
 
-    if (core_type->result_count != expected_result_count || core_type->result_count > 1)
+    if (core_type->result_count != expected_result_count)
         return set_component_call_error(
-            inst, "component canon lift function only supports scalar signatures "
-                  "with at most one result");
+            inst, expected_result_count > 1
+                      ? "component canon lift function only supports direct "
+                        "scalar multi-value results"
+                      : "component canon lift function only supports scalar "
+                        "signatures with at most one result");
 
-    if (num_args != component_type->params->count)
+    if (num_args != (component_type->params ? component_type->params->count : 0))
         return set_component_call_error_fmt(
             inst,
             "component canon lift function expects %u arguments but received %u",
-            component_type->params->count, num_args);
+            component_type->params ? component_type->params->count : 0, num_args);
 
     if (num_results != expected_result_count)
         return set_component_call_error_fmt(
@@ -12054,7 +12111,7 @@ wasm_component_call_internal(WASMComponentInstance *inst,
         return set_component_call_error(
             inst, "component canon lift function results buffer is null");
 
-    for (i = 0; i < component_type->params->count; i++) {
+    for (i = 0; component_type->params && i < component_type->params->count; i++) {
         uint8 prim_type, expected_core_type;
         wasm_valkind_t expected_kind;
 
@@ -12075,17 +12132,18 @@ wasm_component_call_internal(WASMComponentInstance *inst,
             return false;
     }
 
-    if (expected_result_count == 1) {
+    for (i = 0; i < expected_result_count; i++) {
         uint8 prim_type, expected_core_type;
         wasm_valkind_t expected_kind;
 
         if (!lookup_component_scalar_type(component,
-                                          component_type->results->results, "result",
-                                          0, &prim_type, &expected_core_type,
-                                          &expected_kind, inst))
+                                          &component_type->results->results[i],
+                                          "result", i, &prim_type,
+                                          &expected_core_type, &expected_kind,
+                                          inst))
             return false;
 
-        if (core_type->types[core_type->param_count] != expected_core_type)
+        if (core_type->types[core_type->param_count + i] != expected_core_type)
             return set_component_call_error(
                 inst, "component canon lift function result does not match the "
                       "core function signature");
@@ -12100,19 +12158,20 @@ wasm_component_call_internal(WASMComponentInstance *inst,
         return false;
     }
 
-    if (expected_result_count == 1) {
+    for (i = 0; i < expected_result_count; i++) {
         uint8 prim_type, ignored_core_type;
         wasm_valkind_t expected_kind;
 
         if (!lookup_component_scalar_type(component,
-                                          component_type->results->results, "result",
-                                          0, &prim_type, &ignored_core_type,
-                                          &expected_kind, inst))
+                                          &component_type->results->results[i],
+                                          "result", i, &prim_type,
+                                          &ignored_core_type, &expected_kind,
+                                          inst))
             return false;
         (void)ignored_core_type;
 
-        if (!validate_component_scalar_value(inst, &results[0], expected_kind,
-                                             prim_type, "result", 0))
+        if (!validate_component_scalar_value(inst, &results[i], expected_kind,
+                                             prim_type, "result", i))
             return false;
     }
 
@@ -12251,6 +12310,16 @@ destroy_component_public_values(wasm_component_value_t *values, uint32 count)
     wasm_runtime_free(values);
 }
 
+static void
+clear_component_runtime_values(WASMComponentRuntimeValue *values, uint32 count)
+{
+    if (!values)
+        return;
+
+    for (uint32 i = 0; i < count; i++)
+        wasm_component_runtime_value_clear(&values[i]);
+}
+
 static uint32
 encode_component_unsigned_leb(uint64 value, uint8 *out_buf)
 {
@@ -12292,7 +12361,7 @@ static bool
 execute_component_start_section_with_public_values(
     WASMComponentInstance *inst, const WASMComponentRuntimeFunc *function,
     const WASMComponentStartSection *start_section,
-    WASMComponentRuntimeValue *result_value, char *error_buf,
+    WASMComponentRuntimeValue *result_values, char *error_buf,
     uint32 error_buf_size, const char *error_prefix, uint32 num_args,
     wasm_component_value_t *public_args)
 {
@@ -12300,52 +12369,74 @@ execute_component_start_section_with_public_values(
         function && function->type_owner_component ? function->type_owner_component
                                                    : &inst->module->component;
     WASMComponentFuncType *component_type = NULL;
-    wasm_component_value_t public_result = { 0 };
+    wasm_component_value_t stack_public_results[4];
+    wasm_component_value_t *public_results = stack_public_results;
+    uint32 result_count = start_section ? start_section->result : 0;
+    uint32 i;
 
     if (!resolve_component_start_function_type(inst, function, &component_type))
         return set_component_start_error_from_exception(inst, error_buf,
                                                         error_buf_size,
                                                         error_prefix);
 
-    if (get_component_func_result_count(component_type) > 1)
+    if (result_count != get_component_func_result_count(component_type))
         return set_component_runtime_error_fmt(
             error_buf, error_buf_size,
-            "%s uses a multi-result component function, which is not "
-            "supported yet",
-            error_prefix);
+            "%s result count %u does not match function result count %u",
+            error_prefix, result_count,
+            get_component_func_result_count(component_type));
 
-    if (!wasm_component_call_values_internal(inst, function, start_section->result,
-                                             start_section->result ? &public_result
-                                                                   : NULL,
+    if (result_count > sizeof(stack_public_results) / sizeof(stack_public_results[0])) {
+        public_results = wasm_runtime_malloc(sizeof(wasm_component_value_t)
+                                             * result_count);
+        if (!public_results)
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                "%s could not allocate start-result storage", error_prefix);
+    }
+    memset(public_results, 0, sizeof(wasm_component_value_t) * result_count);
+
+    if (!wasm_component_call_values_internal(inst, function, result_count,
+                                             result_count ? public_results : NULL,
                                              num_args, public_args, false)) {
-        wasm_component_value_destroy(&public_result);
+        destroy_component_public_values(public_results, result_count);
+        if (public_results != stack_public_results)
+            wasm_runtime_free(public_results);
         return set_component_start_error_from_exception(inst, error_buf,
                                                         error_buf_size,
                                                         error_prefix);
     }
 
-    if (start_section->result > 0) {
+    if (result_count > 0) {
         if (!component_type || !component_type->results
             || component_type->results->count == 0
             || !component_type->results->results) {
-            wasm_component_value_destroy(&public_result);
+            destroy_component_public_values(public_results, result_count);
+            if (public_results != stack_public_results)
+                wasm_runtime_free(public_results);
             return set_component_runtime_error_fmt(
                 error_buf, error_buf_size, "%s result metadata is missing",
                 error_prefix);
         }
 
-        wasm_component_runtime_value_clear(result_value);
-        if (!wasm_component_runtime_value_init_public(
-                result_value, component,
-                component_type->results->results, &public_result, error_buf,
-                error_buf_size)) {
-            wasm_component_runtime_value_clear(result_value);
-            wasm_component_value_destroy(&public_result);
-            return false;
+        clear_component_runtime_values(result_values, result_count);
+        for (i = 0; i < result_count; i++) {
+            if (!wasm_component_runtime_value_init_public(
+                    &result_values[i], component,
+                    &component_type->results->results[i], &public_results[i],
+                    error_buf, error_buf_size)) {
+                clear_component_runtime_values(result_values, i + 1);
+                destroy_component_public_values(public_results, result_count);
+                if (public_results != stack_public_results)
+                    wasm_runtime_free(public_results);
+                return false;
+            }
         }
     }
 
-    wasm_component_value_destroy(&public_result);
+    destroy_component_public_values(public_results, result_count);
+    if (public_results != stack_public_results)
+        wasm_runtime_free(public_results);
     return true;
 }
 
@@ -12410,15 +12501,16 @@ instantiate_component_start_section(WASMComponentInstance *inst,
             error_buf, error_buf_size, "component start section failed",
             start_section->value_args_count, public_args)) {
         if (start_section->result > 0)
-            wasm_component_runtime_value_clear(
-                &inst->component_values[inst->component_value_count]);
+            clear_component_runtime_values(
+                &inst->component_values[inst->component_value_count],
+                start_section->result);
         destroy_component_public_values(public_args,
                                         start_section->value_args_count);
         return false;
     }
 
     if (start_section->result > 0)
-        inst->component_value_count++;
+        inst->component_value_count += start_section->result;
 
     destroy_component_public_values(public_args, start_section->value_args_count);
     return true;
@@ -12496,26 +12588,34 @@ instantiate_nested_component_start_section(
             error_buf, error_buf_size, "nested component start section failed",
             start_section->value_args_count, public_args)) {
         if (start_section->result > 0)
-            wasm_component_runtime_value_clear(
-                &runtime_inst->owned_values[runtime_inst->owned_value_count]);
+            clear_component_runtime_values(
+                &runtime_inst->owned_values[runtime_inst->owned_value_count],
+                start_section->result);
         destroy_component_public_values(public_args,
                                         start_section->value_args_count);
         return false;
     }
 
     if (start_section->result > 0) {
-        WASMComponentRuntimeValue *runtime_value =
-            &runtime_inst->owned_values[runtime_inst->owned_value_count];
+        uint32 initial_binding_value_count = bindings->value_count;
 
-        if (!append_nested_component_local_value(bindings, runtime_value, error_buf,
-                                                 error_buf_size)) {
-            wasm_component_runtime_value_clear(runtime_value);
-            destroy_component_public_values(public_args,
-                                            start_section->value_args_count);
-            return false;
+        for (i = 0; i < start_section->result; i++) {
+            WASMComponentRuntimeValue *runtime_value =
+                &runtime_inst->owned_values[runtime_inst->owned_value_count + i];
+
+            if (!append_nested_component_local_value(bindings, runtime_value,
+                                                     error_buf, error_buf_size)) {
+                bindings->value_count = initial_binding_value_count;
+                clear_component_runtime_values(
+                    &runtime_inst->owned_values[runtime_inst->owned_value_count],
+                    start_section->result);
+                destroy_component_public_values(public_args,
+                                                start_section->value_args_count);
+                return false;
+            }
         }
 
-        runtime_inst->owned_value_count++;
+        runtime_inst->owned_value_count += start_section->result;
     }
 
     destroy_component_public_values(public_args, start_section->value_args_count);

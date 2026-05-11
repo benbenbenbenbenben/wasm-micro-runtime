@@ -500,14 +500,18 @@ Supported today:
 
 - top-level start execution for the current supported public-value subset
 - nested start execution for the current supported public-value subset
-- materializing at most one start result as a component value
+- materializing multiple start results when the start function is a
+  canon-lifted scalar-only multi-result function using direct core multi-value
+  returns
 - parsing and validating multi-result component functypes, including start
   sections whose declared result count matches a multi-result functype
 
 Still missing:
 
-- executing multi-result start sections (the runtime now rejects them
-  explicitly instead of the parser/type model rejecting the binary structurally)
+- multi-result execution for host-imported component functions
+- multi-result execution for memory-backed, composite, or resource results
+- support for the spec-style retptr-based Canonical ABI shape for flattened
+  multi-results
 - Canonical ABI beyond the current supported public-value subset
 - the more complete execution space needed for start-heavy real-world components
 
