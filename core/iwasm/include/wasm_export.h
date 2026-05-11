@@ -159,7 +159,8 @@ typedef enum {
 typedef enum {
     WASM_COMPONENT_VALUE_STORAGE_NONE = 0,
     WASM_COMPONENT_VALUE_STORAGE_INLINE,
-    WASM_COMPONENT_VALUE_STORAGE_OWNED
+    WASM_COMPONENT_VALUE_STORAGE_OWNED,
+    WASM_COMPONENT_VALUE_STORAGE_RESOURCE
 } wasm_component_value_storage_kind_t;
 
 typedef struct wasm_component_value_type_t {
@@ -190,8 +191,18 @@ typedef enum {
     WASM_COMPONENT_EXTERN_KIND_VALUE,
     WASM_COMPONENT_EXTERN_KIND_INSTANCE,
     WASM_COMPONENT_EXTERN_KIND_COMPONENT,
-    WASM_COMPONENT_EXTERN_KIND_CORE_MODULE
+    WASM_COMPONENT_EXTERN_KIND_CORE_MODULE,
+    WASM_COMPONENT_EXTERN_KIND_RESOURCE_TYPE
 } wasm_component_extern_kind_t;
+
+typedef bool (*wasm_component_imported_resource_drop_callback_t)(
+    void *data, void *user_data, char *error_buf, uint32_t error_buf_size);
+typedef void (*wasm_component_resource_value_finalizer_t)(void *data, void *ctx);
+
+typedef struct wasm_component_resource_type_import_binding_t {
+    wasm_component_imported_resource_drop_callback_t drop_callback;
+    void *user_data;
+} wasm_component_resource_type_import_binding_t;
 
 typedef struct wasm_component_export_t {
     const char *name;
@@ -213,6 +224,7 @@ typedef struct wasm_component_import_binding_t {
         wasm_component_instance_t instance;
         wasm_component_component_t component;
         wasm_module_t core_module;
+        wasm_component_resource_type_import_binding_t resource_type;
     } value;
 } wasm_component_import_binding_t;
 
@@ -1438,6 +1450,12 @@ wasm_runtime_call_component_values(wasm_module_inst_t module_inst,
                                    wasm_component_value_t results[],
                                    uint32_t num_args,
                                    const wasm_component_value_t args[]);
+
+WASM_RUNTIME_API_EXTERN bool
+wasm_runtime_drop_component_owned_result(wasm_module_inst_t module_inst,
+                                         wasm_component_func_t function,
+                                         uint32_t result_index,
+                                         wasm_component_value_t *value);
 #endif
 
 /**
@@ -1817,6 +1835,11 @@ wasm_runtime_get_component_export_value(const wasm_module_inst_t module_inst,
 
 WASM_RUNTIME_API_EXTERN const void *
 wasm_component_value_get_data(const wasm_component_value_t *value);
+
+WASM_RUNTIME_API_EXTERN bool
+wasm_component_value_init_owned_imported_resource_result(
+    wasm_component_value_t *value, void *data,
+    wasm_component_resource_value_finalizer_t finalizer, void *finalizer_ctx);
 
 WASM_RUNTIME_API_EXTERN void
 wasm_component_value_destroy(wasm_component_value_t *value);

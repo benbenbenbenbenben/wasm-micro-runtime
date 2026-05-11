@@ -80,6 +80,7 @@ Public component-facing APIs now include:
 - invocation:
   - `wasm_runtime_call_component(...)`
   - `wasm_runtime_call_component_values(...)`
+  - `wasm_runtime_drop_component_owned_result(...)`
 - public value helpers:
   - `wasm_component_value_get_data(...)`
   - `wasm_component_value_destroy(...)`
@@ -252,12 +253,18 @@ The runtime now includes:
   when a child core module imports those builtins
 - the first proven operational subset for those builtins:
   locally-defined resource types and aliases thereof, `rep i32` only, sync
-  destructors on explicit `resource.drop`, no async drop, no imported
-  non-alias resource types
-- explicit rejection for imported resource builtin misuse:
-  `canon resource.new` / `canon resource.rep` on imported resource types now
-  fail with spec-grounded errors, while imported `canon resource.drop` is still
-  a not-yet-wired gap
+  destructors on explicit `resource.drop`, no async drop, and imported
+  non-alias resource types only on the narrower public/internal
+  `resource.drop` path described below
+- imported-resource builtin behavior is now split more honestly:
+  `canon resource.new` / `canon resource.rep` on imported resource types stay
+  explicitly rejected, while imported `canon resource.drop` now has a narrow
+  executable contract for owned and borrowed imported handles when the host
+  binds a top-level imported resource type with a destructor callback
+- host component callbacks can now synchronously accept and return
+  `own<resource>` values through the public component value API for the
+  already-existing handle subset, with runtime transfer/restore semantics for
+  handles coming from the current call
 - deinstantiate-time destructor execution for still-live handles in that same
   currently supported local subset
 - finalizer cleanup during deinstantiation
@@ -507,21 +514,57 @@ What exists:
 - executable child-core `canon resource.new` / `canon resource.rep` /
   `canon resource.drop` for the tested locally-defined `rep i32` subset and
   aliases thereof
+- lifted top-level and nested-exported `own<resource>` results through
+  `wasm_runtime_call_component_values(...)` for that same local-resource subset
+- host-side destruction of those lifted owned results through
+  `wasm_runtime_drop_component_owned_result(...)`, including the proven
+  top-level sync-destructor path and nested exported-result drops for the
+  current local-resource subset
 - sync destructor execution when that tested subset is dropped explicitly from
   child core code
 - deinstantiate-time sync destructor execution for still-live handles in that
   same currently supported subset
 - deinstantiate-time cleanup/finalization
-- explicit rejection of imported `resource.new` / `resource.rep`, with imported
-  `resource.drop` still deferred pending a real imported-resource runtime model
+- explicit rejection of imported `resource.new` / `resource.rep`
+- an executable imported `resource.drop` seam for imported resource handles,
+  including:
+  - trap-on-own-drop when no host destructor is bound
+  - destructor callback execution for owned imported handles
+  - borrowed imported-handle drop without destructor execution
+  - deinstantiate-time imported-handle destructor cleanup when a callback is bound
+- top-level public host binding of imported resource types through
+  `wasm_component_import_binding_t`, for the same imported `resource.drop`
+  subset
+- synchronous host callback round-tripping of existing `own<resource>` handles
+  through `wasm_runtime_call_component_values(...)` for host function imports
+- synchronous host callback transport of borrowed resource parameters for host
+  function imports, including both local owned handles and imported handles
+  without consuming ownership
+- fresh host-created **imported** `own<resource>` results from host callbacks,
+  including:
+  - `wasm_component_value_init_owned_imported_resource_result(...)` for pending
+    imported-resource result tokens
+  - promotion of those tokens into owned imported handles when the callback's
+    expected result type is `own<imported-resource>`
+  - dropping those promoted results through the existing
+    `wasm_runtime_drop_component_owned_result(...)` helper
+  - finalizer-driven cleanup when result validation fails before the pending
+    token is promoted
 
 What is still missing:
 
 - full ownership/borrow/lend semantics
 - live Canonical ABI resource lowering/lifting
-- resource imports/exports as a complete public host feature
+- resource imports/exports as a complete **public** host feature beyond the
+  current top-level imported-resource-type binding plus host-callback imported
+  own-result subset
+- borrowed resource values and general own/borrow public value transport beyond
+  the current callback subset (borrowed parameters, round-tripping existing
+  owned handles, plus fresh imported own results)
 - runtime enforcement of richer resource lifecycle rules
-- public resource-aware callable component APIs
+- public resource-aware callable component APIs beyond the new
+  owned-result drop helper, top-level imported-resource binding, and current
+  synchronous host-callback own-resource subset
 - full trap/failure-path operational cleanup semantics
 
 So resources now have a narrow executable seam, not a finished runtime.

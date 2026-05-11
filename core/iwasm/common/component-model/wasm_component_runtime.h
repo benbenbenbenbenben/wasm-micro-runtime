@@ -101,9 +101,12 @@ typedef struct WASMComponentRuntimeFunc {
     bool has_string_params;
     bool has_list_scalar_params;
     bool has_composite_params;
+    bool has_owned_resource_params;
+    bool has_borrowed_resource_params;
     bool has_string_result;
     bool has_list_scalar_result;
     bool has_composite_result;
+    bool has_owned_resource_result;
     bool is_top_level_export;
     wasm_component_host_func_callback_t host_callback;
     void *host_user_data;
@@ -272,6 +275,12 @@ wasm_component_call_values(WASMComponentInstance *inst,
                            wasm_component_value_t *results,
                            uint32 num_args,
                            const wasm_component_value_t *args);
+
+bool
+wasm_component_drop_owned_result(WASMComponentInstance *inst,
+                                 const WASMComponentRuntimeFunc *function,
+                                 uint32 result_index,
+                                 wasm_component_value_t *value);
 
 void
 wasm_component_module_deinstantiate(WASMComponentInstance *inst);

@@ -32,6 +32,23 @@ set_component_resource_error_fmt(char *error_buf, uint32 error_buf_size,
     return set_component_resource_error(error_buf, error_buf_size, detail);
 }
 
+static const char *
+get_resource_import_name(const WASMComponentImportName *import_name)
+{
+    if (!import_name || import_name->tag != WASM_COMP_IMPORTNAME_SIMPLE
+        || !import_name->imported.simple.name) {
+        return NULL;
+    }
+    return import_name->imported.simple.name->name;
+}
+
+static void
+imported_resource_noop_finalizer(void *data, void *ctx)
+{
+    (void)data;
+    (void)ctx;
+}
+
 static bool
 ensure_type_capacity(WASMComponentRuntimeResourceState *resource_state,
                      uint32 min_capacity, char *error_buf,
@@ -216,6 +233,8 @@ append_imported_type_slot(WASMComponentRuntimeResourceState *resource_state,
     if (type_bound->tag == WASM_COMP_TYPEBOUND_TYPE) {
         type_slot->kind = WASM_COMP_RUNTIME_RESOURCE_TYPE_IMPORTED;
         type_slot->canonical_type_idx = type_slot->type_idx;
+        type_slot->import_name =
+            get_resource_import_name(component_import->import_name);
         type_slot->handle_table.next_handle = 1;
         return true;
     }
@@ -427,12 +446,12 @@ ensure_handle_entry_capacity(WASMComponentResourceHandleTable *handle_table,
 }
 
 static void
-release_owned_handle_entry(WASMComponentResourceHandleEntry *entry)
+release_handle_entry(WASMComponentResourceHandleEntry *entry)
 {
-    if (!entry->is_live || !entry->is_owned)
+    if (!entry || !entry->is_live)
         return;
 
-    if (entry->data) {
+    if (entry->is_owned && entry->data) {
         if (entry->finalizer)
             entry->finalizer(entry->data, entry->finalizer_ctx);
         else
@@ -492,8 +511,7 @@ wasm_component_resource_state_destroy(
             continue;
 
         if (canonical_type->handle_table.entries[handle_index].is_live) {
-            release_owned_handle_entry(
-                &canonical_type->handle_table.entries[handle_index]);
+            release_handle_entry(&canonical_type->handle_table.entries[handle_index]);
             if (canonical_type->handle_table.live_handle_count > 0)
                 canonical_type->handle_table.live_handle_count--;
             if (canonical_type->handle_table.owned_handle_count > 0)
@@ -558,6 +576,10 @@ wasm_component_resource_create_owned_handle(
         return set_component_resource_error_fmt(
             error_buf, error_buf_size,
             "component type index %u is not a runtime resource type", type_idx);
+    if (canonical_type->kind != WASM_COMP_RUNTIME_RESOURCE_TYPE_LOCAL)
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "component type index %u is not a local resource type", type_idx);
 
     handle_table = &canonical_type->handle_table;
     if (handle_table->next_handle == 0)
@@ -620,8 +642,273 @@ wasm_component_resource_drop_owned_handle(
             error_buf, error_buf_size,
             "component resource handle %u is not an owned live handle", handle);
 
-    release_owned_handle_entry(entry);
+    release_handle_entry(entry);
     canonical_type->handle_table.live_handle_count--;
     canonical_type->handle_table.owned_handle_count--;
+    return true;
+}
+
+bool
+wasm_component_resource_bind_imported_drop_callback(
+    WASMComponentRuntimeResourceState *resource_state, uint32 type_idx,
+    wasm_component_imported_resource_drop_callback_t callback, void *user_data,
+    char *error_buf, uint32 error_buf_size)
+{
+    WASMComponentRuntimeResourceType *canonical_type =
+        resolve_canonical_resource_type(resource_state, type_idx);
+
+    if (!canonical_type)
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "component type index %u is not a runtime resource type", type_idx);
+    if (canonical_type->kind != WASM_COMP_RUNTIME_RESOURCE_TYPE_IMPORTED)
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "component type index %u is not an imported resource type", type_idx);
+
+    canonical_type->imported_drop_callback = callback;
+    canonical_type->imported_drop_user_data = user_data;
+    return true;
+}
+
+bool
+wasm_component_resource_create_imported_handle(
+    WASMComponentRuntimeResourceState *resource_state, uint32 type_idx,
+    void *data, bool owned, uint32 *out_handle, char *error_buf,
+    uint32 error_buf_size)
+{
+    WASMComponentRuntimeResourceType *canonical_type;
+    WASMComponentResourceHandleTable *handle_table;
+    uint32 handle;
+
+    if (!resource_state || !out_handle)
+        return set_component_resource_error(
+            error_buf, error_buf_size,
+            "component imported resource handle output is null");
+
+    canonical_type = resolve_canonical_resource_type(resource_state, type_idx);
+    if (!canonical_type)
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "component type index %u is not a runtime resource type", type_idx);
+    if (canonical_type->kind != WASM_COMP_RUNTIME_RESOURCE_TYPE_IMPORTED)
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "component type index %u is not an imported resource type", type_idx);
+
+    handle_table = &canonical_type->handle_table;
+    if (handle_table->next_handle == 0)
+        return set_component_resource_error(
+            error_buf, error_buf_size,
+            "component resource handle space exhausted");
+
+    handle = handle_table->next_handle++;
+    if (!ensure_handle_entry_capacity(handle_table, handle, error_buf,
+                                      error_buf_size)
+        || (owned && !ensure_owned_handle_capacity(resource_state,
+                                                   resource_state->owned_handle_count
+                                                       + 1,
+                                                   error_buf,
+                                                   error_buf_size)))
+        return false;
+
+    handle_table->entries[handle - 1].is_live = true;
+    handle_table->entries[handle - 1].is_owned = owned;
+    handle_table->entries[handle - 1].handle = handle;
+    handle_table->entries[handle - 1].data = data;
+    handle_table->entries[handle - 1].finalizer =
+        owned ? imported_resource_noop_finalizer : NULL;
+    handle_table->entries[handle - 1].finalizer_ctx = NULL;
+    handle_table->live_handle_count++;
+
+    if (owned) {
+        handle_table->owned_handle_count++;
+        resource_state->owned_handles[resource_state->owned_handle_count].type_idx =
+            canonical_type->type_idx;
+        resource_state->owned_handles[resource_state->owned_handle_count].handle =
+            handle;
+        resource_state->owned_handle_count++;
+    }
+
+    *out_handle = handle;
+    return true;
+}
+
+bool
+wasm_component_resource_take_owned_handle(
+    WASMComponentRuntimeResourceState *resource_state, uint32 type_idx,
+    uint32 handle, WASMComponentPublicResourceValue *resource_value_out,
+    char *error_buf, uint32 error_buf_size)
+{
+    WASMComponentRuntimeResourceType *resource_type;
+    WASMComponentRuntimeResourceType *canonical_type;
+    WASMComponentResourceHandleEntry *entry;
+
+    if (!resource_state || !resource_value_out || handle == 0)
+        return set_component_resource_error(
+            error_buf, error_buf_size,
+            "component resource owned handle transfer is invalid");
+
+    resource_type = wasm_component_resource_lookup_runtime_type(resource_state, type_idx);
+    if (!resource_type)
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "component type index %u is not a runtime resource type", type_idx);
+
+    canonical_type =
+        resolve_canonical_resource_type(resource_state, resource_type->type_idx);
+    if (!canonical_type)
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "component type index %u is not a canonical resource type", type_idx);
+
+    if (handle - 1 >= canonical_type->handle_table.entry_count)
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "component resource handle %u is out of bounds", handle);
+
+    entry = &canonical_type->handle_table.entries[handle - 1];
+    if (!entry->is_live || !entry->is_owned)
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "component resource handle %u is not an owned live handle", handle);
+
+    memset(resource_value_out, 0, sizeof(*resource_value_out));
+    resource_value_out->magic = WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_MAGIC;
+    resource_value_out->kind = WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_TRANSFERRED;
+    resource_value_out->resource_state = resource_state;
+    resource_value_out->resource_type_idx = resource_type->type_idx;
+    resource_value_out->canonical_type_idx = canonical_type->type_idx;
+    resource_value_out->handle = handle;
+    resource_value_out->data = entry->data;
+    resource_value_out->finalizer = entry->finalizer;
+    resource_value_out->finalizer_ctx = entry->finalizer_ctx;
+
+    memset(entry, 0, sizeof(*entry));
+    if (canonical_type->handle_table.live_handle_count > 0)
+        canonical_type->handle_table.live_handle_count--;
+    if (canonical_type->handle_table.owned_handle_count > 0)
+        canonical_type->handle_table.owned_handle_count--;
+    return true;
+}
+
+bool
+wasm_component_resource_restore_owned_handle(
+    WASMComponentPublicResourceValue *resource_value, char *error_buf,
+    uint32 error_buf_size)
+{
+    WASMComponentRuntimeResourceState *resource_state;
+    WASMComponentRuntimeResourceType *resource_type;
+    WASMComponentRuntimeResourceType *canonical_type;
+    WASMComponentResourceHandleEntry *entry;
+    uint32 handle;
+
+    if (!resource_value
+        || resource_value->magic != WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_MAGIC
+        || !resource_value->resource_state || resource_value->handle == 0)
+        return set_component_resource_error(
+            error_buf, error_buf_size,
+            "component public resource value is invalid");
+
+    resource_state = resource_value->resource_state;
+    resource_type = wasm_component_resource_lookup_runtime_type(
+        resource_state, resource_value->resource_type_idx);
+    if (!resource_type)
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "component type index %u is not a runtime resource type",
+            resource_value->resource_type_idx);
+
+    canonical_type = resolve_canonical_resource_type(
+        resource_state, resource_value->canonical_type_idx);
+    if (!canonical_type)
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "component type index %u is not a canonical resource type",
+            resource_value->canonical_type_idx);
+
+    handle = resource_value->handle;
+    if (!ensure_handle_entry_capacity(&canonical_type->handle_table, handle, error_buf,
+                                      error_buf_size))
+        return false;
+
+    entry = &canonical_type->handle_table.entries[handle - 1];
+    if (entry->is_live)
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "component resource handle %u is already live", handle);
+
+    entry->is_live = true;
+    entry->is_owned = true;
+    entry->handle = handle;
+    entry->data = resource_value->data;
+    entry->finalizer = resource_value->finalizer;
+    entry->finalizer_ctx = resource_value->finalizer_ctx;
+
+    canonical_type->handle_table.live_handle_count++;
+    canonical_type->handle_table.owned_handle_count++;
+    if (canonical_type->handle_table.next_handle <= handle)
+        canonical_type->handle_table.next_handle = handle + 1;
+
+    resource_value->magic = 0;
+    resource_value->resource_state = NULL;
+    resource_value->resource_type_idx = WASM_COMPONENT_RESOURCE_INVALID_TYPE_IDX;
+    resource_value->canonical_type_idx = WASM_COMPONENT_RESOURCE_INVALID_TYPE_IDX;
+    resource_value->handle = 0;
+    resource_value->data = NULL;
+    resource_value->finalizer = NULL;
+    resource_value->finalizer_ctx = NULL;
+    return true;
+}
+
+bool
+wasm_component_resource_borrow_handle(
+    WASMComponentRuntimeResourceState *resource_state, uint32 type_idx,
+    uint32 handle, WASMComponentPublicResourceValue *resource_value_out,
+    char *error_buf, uint32 error_buf_size)
+{
+    WASMComponentRuntimeResourceType *resource_type;
+    WASMComponentRuntimeResourceType *canonical_type;
+    WASMComponentResourceHandleEntry *entry;
+
+    if (!resource_state || !resource_value_out || handle == 0)
+        return set_component_resource_error(
+            error_buf, error_buf_size,
+            "component resource borrowed handle view is invalid");
+
+    resource_type = wasm_component_resource_lookup_runtime_type(resource_state, type_idx);
+    if (!resource_type)
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "component type index %u is not a runtime resource type", type_idx);
+
+    canonical_type =
+        resolve_canonical_resource_type(resource_state, resource_type->type_idx);
+    if (!canonical_type)
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "component type index %u is not a canonical resource type", type_idx);
+
+    if (handle - 1 >= canonical_type->handle_table.entry_count)
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "component resource handle %u is out of bounds", handle);
+
+    entry = &canonical_type->handle_table.entries[handle - 1];
+    if (!entry->is_live)
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "component resource handle %u is not a live handle", handle);
+
+    memset(resource_value_out, 0, sizeof(*resource_value_out));
+    resource_value_out->magic = WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_MAGIC;
+    resource_value_out->kind = WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_BORROWED;
+    resource_value_out->resource_state = resource_state;
+    resource_value_out->resource_type_idx = resource_type->type_idx;
+    resource_value_out->canonical_type_idx = canonical_type->type_idx;
+    resource_value_out->handle = handle;
+    resource_value_out->data = entry->data;
+    resource_value_out->finalizer = entry->finalizer;
+    resource_value_out->finalizer_ctx = entry->finalizer_ctx;
     return true;
 }

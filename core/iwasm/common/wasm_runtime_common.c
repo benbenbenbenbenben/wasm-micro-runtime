@@ -3514,6 +3514,23 @@ wasm_runtime_call_component_values(WASMModuleInstanceCommon *module_inst,
                                       function, num_results, results, num_args,
                                       args);
 }
+
+bool
+wasm_runtime_drop_component_owned_result(WASMModuleInstanceCommon *module_inst,
+                                         WASMComponentRuntimeFunc *function,
+                                         uint32 result_index,
+                                         wasm_component_value_t *value)
+{
+    if (!module_inst || module_inst->module_type != Wasm_Module_Component) {
+        if (module_inst)
+            wasm_runtime_set_exception(module_inst,
+                                       "module instance is not a component");
+        return false;
+    }
+
+    return wasm_component_drop_owned_result((WASMComponentInstance *)module_inst,
+                                            function, result_index, value);
+}
 #endif
 
 bool

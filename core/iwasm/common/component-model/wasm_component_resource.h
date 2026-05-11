@@ -12,10 +12,12 @@
 extern "C" {
 #endif
 
+struct WASMComponentInstance;
+typedef struct WASMComponentRuntimeResourceState WASMComponentRuntimeResourceState;
+
 #define WASM_COMPONENT_RESOURCE_INVALID_TYPE_IDX UINT32_MAX
 
 typedef void (*WASMComponentResourceHandleFinalizer)(void *data, void *ctx);
-
 typedef enum WASMComponentRuntimeResourceTypeKind {
     WASM_COMP_RUNTIME_RESOURCE_TYPE_NONE = 0,
     WASM_COMP_RUNTIME_RESOURCE_TYPE_LOCAL,
@@ -45,11 +47,14 @@ typedef struct WASMComponentRuntimeResourceType {
     uint32 type_idx;
     uint32 canonical_type_idx;
     uint32 source_type_idx;
+    const char *import_name;
     const WASMComponentTypes *declared_type;
     bool has_dtor;
     uint32 dtor_func_idx;
     bool has_callback;
     uint32 callback_func_idx;
+    wasm_component_imported_resource_drop_callback_t imported_drop_callback;
+    void *imported_drop_user_data;
     WASMComponentResourceHandleTable handle_table;
 } WASMComponentRuntimeResourceType;
 
@@ -58,8 +63,29 @@ typedef struct WASMComponentOwnedResourceHandle {
     uint32 handle;
 } WASMComponentOwnedResourceHandle;
 
+#define WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_MAGIC UINT32_C(0x43524d56)
+
+typedef enum WASMComponentPublicResourceValueKind {
+    WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_TRANSFERRED = 0,
+    WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_BORROWED,
+    WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_PENDING_IMPORTED_RESULT
+} WASMComponentPublicResourceValueKind;
+
+typedef struct WASMComponentPublicResourceValue {
+    uint32 magic;
+    WASMComponentPublicResourceValueKind kind;
+    WASMComponentRuntimeResourceState *resource_state;
+    uint32 resource_type_idx;
+    uint32 canonical_type_idx;
+    uint32 handle;
+    void *data;
+    WASMComponentResourceHandleFinalizer finalizer;
+    void *finalizer_ctx;
+} WASMComponentPublicResourceValue;
+
 typedef struct WASMComponentRuntimeResourceState {
     const WASMComponent *component;
+    struct WASMComponentInstance *owner_instance;
     uint32 type_count;
     uint32 type_capacity;
     WASMComponentRuntimeResourceType *types;
@@ -96,6 +122,35 @@ bool
 wasm_component_resource_drop_owned_handle(
     WASMComponentRuntimeResourceState *resource_state, uint32 type_idx,
     uint32 handle, char *error_buf, uint32 error_buf_size);
+
+bool
+wasm_component_resource_bind_imported_drop_callback(
+    WASMComponentRuntimeResourceState *resource_state, uint32 type_idx,
+    wasm_component_imported_resource_drop_callback_t callback, void *user_data,
+    char *error_buf, uint32 error_buf_size);
+
+bool
+wasm_component_resource_create_imported_handle(
+    WASMComponentRuntimeResourceState *resource_state, uint32 type_idx,
+    void *data, bool owned, uint32 *out_handle, char *error_buf,
+    uint32 error_buf_size);
+
+bool
+wasm_component_resource_take_owned_handle(
+    WASMComponentRuntimeResourceState *resource_state, uint32 type_idx,
+    uint32 handle, WASMComponentPublicResourceValue *resource_value_out,
+    char *error_buf, uint32 error_buf_size);
+
+bool
+wasm_component_resource_restore_owned_handle(
+    WASMComponentPublicResourceValue *resource_value, char *error_buf,
+    uint32 error_buf_size);
+
+bool
+wasm_component_resource_borrow_handle(
+    WASMComponentRuntimeResourceState *resource_state, uint32 type_idx,
+    uint32 handle, WASMComponentPublicResourceValue *resource_value_out,
+    char *error_buf, uint32 error_buf_size);
 
 #ifdef __cplusplus
 }

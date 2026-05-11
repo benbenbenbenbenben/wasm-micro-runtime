@@ -977,6 +977,12 @@ wasm_runtime_call_component_values(WASMModuleInstanceCommon *module_inst,
                                    wasm_component_value_t *results,
                                    uint32 num_args,
                                    const wasm_component_value_t *args);
+
+WASM_RUNTIME_API_EXTERN bool
+wasm_runtime_drop_component_owned_result(WASMModuleInstanceCommon *module_inst,
+                                         WASMComponentRuntimeFunc *function,
+                                         uint32 result_index,
+                                         wasm_component_value_t *value);
 #endif
 
 /* See wasm_export.h for description */
