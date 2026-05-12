@@ -415,8 +415,10 @@ Major Canonical ABI gaps remain:
   `list<string>`-result / `list<u8>`- and `list<s32>`-parameter /
   `list<scalar>`-result / mixed composite-param / mixed composite-result paths
   (including nested `list<scalar>` / `list<string>` leaves on the mixed
-  composite-param path) and the tested scalar / UTF-8 string / nested
-  `list<scalar>` tuple-record subset
+  composite-param path), the tested scalar / UTF-8 string / nested
+  `list<scalar>` tuple-record subset, and the tested nested imported
+  `own<resource> + s32` retptr/result-area seam with nested `resource-drop`
+  consumption
 - no list marshalling beyond UTF-8 strings, the tested direct top-level and
   nested child-core `list<string>` parameter/result paths, the tested
   cross-component `list<string>` parameter/result seams, top-level
@@ -602,6 +604,9 @@ What exists:
     current borrowed argument for the current local-resource subset
   - direct lowered child-core execution of the tested imported
     `own<resource> + s32` host-import seam on the retptr/result-area path
+  - nested lowered child-core execution of the tested imported
+    `own<resource> + s32` host-import seam on the same retptr/result-area path,
+    including the nested `resource-drop` consumer lane
   - direct lowered child-core execution of the tested imported
     `own<resource> + string` host-import seam on that same retptr/result-area
     path, including rollback when the string lane is invalid

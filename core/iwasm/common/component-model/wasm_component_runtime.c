@@ -59,6 +59,9 @@ typedef struct WASMNestedComponentLocalBindings {
     uint32 component_count;
     uint32 component_capacity;
     WASMComponentRuntimeComponent **components;
+    uint32 resource_type_count;
+    uint32 resource_type_capacity;
+    const WASMComponentRuntimeResourceType **resource_types;
     WASMComponentRuntimeScope *parent_scope;
 } WASMNestedComponentLocalBindings;
 
@@ -74,6 +77,12 @@ call_core_function_from_resource_builtin(
     const WASMComponentCoreRuntimeRef *core_func_ref, const char *acquire_error,
     const char *call_error, uint32 num_results, wasm_val_t *results,
     uint32 num_args, wasm_val_t *args);
+
+static bool
+append_nested_component_local_resource_type(
+    WASMNestedComponentLocalBindings *bindings,
+    const WASMComponentRuntimeResourceType *resource_type, char *error_buf,
+    uint32 error_buf_size);
 
 typedef enum WASMComponentCanonLiftValueKind {
     WASM_COMP_CANON_LIFT_VALUE_SCALAR = 0,
@@ -120,13 +129,11 @@ static uint32
 encode_component_signed_leb(int64 value, uint8 *out_buf);
 
 static bool
-wasm_component_call_values_internal(WASMComponentInstance *inst,
-                                    const WASMComponentRuntimeFunc *function,
-                                    uint32 num_results,
-                                    wasm_component_value_t *results,
-                                    uint32 num_args,
-                                    const wasm_component_value_t *args,
-                                    bool require_top_level_export);
+wasm_component_call_values_internal(
+    WASMComponentInstance *inst, const WASMComponentRuntimeFunc *function,
+    uint32 num_results, wasm_component_value_t *results, uint32 num_args,
+    const wasm_component_value_t *args, bool require_top_level_export,
+    const WASMComponentRuntimeResourceState *resource_state_override);
 
 static void
 destroy_component_public_values(wasm_component_value_t *values, uint32 count);
@@ -992,7 +999,8 @@ alloc_nested_component_local_bindings(
     uint32 core_instance_capacity, uint32 core_memory_capacity,
     uint32 core_func_capacity,
     uint32 func_capacity, uint32 value_capacity, uint32 instance_capacity,
-    uint32 component_capacity, char *error_buf, uint32 error_buf_size)
+    uint32 component_capacity, uint32 resource_type_capacity, char *error_buf,
+    uint32 error_buf_size)
 {
     memset(bindings, 0, sizeof(*bindings));
 
@@ -1026,38 +1034,45 @@ alloc_nested_component_local_bindings(
         || !alloc_component_runtime_array((void **)&bindings->components,
                                           component_capacity,
                                           sizeof(*bindings->components),
-                                          error_buf, error_buf_size)) {
-        if (bindings->core_modules) {
-            wasm_runtime_free(bindings->core_modules);
-            bindings->core_modules = NULL;
+                                          error_buf, error_buf_size)
+        || !alloc_component_runtime_array(
+            (void **)&bindings->resource_types, resource_type_capacity,
+            sizeof(*bindings->resource_types), error_buf, error_buf_size)) {
+        if (bindings->resource_types) {
+            wasm_runtime_free(bindings->resource_types);
+            bindings->resource_types = NULL;
         }
-        if (bindings->core_instances) {
-            wasm_runtime_free(bindings->core_instances);
-            bindings->core_instances = NULL;
-        }
-        if (bindings->funcs) {
-            wasm_runtime_free(bindings->funcs);
-            bindings->funcs = NULL;
-        }
-        if (bindings->core_memories) {
-            wasm_runtime_free(bindings->core_memories);
-            bindings->core_memories = NULL;
-        }
-        if (bindings->core_funcs) {
-            wasm_runtime_free(bindings->core_funcs);
-            bindings->core_funcs = NULL;
-        }
-        if (bindings->values) {
-            wasm_runtime_free(bindings->values);
-            bindings->values = NULL;
+        if (bindings->components) {
+            wasm_runtime_free(bindings->components);
+            bindings->components = NULL;
         }
         if (bindings->instances) {
             wasm_runtime_free(bindings->instances);
             bindings->instances = NULL;
         }
-        if (bindings->components) {
-            wasm_runtime_free(bindings->components);
-            bindings->components = NULL;
+        if (bindings->values) {
+            wasm_runtime_free(bindings->values);
+            bindings->values = NULL;
+        }
+        if (bindings->core_funcs) {
+            wasm_runtime_free(bindings->core_funcs);
+            bindings->core_funcs = NULL;
+        }
+        if (bindings->core_memories) {
+            wasm_runtime_free(bindings->core_memories);
+            bindings->core_memories = NULL;
+        }
+        if (bindings->funcs) {
+            wasm_runtime_free(bindings->funcs);
+            bindings->funcs = NULL;
+        }
+        if (bindings->core_instances) {
+            wasm_runtime_free(bindings->core_instances);
+            bindings->core_instances = NULL;
+        }
+        if (bindings->core_modules) {
+            wasm_runtime_free(bindings->core_modules);
+            bindings->core_modules = NULL;
         }
         return false;
     }
@@ -1070,6 +1085,7 @@ alloc_nested_component_local_bindings(
     bindings->value_capacity = value_capacity;
     bindings->instance_capacity = instance_capacity;
     bindings->component_capacity = component_capacity;
+    bindings->resource_type_capacity = resource_type_capacity;
     return true;
 }
 
@@ -1108,6 +1124,10 @@ free_nested_component_local_bindings(WASMNestedComponentLocalBindings *bindings)
         wasm_runtime_free(bindings->components);
         bindings->components = NULL;
     }
+    if (bindings->resource_types) {
+        wasm_runtime_free(bindings->resource_types);
+        bindings->resource_types = NULL;
+    }
 
     bindings->core_module_count = 0;
     bindings->core_module_capacity = 0;
@@ -1125,6 +1145,8 @@ free_nested_component_local_bindings(WASMNestedComponentLocalBindings *bindings)
     bindings->instance_capacity = 0;
     bindings->component_count = 0;
     bindings->component_capacity = 0;
+    bindings->resource_type_count = 0;
+    bindings->resource_type_capacity = 0;
 }
 
 static bool
@@ -1226,6 +1248,9 @@ append_nested_component_local_ref(WASMNestedComponentLocalBindings *bindings,
         case WASM_COMP_RUNTIME_REF_CORE_MODULE:
             return append_nested_component_local_core_module(
                 bindings, ref.of.core_module, error_buf, error_buf_size);
+        case WASM_COMP_RUNTIME_REF_RESOURCE_TYPE:
+            return append_nested_component_local_resource_type(
+                bindings, ref.of.resource_type, error_buf, error_buf_size);
         default:
             return set_component_runtime_error_fmt(
                 error_buf, error_buf_size,
@@ -1262,6 +1287,139 @@ append_nested_component_local_component(WASMNestedComponentLocalBindings *bindin
 
     bindings->components[bindings->component_count++] = component;
     return true;
+}
+
+static bool
+append_nested_component_local_resource_type(
+    WASMNestedComponentLocalBindings *bindings,
+    const WASMComponentRuntimeResourceType *resource_type, char *error_buf,
+    uint32 error_buf_size)
+{
+    if (bindings->resource_type_count >= bindings->resource_type_capacity)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "nested component local resource type space overflow");
+
+    bindings->resource_types[bindings->resource_type_count++] = resource_type;
+    return true;
+}
+
+static void
+propagate_nested_imported_resource_drop_callback(
+    WASMComponentRuntimeResourceState *nested_resource_state,
+    const WASMComponentRuntimeResourceType *parent_resource_type)
+{
+    uint32 i;
+    const char *parent_import_name;
+
+    if (!nested_resource_state || !parent_resource_type
+        || !parent_resource_type->imported_drop_callback
+        || !parent_resource_type->import_name)
+        return;
+
+    parent_import_name = parent_resource_type->import_name;
+
+    for (i = 0; i < nested_resource_state->type_count; i++) {
+        WASMComponentRuntimeResourceType *type_slot =
+            &nested_resource_state->types[i];
+        if (type_slot->kind == WASM_COMP_RUNTIME_RESOURCE_TYPE_IMPORTED
+            && type_slot->import_name
+            && strcmp(type_slot->import_name, parent_import_name) == 0
+            && !type_slot->imported_drop_callback) {
+            type_slot->imported_drop_callback =
+                parent_resource_type->imported_drop_callback;
+            type_slot->imported_drop_user_data =
+                parent_resource_type->imported_drop_user_data;
+            break;
+        }
+    }
+}
+
+static void
+propagate_imported_resource_drop_callbacks(
+    WASMComponentRuntimeResourceState *target_resource_state,
+    const WASMComponentRuntimeResourceState *source_resource_state)
+{
+    uint32 i;
+
+    if (!target_resource_state || !source_resource_state
+        || target_resource_state == source_resource_state)
+        return;
+
+    for (i = 0; i < source_resource_state->type_count; i++) {
+        const WASMComponentRuntimeResourceType *source_type =
+            &source_resource_state->types[i];
+        if (source_type->kind != WASM_COMP_RUNTIME_RESOURCE_TYPE_IMPORTED
+            || !source_type->imported_drop_callback || !source_type->import_name)
+            continue;
+        propagate_nested_imported_resource_drop_callback(target_resource_state,
+                                                         source_type);
+    }
+}
+
+static bool
+remap_resource_type_idx_for_state(
+    WASMComponentInstance *inst,
+    const WASMComponentRuntimeResourceState *source_resource_state,
+    const WASMComponentRuntimeResourceState *target_resource_state,
+    uint32 source_type_idx, uint32 *target_type_idx_out)
+{
+    const WASMComponentRuntimeResourceType *source_type;
+    uint32 i;
+
+    if (!target_type_idx_out)
+        return set_component_call_error(
+            inst, "component resource type remap target is null");
+
+    if (!source_resource_state || !target_resource_state
+        || source_resource_state == target_resource_state) {
+        *target_type_idx_out = source_type_idx;
+        return true;
+    }
+
+    source_type = wasm_component_resource_lookup_runtime_type_const(
+        source_resource_state, source_type_idx);
+    if (!source_type)
+        return set_component_call_error_fmt(
+            inst, "component resource type %u is unresolved in source state",
+            source_type_idx);
+
+    if (source_type->kind == WASM_COMP_RUNTIME_RESOURCE_TYPE_IMPORTED
+        && source_type->import_name) {
+        for (i = 0; i < target_resource_state->type_count; i++) {
+            const WASMComponentRuntimeResourceType *target_type =
+                wasm_component_resource_lookup_runtime_type_const(
+                    target_resource_state, i);
+            if (target_type
+                && target_type->kind == WASM_COMP_RUNTIME_RESOURCE_TYPE_IMPORTED
+                && target_type->import_name
+                && strcmp(target_type->import_name, source_type->import_name) == 0) {
+                *target_type_idx_out = i;
+                return true;
+            }
+        }
+
+        return set_component_call_error_fmt(
+            inst,
+            "component imported resource type \"%s\" could not be mapped into "
+            "the caller resource state",
+            source_type->import_name);
+    }
+
+    if (source_type_idx < target_resource_state->type_count) {
+        const WASMComponentRuntimeResourceType *target_type =
+            wasm_component_resource_lookup_runtime_type_const(
+                target_resource_state, source_type_idx);
+        if (target_type && target_type->kind == source_type->kind) {
+            *target_type_idx_out = source_type_idx;
+            return true;
+        }
+    }
+
+    return set_component_call_error_fmt(
+        inst,
+        "component resource type %u cannot be remapped across resource states",
+        source_type_idx);
 }
 
 static bool
@@ -1325,6 +1483,16 @@ resolve_nested_component_local_sort_idx(
             memset(out_ref, 0, sizeof(*out_ref));
             out_ref->type = WASM_COMP_RUNTIME_REF_COMPONENT;
             out_ref->of.component = bindings->components[sort_idx->idx];
+            return true;
+        case WASM_COMP_SORT_TYPE:
+            if (sort_idx->idx >= bindings->resource_type_count)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "nested component resource type index %u is out of bounds",
+                    sort_idx->idx);
+            memset(out_ref, 0, sizeof(*out_ref));
+            out_ref->type = WASM_COMP_RUNTIME_REF_RESOURCE_TYPE;
+            out_ref->of.resource_type = bindings->resource_types[sort_idx->idx];
             return true;
         default:
             return set_component_runtime_error_fmt(
@@ -4665,7 +4833,8 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
     wasm_runtime_clear_exception((WASMModuleInstanceCommon *)component_inst);
     call_ok = wasm_component_call_values_internal(
         component_inst, lowered_function->lowered_target, expected_result_count,
-        call_results, param_count, call_args, false);
+        call_results, param_count, call_args, false,
+        lowered_function->resource_state);
 
     if (!call_ok) {
         const char *component_exception =
@@ -12748,13 +12917,11 @@ call_component_canon_post_return(WASMComponentInstance *inst,
 }
 
 static bool
-wasm_component_call_values_internal(WASMComponentInstance *inst,
-                                    const WASMComponentRuntimeFunc *function,
-                                    uint32 num_results,
-                                    wasm_component_value_t *results,
-                                    uint32 num_args,
-                                    const wasm_component_value_t *args,
-                                    bool require_top_level_export)
+wasm_component_call_values_internal(
+    WASMComponentInstance *inst, const WASMComponentRuntimeFunc *function,
+    uint32 num_results, wasm_component_value_t *results, uint32 num_args,
+    const wasm_component_value_t *args, bool require_top_level_export,
+    const WASMComponentRuntimeResourceState *resource_state_override)
 {
     const WASMComponent *component =
         function && function->type_owner_component ? function->type_owner_component
@@ -12846,14 +13013,22 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
         wasm_val_t ignored = { 0 };
         char host_error_buf[128] = { 0 };
         uint32 host_param_count = 0;
-        const WASMComponentRuntimeResourceState *host_resource_state =
+        const WASMComponentRuntimeResourceState *type_resource_state =
             function->resource_state ? function->resource_state
                                      : inst->resource_state;
+        WASMComponentRuntimeResourceState *host_resource_state =
+            resource_state_override
+                ? (WASMComponentRuntimeResourceState *)resource_state_override
+                : (WASMComponentRuntimeResourceState *)type_resource_state;
 
         if (require_top_level_export && !function->is_top_level_export)
             return set_component_call_error(
                 inst, "component call only supports top-level exported host "
                       "component functions");
+
+        if (type_resource_state && host_resource_state)
+            propagate_imported_resource_drop_callbacks(host_resource_state,
+                                                       type_resource_state);
 
         if (!resolve_component_func_type(inst, function, "host component function",
                                          &component_type))
@@ -12946,6 +13121,8 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
             bool has_owned_resource_param = false;
             bool has_borrowed_resource_param = false;
             uint32 resource_type_idx = WASM_COMPONENT_RESOURCE_INVALID_TYPE_IDX;
+            uint32 mapped_resource_type_idx =
+                WASM_COMPONENT_RESOURCE_INVALID_TYPE_IDX;
 
             if (!resolve_component_canon_lift_value_shape(
                     component,
@@ -12965,12 +13142,12 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
             }
 
             if (!try_lookup_component_owned_resource_transfer_type(
-                    inst, host_resource_state, component,
+                    inst, type_resource_state, component,
                     component_type->params->params[i].value_type, "parameter", i,
                     &has_owned_resource_param, &type_info, &resource_type_idx)
                 || (!has_owned_resource_param
                     && !try_lookup_component_borrowed_resource_param_type(
-                        inst, host_resource_state, component,
+                        inst, type_resource_state, component,
                         component_type->params->params[i].value_type, "parameter", i,
                         &has_borrowed_resource_param, &type_info,
                         &resource_type_idx))
@@ -12980,6 +13157,11 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
                         component_type->params->params[i].value_type, "parameter",
                         i, true, true, true, false, &type_info, inst)))
                 goto host_import_param_fail;
+            if ((has_owned_resource_param || has_borrowed_resource_param)
+                && !remap_resource_type_idx_for_state(
+                    inst, type_resource_state, host_resource_state,
+                    resource_type_idx, &mapped_resource_type_idx))
+                goto host_import_param_fail;
 
             if (has_owned_resource_param) {
                 wasm_val_t handle_value = { 0 };
@@ -12988,7 +13170,7 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
                                                           "parameter", i,
                                                           &handle_value)
                     || !wasm_component_init_public_resource_value(
-                        inst, host_resource_state, resource_type_idx,
+                        inst, host_resource_state, mapped_resource_type_idx,
                         (uint32)handle_value.of.i32, &callback_args[i]))
                     goto host_import_param_fail;
                 continue;
@@ -13001,7 +13183,7 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
                                                           "parameter", i,
                                                           &handle_value)
                     || !wasm_component_init_public_borrowed_resource_value(
-                        inst, host_resource_state, resource_type_idx,
+                        inst, host_resource_state, mapped_resource_type_idx,
                         (uint32)handle_value.of.i32, &callback_args[i]))
                     goto host_import_param_fail;
                 continue;
@@ -13097,16 +13279,18 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
                 bool host_borrowed_resource_result = false;
                 uint32 result_resource_type_idx =
                     WASM_COMPONENT_RESOURCE_INVALID_TYPE_IDX;
+                uint32 mapped_result_resource_type_idx =
+                    WASM_COMPONENT_RESOURCE_INVALID_TYPE_IDX;
 
                 if (!try_lookup_component_owned_resource_transfer_type(
-                        inst, host_resource_state, component,
+                        inst, type_resource_state, component,
                         &component_type->results->results[result_i], "result",
                         result_i,
                         &host_owned_resource_result, &result_info,
                         &result_resource_type_idx)
                     || (!host_owned_resource_result
                         && !try_lookup_component_borrowed_resource_param_type(
-                            inst, host_resource_state, component,
+                            inst, type_resource_state, component,
                             &component_type->results->results[result_i], "result",
                             result_i,
                             &host_borrowed_resource_result, &result_info,
@@ -13117,6 +13301,14 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
                             component, &component_type->results->results[result_i],
                             "result", result_i, true, false, true, true,
                             &result_info, inst))) {
+                    wasm_component_value_destroy(&callback_results[result_i]);
+                    goto host_import_success_fail;
+                }
+                if ((host_owned_resource_result || host_borrowed_resource_result)
+                    && !remap_resource_type_idx_for_state(
+                        inst, type_resource_state, host_resource_state,
+                        result_resource_type_idx,
+                        &mapped_result_resource_type_idx)) {
                     wasm_component_value_destroy(&callback_results[result_i]);
                     goto host_import_success_fail;
                 }
@@ -13151,7 +13343,7 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
                              == WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_TRANSFERRED) {
                         if (resource_value->resource_state != host_resource_state
                             || resource_value->resource_type_idx
-                                   != result_resource_type_idx) {
+                                   != mapped_result_resource_type_idx) {
                             wasm_component_value_destroy(&callback_results[result_i]);
                             set_component_call_error(
                                 inst,
@@ -13173,14 +13365,16 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
                         handle_value.of.i32 = (int32)restored_handle;
                     }
                     else if (!wasm_component_promote_pending_imported_resource_result(
-                                  inst, host_resource_state, result_resource_type_idx,
+                                  inst, host_resource_state,
+                                  mapped_result_resource_type_idx,
                                   &callback_results[result_i], &handle_value)) {
                         wasm_component_value_destroy(&callback_results[result_i]);
                         goto host_import_success_fail;
                     }
                     else {
                         owned_result_handles[result_i] = (uint32)handle_value.of.i32;
-                        owned_result_type_idxs[result_i] = result_resource_type_idx;
+                        owned_result_type_idxs[result_i] =
+                            mapped_result_resource_type_idx;
                         owned_result_requires_rollback[result_i] = true;
                     }
 
@@ -13377,7 +13571,7 @@ host_import_cleanup_fail:
                       "lowered recursion cycle");
         return wasm_component_call_values_internal(
             inst, function->core_func_ref.of.lowered_function->lowered_target,
-            num_results, results, num_args, args, false);
+            num_results, results, num_args, args, false, NULL);
     }
 
     if (function->core_func_ref.type != WASM_COMP_CORE_RUNTIME_REF_FUNC
@@ -14316,7 +14510,8 @@ wasm_component_call_internal(WASMComponentInstance *inst,
                                                  expected_result_count
                                                      ? public_results
                                                      : NULL,
-                                                 num_args, public_args, false)) {
+                                                 num_args, public_args, false,
+                                                 NULL)) {
             for (uint32 j = 0; j < num_args; j++)
                 wasm_component_value_destroy(&public_args[j]);
             if (public_args != stack_public_args)
@@ -14494,7 +14689,8 @@ wasm_component_call_internal(WASMComponentInstance *inst,
                                                  expected_result_count
                                                      ? public_results
                                                      : NULL,
-                                                 num_args, public_args, false)) {
+                                                 num_args, public_args, false,
+                                                 NULL)) {
             for (uint32 j = 0; j < num_args; j++)
                 wasm_component_value_destroy(&public_args[j]);
             if (public_args != stack_public_args)
@@ -14654,7 +14850,8 @@ wasm_component_call_values(WASMComponentInstance *inst,
                            const wasm_component_value_t *args)
 {
     return wasm_component_call_values_internal(inst, function, num_results,
-                                               results, num_args, args, false);
+                                               results, num_args, args, false,
+                                               NULL);
 }
 
 bool
@@ -14855,7 +15052,7 @@ execute_component_start_section_with_public_values(
 
     if (!wasm_component_call_values_internal(inst, function, result_count,
                                              result_count ? public_results : NULL,
-                                             num_args, public_args, false)) {
+                                             num_args, public_args, false, NULL)) {
         destroy_component_public_values(public_results, result_count);
         if (public_results != stack_public_results)
             wasm_runtime_free(public_results);
@@ -15931,14 +16128,15 @@ count_nested_component_local_bindings(const WASMComponent *nested_component,
                                       uint32 *value_count,
                                       uint32 *instance_count,
                                       uint32 *component_count,
+                                      uint32 *resource_type_count,
                                       uint32 *owned_func_count,
                                       uint32 *owned_value_count,
                                       uint32 *owned_component_count,
                                       uint32 *owned_core_instance_count,
                                       uint32 *owned_lowered_func_count,
-                                      uint32 *owned_instance_count,
-                                      uint32 *export_count, char *error_buf,
-                                      uint32 error_buf_size)
+                                       uint32 *owned_instance_count,
+                                       uint32 *export_count, char *error_buf,
+                                       uint32 error_buf_size)
 {
     uint32 i;
 
@@ -15947,7 +16145,7 @@ count_nested_component_local_bindings(const WASMComponent *nested_component,
         = *instance_count = *component_count = *owned_func_count
         = *owned_value_count = *owned_component_count
         = *owned_core_instance_count = *owned_lowered_func_count
-        = *owned_instance_count = *export_count = 0;
+        = *owned_instance_count = *export_count = *resource_type_count = 0;
 
     for (i = 0; i < nested_component->section_count; i++) {
         const WASMComponentSection *section = &nested_component->sections[i];
@@ -15993,11 +16191,15 @@ count_nested_component_local_bindings(const WASMComponent *nested_component,
                             (*import_count)++;
                             (*component_count)++;
                             break;
+                        case WASM_COMP_EXTERN_TYPE:
+                            (*import_count)++;
+                            (*resource_type_count)++;
+                            break;
                         default:
                             return set_component_runtime_error_fmt(
                                 error_buf, error_buf_size,
                                 "nested component imports other than "
-                                "core_module/func/value/instance/component are "
+                                "core_module/func/value/instance/component/type are "
                                 "not supported yet");
                     }
                 }
@@ -16097,6 +16299,9 @@ count_nested_component_local_bindings(const WASMComponent *nested_component,
                             break;
                         case WASM_COMP_SORT_COMPONENT:
                             (*component_count)++;
+                            break;
+                        case WASM_COMP_SORT_TYPE:
+                            (*resource_type_count)++;
                             break;
                         default:
                             return set_component_runtime_error_fmt(
@@ -18492,6 +18697,13 @@ validate_component_import_binding_type(const WASMComponent *component,
                     import_name, NULL, find_component_type_count(component) + 1,
                     error_buf, error_buf_size);
             }
+        case WASM_COMP_EXTERN_TYPE:
+            if (ref.type != WASM_COMP_RUNTIME_REF_RESOURCE_TYPE)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "component import \"%s\" bound to the wrong runtime sort",
+                    import_name);
+            return true;
         default:
             return set_component_runtime_error_fmt(
                 error_buf, error_buf_size,
@@ -19304,7 +19516,7 @@ build_component_runtime_instance_from_component(
               owned_func_count = 0, owned_value_count = 0,
               owned_core_instance_count = 0,
               owned_lowered_func_count = 0, owned_instance_count = 0,
-              export_count = 0;
+              export_count = 0, resource_type_count = 0;
 
     memset(&bindings, 0, sizeof(bindings));
     runtime_inst->resource_state = wasm_component_resource_state_create(
@@ -19319,6 +19531,7 @@ build_component_runtime_instance_from_component(
             &bindings.core_func_capacity,
             &bindings.func_capacity, &bindings.value_capacity,
             &bindings.instance_capacity, &bindings.component_capacity,
+            &resource_type_count,
             &owned_func_count, &owned_value_count, &owned_component_count,
             &owned_core_instance_count, &owned_lowered_func_count,
             &owned_instance_count, &export_count,
@@ -19335,8 +19548,8 @@ build_component_runtime_instance_from_component(
             bindings.core_instance_capacity, bindings.core_memory_capacity,
             bindings.core_func_capacity,
             bindings.func_capacity, bindings.value_capacity,
-            bindings.instance_capacity, bindings.component_capacity, error_buf,
-            error_buf_size)
+            bindings.instance_capacity, bindings.component_capacity,
+            resource_type_count, error_buf, error_buf_size)
         || !alloc_component_runtime_array(
             (void **)&runtime_inst->owned_funcs, owned_func_count,
             sizeof(*runtime_inst->owned_funcs), error_buf, error_buf_size)
@@ -19437,10 +19650,21 @@ build_component_runtime_instance_from_component(
                             component, component_import,
                             resolved_imports[import_index],
                             error_buf, error_buf_size)
-                        || !append_nested_component_local_ref(
-                            &bindings, resolved_imports[import_index],
-                            error_buf, error_buf_size))
+                        || (component_import->extern_desc->type
+                                == WASM_COMP_EXTERN_TYPE
+                            ? !append_nested_component_local_resource_type(
+                                &bindings,
+                                resolved_imports[import_index].of.resource_type,
+                                error_buf, error_buf_size)
+                            : !append_nested_component_local_ref(
+                                &bindings, resolved_imports[import_index],
+                                error_buf, error_buf_size)))
                         goto fail;
+
+                    if (component_import->extern_desc->type == WASM_COMP_EXTERN_TYPE)
+                        propagate_nested_imported_resource_drop_callback(
+                            runtime_inst->resource_state,
+                            resolved_imports[import_index].of.resource_type);
 
                     import_index++;
                 }
