@@ -350,6 +350,11 @@ The executable Canonical ABI surface is currently limited to:
     mixed composite-result paths, including tuple/record mixed composite-param
     and mixed composite-result witnesses with nested `list<scalar>` /
     `list<string>` leaves
+  - nested child-core lowered calls into host-imported component functions whose
+    multi-result vectors stay within the tested scalar + UTF-8 string, scalar +
+    `list<scalar>`, or
+    `record{s32, string, list<scalar>} + s32` subset on the retptr-backed
+    result-area path
   - tested cross-component scalar, UTF-8 string, `list<string>`-parameter /
     `list<string>`-result, `list<u8>`-parameter / `list<u8>`-result, and
     `list<s32>`-parameter / `list<s32>`-result seams plus tested
@@ -364,7 +369,8 @@ The executable Canonical ABI surface is currently limited to:
   - positive top-level and nested direct child-core witnesses plus explicit
     failures for invalid UTF-8 input, omitted lower-side memory, and malformed
     result areas on the tested memory-backed paths
-- top-level host-defined component-function imports for the same supported subset
+- top-level host-defined component-function imports for the same supported subset,
+  including the tested lowered non-scalar multi-result host-import seams above
 
 Major Canonical ABI gaps remain:
 
@@ -506,18 +512,23 @@ Supported today:
 - materializing multiple start results when the start function is a
   canon-lifted multi-result function using the retptr-backed Canonical ABI
   result-area shape for the current supported scalar / UTF-8 string /
-  `list<scalar>` result-vector subset
+  `list<scalar>` / `list<string>` / tuple-record-leaf result-vector subset
 - materializing multiple start results when the start function is a
-  host-imported scalar-only multi-result component function
+  host-imported multi-result component function whose results stay within the
+  tested scalar-only or non-scalar `string + s32` / `list<scalar> + s32` /
+  `record{s32, string, list<scalar>} + s32` subset
 - parsing and validating multi-result component functypes, including start
   sections whose declared result count matches a multi-result functype
 
 Still missing:
 
-- non-scalar multi-result execution for host-imported component functions
-- multi-result execution for composite or resource results
+- broader start-section execution for non-scalar multi-result host-imported
+  component functions beyond the current tested `string + s32` /
+  `list<scalar> + s32` / `record{s32, string, list<scalar>} + s32` subset
+- host-import multi-result execution for broader composite/resource results
 - retptr-backed Canonical ABI multi-results beyond the current scalar /
-  UTF-8 string / `list<scalar>` result-vector subset
+  UTF-8 string / `list<scalar>` / `list<string>` / tuple-record-leaf
+  result-vector subset
 - Canonical ABI beyond the current supported public-value subset
 - the more complete execution space needed for start-heavy real-world components
 

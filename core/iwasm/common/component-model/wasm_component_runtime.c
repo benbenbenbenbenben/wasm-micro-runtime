@@ -203,6 +203,15 @@ materialize_component_public_composite_result_to_memory(
     WASMModuleInstanceCommon *caller_module_inst, uint32 result_area_ptr);
 
 static bool
+write_component_public_composite_result_to_memory(
+    WASMComponentInstance *inst, const WASMComponent *component,
+    const WASMComponentValueType *value_type, uint32 result_index,
+    const uint8 *data, uint32 byte_size, uint32 *data_offset_io,
+    WASMModuleInstanceCommon *caller_module_inst, uint32 result_area_ptr,
+    uint8 *result_area_bytes, uint32 ret_area_size, uint32 field_offset,
+    uint32 *payload_offset_io);
+
+static bool
 validate_host_component_public_composite_result_value(
     WASMComponentInstance *inst, const WASMComponent *component,
     const WASMComponentValueType *value_type, const wasm_component_value_t *value,
@@ -2381,6 +2390,23 @@ resolve_lowered_import_component_type(
 }
 
 static bool
+compute_component_canon_abi_result_vector_layout(
+    WASMComponentInstance *inst, const WASMComponent *component,
+    const WASMComponentValueType *result_types, uint32 result_count,
+    uint32 *size_out, uint32 *align_out, uint32 *offsets_out,
+    uint32 *result_sizes_out, bool *has_string_leaf_out,
+    bool *has_list_scalar_leaf_out, bool *has_list_string_leaf_out);
+
+static bool
+store_component_canon_memory_scalar_value(WASMComponentInstance *inst,
+                                          uint8 prim_type,
+                                          const wasm_val_t *value,
+                                          uint8 *out_bytes, uint32 out_size);
+
+static void
+destroy_component_public_values(wasm_component_value_t *values, uint32 count);
+
+static bool
 validate_lowered_import_signature(
     const WASMComponentRuntimeFunc *lowered_function,
     const WASMFuncType *expected_type, char *error_buf, uint32 error_buf_size)
@@ -2391,6 +2417,7 @@ validate_lowered_import_signature(
     uint32 core_param_index = 0, expected_result_count, total_flat_param_count = 0, i;
     bool needs_memory = false;
     bool needs_string = false;
+    bool uses_multi_result_area = false;
     bool has_memory_opt = false;
     WASMComponentRuntimeStringEncoding string_encoding =
         WASM_COMP_RUNTIME_STRING_ENCODING_NONE;
@@ -2608,12 +2635,73 @@ validate_lowered_import_signature(
     }
 
     expected_result_count = get_component_func_result_count(component_type);
-    if (expected_result_count > 1)
-        return set_component_runtime_error_fmt(
-            error_buf, error_buf_size,
-            "component canon lower direct core-call bindings do not yet support "
-            "multi-result component functions");
-    if (expected_result_count == 1) {
+    if (expected_result_count > 1) {
+        uint32 result_vector_size = 0, result_vector_align = 1;
+        bool has_string_leaf = false;
+        bool has_list_scalar_leaf = false;
+        bool has_list_string_leaf = false;
+
+        for (i = 0; i < expected_result_count; i++) {
+            WASMComponentCanonLiftValueShape shape;
+            WASMComponentCanonLiftValueInfo type_info;
+
+            wasm_runtime_clear_exception((WASMModuleInstanceCommon *)component_inst);
+            if (!resolve_component_canon_lift_value_shape(
+                    component, &component_type->results->results[i], "result", i,
+                    &shape, component_inst))
+                return set_component_runtime_error_from_exception(
+                    component_inst, error_buf, error_buf_size,
+                    "component canon lower result type resolution failed");
+
+            if (!shape.is_primitive && shape.def_type
+                && (shape.def_type->tag == WASM_COMP_DEF_VAL_RECORD
+                    || shape.def_type->tag == WASM_COMP_DEF_VAL_TUPLE))
+                continue;
+
+            wasm_runtime_clear_exception((WASMModuleInstanceCommon *)component_inst);
+            if (!lookup_component_canon_lift_value_type(
+                    component, &component_type->results->results[i], "result", i,
+                    true, false, true, true, &type_info, component_inst))
+                return set_component_runtime_error_from_exception(
+                    component_inst, error_buf, error_buf_size,
+                    "component canon lower result type resolution failed");
+
+            if (type_info.kind != WASM_COMP_CANON_LIFT_VALUE_SCALAR
+                && type_info.kind != WASM_COMP_CANON_LIFT_VALUE_STRING
+                && type_info.kind != WASM_COMP_CANON_LIFT_VALUE_LIST_SCALAR
+                && type_info.kind != WASM_COMP_CANON_LIFT_VALUE_LIST_STRING)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "component canon lower direct core-call bindings currently "
+                    "support only scalar, string, list<scalar>, list<string>, "
+                    "or tuple/record multi-results");
+        }
+
+        wasm_runtime_clear_exception((WASMModuleInstanceCommon *)component_inst);
+        if (!compute_component_canon_abi_result_vector_layout(
+                component_inst, component, component_type->results->results,
+                expected_result_count, &result_vector_size, &result_vector_align,
+                NULL, NULL, &has_string_leaf, &has_list_scalar_leaf,
+                &has_list_string_leaf))
+            return set_component_runtime_error_from_exception(
+                component_inst, error_buf, error_buf_size,
+                "component canon lower result type resolution failed");
+
+        if (core_param_index + 1 != expected_type->param_count
+            || expected_type->result_count != 0
+            || expected_type->types[core_param_index] != VALUE_TYPE_I32)
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                "core import multi-result signature does not match the lowered "
+                "component function signature");
+
+        (void)result_vector_size;
+        (void)result_vector_align;
+        needs_memory = true;
+        needs_string = needs_string || has_string_leaf || has_list_string_leaf;
+        uses_multi_result_area = true;
+    }
+    else if (expected_result_count == 1) {
         WASMComponentCanonLiftValueShape shape;
         WASMComponentCanonLiftValueInfo type_info;
 
@@ -2764,7 +2852,10 @@ validate_lowered_result_done:
     if (needs_memory && !has_memory_opt)
         return set_component_runtime_error_fmt(
             error_buf, error_buf_size,
-            needs_string
+            uses_multi_result_area
+                ? "component canon lower direct core-call bindings require "
+                  "memory for multi-result Canonical ABI"
+            : needs_string
                 ? "component canon lower direct core-call bindings require "
                   "memory for string Canonical ABI"
                 : "component canon lower direct core-call bindings require "
@@ -3116,6 +3207,499 @@ component_resource_builtin_trampoline(WASMModuleInstanceCommon *caller_module_in
     }
 }
 
+typedef struct LoweredImportMultiResultDecoded {
+    wasm_val_t scalar;
+    const uint8 *result_bytes;
+    uint32 byte_count;
+    uint32 result_length;
+    uint32 table_byte_count;
+    uint32 string_payload_bytes;
+} LoweredImportMultiResultDecoded;
+
+static bool
+materialize_lowered_import_multi_results(
+    WASMComponentInstance *component_inst, const WASMComponent *component,
+    WASMComponentFuncType *component_type,
+    WASMComponentRuntimeStringEncoding lower_string_encoding,
+    wasm_component_value_t *results, uint32 result_count,
+    WASMModuleInstanceCommon *caller_module_inst, uint32 result_area_ptr)
+{
+    WASMComponentCanonLiftValueInfo stack_type_infos[16];
+    LoweredImportMultiResultDecoded stack_decoded[16];
+    uint32 stack_offsets[16];
+    uint32 stack_sizes[16];
+    WASMComponentCanonLiftValueInfo *type_infos = stack_type_infos;
+    LoweredImportMultiResultDecoded *decoded = stack_decoded;
+    uint32 *result_offsets = stack_offsets;
+    uint32 *result_sizes = stack_sizes;
+    uint32 result_vector_size = 0, result_vector_align = 1, payload_cursor;
+    bool has_string_leaf = false;
+    bool has_list_scalar_leaf = false;
+    bool has_list_string_leaf = false;
+    bool ok = false;
+
+    if (result_count == 0)
+        return true;
+
+    if (result_count > 16) {
+        type_infos = wasm_runtime_malloc(sizeof(*type_infos) * result_count);
+        decoded = wasm_runtime_malloc(sizeof(*decoded) * result_count);
+        result_offsets = wasm_runtime_malloc(sizeof(*result_offsets) * result_count);
+        result_sizes = wasm_runtime_malloc(sizeof(*result_sizes) * result_count);
+        if (!type_infos || !decoded || !result_offsets || !result_sizes) {
+            wasm_runtime_set_exception(
+                caller_module_inst,
+                "component lowered core-call trampoline could not allocate "
+                "multi-result metadata");
+            goto cleanup;
+        }
+    }
+
+    memset(type_infos, 0, sizeof(*type_infos) * result_count);
+    memset(decoded, 0, sizeof(*decoded) * result_count);
+
+    wasm_runtime_clear_exception((WASMModuleInstanceCommon *)component_inst);
+    if (!compute_component_canon_abi_result_vector_layout(
+            component_inst, component, component_type->results->results, result_count,
+            &result_vector_size, &result_vector_align, result_offsets, result_sizes,
+            &has_string_leaf, &has_list_scalar_leaf, &has_list_string_leaf)) {
+        const char *component_exception =
+            wasm_runtime_get_exception((WASMModuleInstanceCommon *)component_inst);
+        wasm_runtime_set_exception(
+            caller_module_inst,
+            component_exception
+                ? component_exception
+                : "component lowered core-call trampoline could not resolve the "
+                  "multi-result Canonical ABI layout");
+        wasm_runtime_clear_exception((WASMModuleInstanceCommon *)component_inst);
+        goto cleanup;
+    }
+    (void)has_string_leaf;
+    (void)has_list_scalar_leaf;
+    (void)has_list_string_leaf;
+
+    if ((result_area_ptr & (result_vector_align - 1)) != 0
+        || !wasm_runtime_validate_app_addr(caller_module_inst, result_area_ptr,
+                                           result_vector_size)) {
+        wasm_runtime_set_exception(caller_module_inst, "out of bounds memory access");
+        goto cleanup;
+    }
+
+    for (uint32 i = 0; i < result_count; i++) {
+        WASMComponentCanonLiftValueShape shape = { 0 };
+
+        wasm_runtime_clear_exception((WASMModuleInstanceCommon *)component_inst);
+        if (!resolve_component_canon_lift_value_shape(
+                component, &component_type->results->results[i], "result", i, &shape,
+                component_inst)) {
+            const char *component_exception = wasm_runtime_get_exception(
+                (WASMModuleInstanceCommon *)component_inst);
+            wasm_runtime_set_exception(
+                caller_module_inst,
+                component_exception
+                    ? component_exception
+                    : "component lowered core-call trampoline could not resolve "
+                      "the component result type");
+            wasm_runtime_clear_exception((WASMModuleInstanceCommon *)component_inst);
+            goto cleanup;
+        }
+
+        if (!shape.is_primitive && shape.def_type
+            && (shape.def_type->tag == WASM_COMP_DEF_VAL_RECORD
+                || shape.def_type->tag == WASM_COMP_DEF_VAL_TUPLE))
+            continue;
+
+        wasm_runtime_clear_exception((WASMModuleInstanceCommon *)component_inst);
+        if (!lookup_component_canon_lift_value_type(
+                component, &component_type->results->results[i], "result", i, true,
+                false, true, true, &type_infos[i], component_inst)) {
+            const char *component_exception = wasm_runtime_get_exception(
+                (WASMModuleInstanceCommon *)component_inst);
+            wasm_runtime_set_exception(
+                caller_module_inst,
+                component_exception
+                    ? component_exception
+                    : "component lowered core-call trampoline could not resolve "
+                      "the component result type");
+            wasm_runtime_clear_exception((WASMModuleInstanceCommon *)component_inst);
+            goto cleanup;
+        }
+
+        switch (type_infos[i].kind) {
+            case WASM_COMP_CANON_LIFT_VALUE_SCALAR:
+                if (!decode_component_public_scalar_value(component_inst, &results[i],
+                                                          &type_infos[i], "result", i,
+                                                          &decoded[i].scalar)) {
+                    const char *component_exception = wasm_runtime_get_exception(
+                        (WASMModuleInstanceCommon *)component_inst);
+                    wasm_runtime_set_exception(
+                        caller_module_inst,
+                        component_exception
+                            ? component_exception
+                            : "component lowered core-call trampoline could not "
+                              "decode the component result");
+                    wasm_runtime_clear_exception(
+                        (WASMModuleInstanceCommon *)component_inst);
+                    goto cleanup;
+                }
+                break;
+
+            case WASM_COMP_CANON_LIFT_VALUE_STRING:
+                if (lower_string_encoding != WASM_COMP_RUNTIME_STRING_ENCODING_UTF8
+                    || !decode_component_public_string_value(
+                        component_inst, &results[i], &type_infos[i], "result", i,
+                        &decoded[i].result_bytes, &decoded[i].result_length)) {
+                    const char *component_exception = wasm_runtime_get_exception(
+                        (WASMModuleInstanceCommon *)component_inst);
+                    wasm_runtime_set_exception(
+                        caller_module_inst,
+                        component_exception
+                            ? component_exception
+                            : "component lowered core-call trampoline could not "
+                              "decode the component result");
+                    wasm_runtime_clear_exception(
+                        (WASMModuleInstanceCommon *)component_inst);
+                    goto cleanup;
+                }
+                decoded[i].byte_count = decoded[i].result_length;
+                break;
+
+            case WASM_COMP_CANON_LIFT_VALUE_LIST_SCALAR: {
+                uint32 element_size =
+                    component_scalar_prim_byte_size(type_infos[i].prim_type);
+
+                decoded[i].byte_count = results[i].byte_size;
+                if (element_size == 0
+                    || (decoded[i].byte_count % element_size) != 0) {
+                    wasm_runtime_set_exception(
+                        caller_module_inst,
+                        "component lowered core-call trampoline list<scalar> "
+                        "result byte size is invalid");
+                    goto cleanup;
+                }
+                decoded[i].result_length = decoded[i].byte_count / element_size;
+                decoded[i].result_bytes =
+                    wasm_component_value_get_data(&results[i]);
+                if (decoded[i].byte_count > 0 && !decoded[i].result_bytes) {
+                    wasm_runtime_set_exception(
+                        caller_module_inst,
+                        "component lowered core-call trampoline could not access "
+                        "the list<scalar> result bytes");
+                    goto cleanup;
+                }
+                break;
+            }
+
+            case WASM_COMP_CANON_LIFT_VALUE_LIST_STRING: {
+                const uint8 *cursor;
+                const uint8 *end;
+                uint64 decoded_count = 0;
+                size_t count_len = 0;
+                bh_leb_read_status_t status;
+
+                if (lower_string_encoding != WASM_COMP_RUNTIME_STRING_ENCODING_UTF8
+                    || !decode_component_public_list_string_value(
+                        component_inst, &results[i], &type_infos[i], "result", i,
+                        &decoded[i].result_bytes, &decoded[i].byte_count,
+                        &decoded[i].result_length)) {
+                    const char *component_exception = wasm_runtime_get_exception(
+                        (WASMModuleInstanceCommon *)component_inst);
+                    wasm_runtime_set_exception(
+                        caller_module_inst,
+                        component_exception
+                            ? component_exception
+                            : "component lowered core-call trampoline could not "
+                              "decode the component result");
+                    wasm_runtime_clear_exception(
+                        (WASMModuleInstanceCommon *)component_inst);
+                    goto cleanup;
+                }
+
+                cursor = decoded[i].result_bytes;
+                end = decoded[i].result_bytes + decoded[i].byte_count;
+                status =
+                    bh_leb_read(cursor, end, 32, false, &decoded_count, &count_len);
+                if (status != BH_LEB_READ_SUCCESS
+                    || decoded_count != decoded[i].result_length
+                    || count_len > decoded[i].byte_count
+                    || !compute_list_scalar_byte_count(decoded[i].result_length, 8,
+                                                       &decoded[i].table_byte_count)) {
+                    wasm_runtime_set_exception(
+                        caller_module_inst,
+                        "component lowered core-call trampoline list<string> "
+                        "result is malformed");
+                    goto cleanup;
+                }
+
+                cursor += count_len;
+                for (uint32 element_index = 0;
+                     element_index < decoded[i].result_length; element_index++) {
+                    uint64 string_len = 0;
+                    size_t len_len = 0;
+
+                    status = bh_leb_read(cursor, end, 32, false, &string_len,
+                                         &len_len);
+                    if (status != BH_LEB_READ_SUCCESS || string_len > UINT32_MAX
+                        || len_len > (size_t)(end - cursor)
+                        || string_len > (uint64)(end - cursor - len_len)
+                        || decoded[i].string_payload_bytes
+                               > UINT32_MAX - (uint32)string_len) {
+                        wasm_runtime_set_exception(
+                            caller_module_inst,
+                            "component lowered core-call trampoline list<string> "
+                            "result is malformed");
+                        goto cleanup;
+                    }
+                    cursor += len_len + (uint32)string_len;
+                    decoded[i].string_payload_bytes += (uint32)string_len;
+                }
+                break;
+            }
+
+            default:
+                wasm_runtime_set_exception(
+                    caller_module_inst,
+                    "component lowered core-call trampoline currently supports "
+                    "only scalar, string, list<scalar>, list<string>, or "
+                    "tuple/record multi-results");
+                goto cleanup;
+        }
+    }
+
+    payload_cursor = result_area_ptr + result_vector_size;
+    for (uint32 i = 0; i < result_count; i++) {
+            uint8 *result_slot = wasm_runtime_addr_app_to_native(
+                caller_module_inst, result_area_ptr + result_offsets[i]);
+            uint32 payload_ptr = 0;
+            WASMComponentCanonLiftValueShape shape = { 0 };
+
+            if (!result_slot) {
+                wasm_runtime_set_exception(caller_module_inst,
+                                           "out of bounds memory access");
+                goto cleanup;
+            }
+
+            wasm_runtime_clear_exception((WASMModuleInstanceCommon *)component_inst);
+            if (!resolve_component_canon_lift_value_shape(
+                    component, &component_type->results->results[i], "result", i,
+                    &shape, component_inst)) {
+                const char *component_exception = wasm_runtime_get_exception(
+                    (WASMModuleInstanceCommon *)component_inst);
+                wasm_runtime_set_exception(
+                    caller_module_inst,
+                    component_exception
+                        ? component_exception
+                        : "component lowered core-call trampoline could not "
+                          "resolve the component result type");
+                wasm_runtime_clear_exception(
+                    (WASMModuleInstanceCommon *)component_inst);
+                goto cleanup;
+            }
+
+            if (!shape.is_primitive && shape.def_type
+                && (shape.def_type->tag == WASM_COMP_DEF_VAL_RECORD
+                    || shape.def_type->tag == WASM_COMP_DEF_VAL_TUPLE)) {
+                const WASMComponentValueType *result_type =
+                    &component_type->results->results[i];
+                const uint8 *data = wasm_component_value_get_data(&results[i]);
+                uint8 *result_area_bytes = wasm_runtime_addr_app_to_native(
+                    caller_module_inst, result_area_ptr);
+                uint32 data_offset = 0;
+                uint32 payload_offset = payload_cursor - result_area_ptr;
+
+                if (results[i].type.kind != WASM_COMPONENT_VALUE_TYPE_DEFINED) {
+                    wasm_runtime_set_exception(
+                        caller_module_inst,
+                        "component lowered core-call trampoline expected a "
+                        "defined composite multi-result");
+                    goto cleanup;
+                }
+                if (results[i].byte_size > 0 && !data) {
+                    wasm_runtime_set_exception(
+                        caller_module_inst,
+                        "component lowered core-call trampoline composite "
+                        "multi-result is missing backing bytes");
+                    goto cleanup;
+                }
+
+                memset(result_slot, 0, result_sizes[i]);
+                if (!write_component_public_composite_result_to_memory(
+                        component_inst, component, result_type, i, data,
+                        results[i].byte_size, &data_offset, caller_module_inst,
+                        result_area_ptr, result_area_bytes, result_vector_size,
+                        result_offsets[i], &payload_offset)) {
+                    const char *component_exception = wasm_runtime_get_exception(
+                        (WASMModuleInstanceCommon *)component_inst);
+                    if (component_exception) {
+                        wasm_runtime_set_exception(caller_module_inst,
+                                                   component_exception);
+                        wasm_runtime_clear_exception(
+                            (WASMModuleInstanceCommon *)component_inst);
+                    }
+                    goto cleanup;
+                }
+
+                if (data_offset != results[i].byte_size) {
+                    wasm_runtime_set_exception(
+                        caller_module_inst,
+                        "component lowered core-call trampoline composite "
+                        "multi-result contains trailing bytes");
+                    goto cleanup;
+                }
+
+                payload_cursor = result_area_ptr + payload_offset;
+                continue;
+            }
+
+        switch (type_infos[i].kind) {
+            case WASM_COMP_CANON_LIFT_VALUE_SCALAR:
+                if (!store_component_canon_memory_scalar_value(
+                        component_inst, type_infos[i].prim_type, &decoded[i].scalar,
+                        result_slot, result_sizes[i])) {
+                    const char *component_exception = wasm_runtime_get_exception(
+                        (WASMModuleInstanceCommon *)component_inst);
+                    wasm_runtime_set_exception(
+                        caller_module_inst,
+                        component_exception
+                            ? component_exception
+                            : "component lowered core-call trampoline could not "
+                              "materialize the component result");
+                    wasm_runtime_clear_exception(
+                        (WASMModuleInstanceCommon *)component_inst);
+                    goto cleanup;
+                }
+                break;
+
+            case WASM_COMP_CANON_LIFT_VALUE_STRING:
+            case WASM_COMP_CANON_LIFT_VALUE_LIST_SCALAR:
+                if (decoded[i].byte_count > 0) {
+                    uint8 *payload_bytes;
+
+                    if (payload_cursor > UINT32_MAX - decoded[i].byte_count
+                        || !wasm_runtime_validate_app_addr(
+                            caller_module_inst, payload_cursor,
+                            decoded[i].byte_count)) {
+                        wasm_runtime_set_exception(caller_module_inst,
+                                                   "out of bounds memory access");
+                        goto cleanup;
+                    }
+
+                    payload_bytes = wasm_runtime_addr_app_to_native(
+                        caller_module_inst, payload_cursor);
+                    if (!payload_bytes) {
+                        wasm_runtime_set_exception(caller_module_inst,
+                                                   "out of bounds memory access");
+                        goto cleanup;
+                    }
+
+                    memcpy(payload_bytes, decoded[i].result_bytes,
+                           decoded[i].byte_count);
+                    payload_ptr = payload_cursor;
+                    payload_cursor += decoded[i].byte_count;
+                }
+
+                bh_memcpy_s(result_slot, sizeof(uint32), &payload_ptr,
+                            sizeof(uint32));
+                bh_memcpy_s(result_slot + sizeof(uint32), sizeof(uint32),
+                            &decoded[i].result_length, sizeof(uint32));
+                break;
+
+            case WASM_COMP_CANON_LIFT_VALUE_LIST_STRING:
+                if (decoded[i].table_byte_count > 0
+                    || decoded[i].string_payload_bytes > 0) {
+                    const uint8 *cursor = decoded[i].result_bytes;
+                    const uint8 *end = decoded[i].result_bytes + decoded[i].byte_count;
+                    uint8 *payload_bytes;
+                    uint32 string_cursor;
+                    uint64 ignored_count = 0;
+                    size_t count_len = 0;
+
+                    if (payload_cursor > UINT32_MAX - decoded[i].table_byte_count
+                        || payload_cursor + decoded[i].table_byte_count
+                               > UINT32_MAX - decoded[i].string_payload_bytes
+                        || !wasm_runtime_validate_app_addr(
+                            caller_module_inst, payload_cursor,
+                            decoded[i].table_byte_count
+                                + decoded[i].string_payload_bytes)) {
+                        wasm_runtime_set_exception(caller_module_inst,
+                                                   "out of bounds memory access");
+                        goto cleanup;
+                    }
+
+                    payload_bytes = wasm_runtime_addr_app_to_native(
+                        caller_module_inst, payload_cursor);
+                    if (!payload_bytes) {
+                        wasm_runtime_set_exception(caller_module_inst,
+                                                   "out of bounds memory access");
+                        goto cleanup;
+                    }
+
+                    (void)bh_leb_read(cursor, end, 32, false, &ignored_count,
+                                      &count_len);
+                    cursor += count_len;
+                    string_cursor = payload_cursor + decoded[i].table_byte_count;
+                    payload_ptr = payload_cursor;
+                    for (uint32 element_index = 0;
+                         element_index < decoded[i].result_length; element_index++) {
+                        uint64 string_len = 0;
+                        size_t len_len = 0;
+                        uint32 string_ptr = 0;
+                        uint32 string_len32;
+
+                        (void)bh_leb_read(cursor, end, 32, false, &string_len,
+                                          &len_len);
+                        cursor += len_len;
+                        string_len32 = (uint32)string_len;
+                        if (string_len32 > 0) {
+                            string_ptr = string_cursor;
+                            memcpy(wasm_runtime_addr_app_to_native(
+                                       caller_module_inst, string_ptr),
+                                   cursor, string_len32);
+                            string_cursor += string_len32;
+                        }
+
+                        bh_memcpy_s(payload_bytes + ((uint64)element_index * 8),
+                                    sizeof(uint32), &string_ptr,
+                                    sizeof(uint32));
+                        bh_memcpy_s(payload_bytes + ((uint64)element_index * 8) + 4,
+                                    sizeof(uint32), &string_len32,
+                                    sizeof(uint32));
+                        cursor += string_len32;
+                    }
+                    payload_cursor += decoded[i].table_byte_count
+                                      + decoded[i].string_payload_bytes;
+                }
+
+                bh_memcpy_s(result_slot, sizeof(uint32), &payload_ptr,
+                            sizeof(uint32));
+                bh_memcpy_s(result_slot + sizeof(uint32), sizeof(uint32),
+                            &decoded[i].result_length, sizeof(uint32));
+                break;
+
+            default:
+                wasm_runtime_set_exception(
+                    caller_module_inst,
+                    "component lowered core-call trampoline currently supports "
+                    "only scalar, string, list<scalar>, list<string>, or "
+                    "tuple/record multi-results");
+                goto cleanup;
+        }
+    }
+
+    ok = true;
+
+cleanup:
+    if (type_infos != stack_type_infos)
+        wasm_runtime_free(type_infos);
+    if (decoded != stack_decoded)
+        wasm_runtime_free(decoded);
+    if (result_offsets != stack_offsets)
+        wasm_runtime_free(result_offsets);
+    if (result_sizes != stack_sizes)
+        wasm_runtime_free(result_sizes);
+    return ok;
+}
+
 static void
 component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
 {
@@ -3127,8 +3711,9 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
     const WASMComponent *component;
     WASMComponentFuncType *component_type = NULL;
     wasm_component_value_t stack_args[16];
-    wasm_component_value_t stack_results[1];
+    wasm_component_value_t stack_results[16];
     wasm_component_value_t *call_args = stack_args;
+    wasm_component_value_t *call_results = stack_results;
     uint32 stack_borrow_arg_caller_handles[16];
     uint32 *borrow_arg_caller_handles = stack_borrow_arg_caller_handles;
     uint32 param_count, expected_result_count, core_param_index = 0, i;
@@ -3198,7 +3783,7 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
     }
 
     expected_result_count = get_component_func_result_count(component_type);
-    if (func_type->result_count > 1 || expected_result_count > 1) {
+    if (func_type->result_count > 1) {
         wasm_runtime_set_exception(
             caller_module_inst,
             "component lowered core-call trampoline currently supports at most "
@@ -3226,7 +3811,16 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
         }
     }
     memset(call_args, 0, sizeof(wasm_component_value_t) * param_count);
-    memset(stack_results, 0, sizeof(stack_results));
+    if (expected_result_count > sizeof(stack_results) / sizeof(stack_results[0])) {
+        if (call_args != stack_args)
+            wasm_runtime_free(call_args);
+        wasm_runtime_set_exception(
+            caller_module_inst,
+            "component lowered core-call trampoline currently supports at most "
+            "16 component results");
+        return;
+    }
+    memset(call_results, 0, sizeof(wasm_component_value_t) * expected_result_count);
     if (param_count > sizeof(stack_borrow_arg_caller_handles)
                           / sizeof(stack_borrow_arg_caller_handles[0])) {
         borrow_arg_caller_handles =
@@ -3243,7 +3837,10 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
     }
     memset(borrow_arg_caller_handles, 0, sizeof(uint32) * param_count);
 
-    if (expected_result_count == 1) {
+    if (expected_result_count > 1) {
+        expects_memory_result_ptr = true;
+    }
+    else if (expected_result_count == 1) {
         if (!resolve_component_canon_lift_value_shape(
                 component, component_type->results->results, "result", 0,
                 &result_shape, component_inst)) {
@@ -3814,7 +4411,7 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
     wasm_runtime_clear_exception((WASMModuleInstanceCommon *)component_inst);
     call_ok = wasm_component_call_values_internal(
         component_inst, lowered_function->lowered_target, expected_result_count,
-        stack_results, param_count, call_args, false);
+        call_results, param_count, call_args, false);
 
     if (!call_ok) {
         const char *component_exception =
@@ -3839,6 +4436,48 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
             wasm_runtime_free(call_args);
         if (borrow_arg_caller_handles != stack_borrow_arg_caller_handles)
             wasm_runtime_free(borrow_arg_caller_handles);
+    }
+
+    if (expected_result_count > 1) {
+        uint32 result_area_ptr = (uint32)raw_args[core_param_index];
+
+        if (has_borrowed_resource_result) {
+            destroy_component_public_values(call_results, expected_result_count);
+            wasm_runtime_set_exception(
+                caller_module_inst,
+                "component lowered core-call trampoline does not support "
+                "borrowed resource multi-results");
+            return;
+        }
+
+        if (func_type->result_count != 0 || core_param_index >= func_type->param_count) {
+            destroy_component_public_values(call_results, expected_result_count);
+            wasm_runtime_set_exception(
+                caller_module_inst,
+                "component lowered core-call trampoline multi-results must use "
+                "an i32 return-area pointer parameter");
+            return;
+        }
+
+        if (attachment->canon_memory_ref.type != WASM_COMP_CORE_RUNTIME_REF_MEMORY) {
+            destroy_component_public_values(call_results, expected_result_count);
+            wasm_runtime_set_exception(
+                caller_module_inst,
+                "component lowered core-call trampoline could not resolve the "
+                "caller memory");
+            return;
+        }
+
+        if (!materialize_lowered_import_multi_results(
+                component_inst, component, component_type, lower_string_encoding,
+                call_results, expected_result_count, caller_module_inst,
+                result_area_ptr)) {
+            destroy_component_public_values(call_results, expected_result_count);
+            return;
+        }
+
+        destroy_component_public_values(call_results, expected_result_count);
+        return;
     }
 
     if (has_result_type && !has_composite_memory_result
@@ -5920,8 +6559,8 @@ validate_component_host_import_value_type(
                             !strcmp(position, "result")
                                 ? "host component import \"%s\" result %u only "
                                   "supports tuple/record results with scalar, "
-                                  "UTF-8 string, or variable-length list<scalar> "
-                                  "leaves"
+                                  "UTF-8 string, or variable-length "
+                                  "list<scalar>/list<string> leaves"
                                 : "host component import \"%s\" parameter %u "
                                   "only supports tuple/record parameters with "
                                   "scalar leaves",
@@ -6055,22 +6694,33 @@ validate_component_host_import_func_type(WASMComponentInstance *inst,
     if (func_type->results && func_type->results->results) {
         if (func_type->results->count > 1) {
             for (i = 0; i < func_type->results->count; i++) {
-                bool is_primitive_result = false;
-                uint8 result_prim_type = 0;
+                bool is_string = false;
+                bool is_list_scalar = false;
+                bool is_composite = false;
+                bool is_owned_resource = false;
+                bool is_borrowed_resource = false;
 
-                if (!resolve_component_runtime_primitive_type(
-                        component, &func_type->results->results[i],
-                        &is_primitive_result, &result_prim_type, error_buf,
+                if (!validate_component_host_import_value_type(
+                        component, &func_type->results->results[i], import_name,
+                        "result", i, &is_string, &is_list_scalar, &is_composite,
+                        &is_owned_resource, &is_borrowed_resource, error_buf,
                         error_buf_size))
                     return false;
 
-                if (!is_primitive_result
-                    || result_prim_type == WASM_COMP_PRIMVAL_STRING)
+                if (is_owned_resource || is_borrowed_resource)
                     return set_component_runtime_error_fmt(
                         error_buf, error_buf_size,
-                        "host component import \"%s\" only supports scalar "
+                        "host component import \"%s\" only supports scalar, "
+                        "string, list<scalar>, list<string>, or tuple/record "
                         "multi-result signatures",
                         import_name);
+
+                if (is_string)
+                    function->has_string_result = true;
+                if (is_list_scalar)
+                    function->has_list_scalar_result = true;
+                if (is_composite)
+                    function->has_composite_result = true;
             }
             return true;
         }
@@ -6448,13 +7098,15 @@ resolve_component_canon_lift_abi(WASMComponentInstance *inst,
         }
     }
 
-    if (func_type->results && func_type->results->results) {
+        if (func_type->results && func_type->results->results) {
         if (func_type->results->count > 1) {
             for (i = 0; i < func_type->results->count; i++) {
                 bool is_primitive_result = false;
+                bool is_composite_result = false;
                 uint8 result_prim_type = 0;
                 bool is_string_result = false;
                 bool is_list_scalar_result = false;
+                bool is_list_string_result = false;
 
                 if (!resolve_component_runtime_primitive_type(
                         component, &func_type->results->results[i],
@@ -6466,11 +7118,67 @@ resolve_component_canon_lift_abi(WASMComponentInstance *inst,
                     && result_prim_type != WASM_COMP_PRIMVAL_STRING)
                     continue;
 
+                if (!is_primitive_result
+                    && func_type->results->results[i].type == WASM_COMP_VAL_TYPE_IDX) {
+                    const WASMComponentTypes *result_type_entry =
+                        wasm_component_lookup_type(
+                            component,
+                            func_type->results->results[i].type_specific.type_idx);
+
+                    if (!result_type_entry)
+                        return set_component_runtime_error_fmt(
+                            error_buf, error_buf_size,
+                            "component canon lift function uses unresolved type "
+                            "index %u",
+                            func_type->results->results[i].type_specific.type_idx);
+
+                    if (result_type_entry->tag != WASM_COMP_DEF_TYPE
+                        || !result_type_entry->type.def_val_type)
+                        return set_component_runtime_error_fmt(
+                            error_buf, error_buf_size,
+                            "component canon lift function uses non-value type "
+                            "index %u",
+                            func_type->results->results[i].type_specific.type_idx);
+
+                    is_composite_result =
+                        result_type_entry->type.def_val_type->tag
+                            == WASM_COMP_DEF_VAL_RECORD
+                        || result_type_entry->type.def_val_type->tag
+                               == WASM_COMP_DEF_VAL_TUPLE;
+                }
+
+                if (is_composite_result) {
+                    bool composite_has_string = false;
+                    bool composite_has_list_scalar = false;
+                    bool composite_has_list_string = false;
+
+                    if (!classify_component_runtime_composite_result(
+                            component, &func_type->results->results[i],
+                            &composite_has_string, &composite_has_list_scalar,
+                            &composite_has_list_string, error_buf,
+                            error_buf_size))
+                        return false;
+                    if (composite_has_string || composite_has_list_string)
+                        function->has_string_result = true;
+                    if (composite_has_list_scalar)
+                        function->has_list_scalar_result = true;
+                    continue;
+                }
+
                 if (!resolve_component_lift_string_usage(
                         component, &func_type->results->results[i],
                         &is_string_result, error_buf, error_buf_size))
                     return false;
                 if (is_string_result) {
+                    function->has_string_result = true;
+                    continue;
+                }
+
+                if (!resolve_component_lift_list_string_usage(
+                        component, &func_type->results->results[i],
+                        &is_list_string_result, error_buf, error_buf_size))
+                    return false;
+                if (is_list_string_result) {
                     function->has_string_result = true;
                     continue;
                 }
@@ -6488,7 +7196,7 @@ resolve_component_canon_lift_abi(WASMComponentInstance *inst,
                     return set_component_runtime_error_fmt(
                         error_buf, error_buf_size,
                         "component canon lift function only supports scalar, "
-                        "string, or list<scalar> "
+                        "string, list<scalar>, or tuple/record "
                         "multi-result signatures");
             }
             goto validate_required_opts;
@@ -6496,6 +7204,7 @@ resolve_component_canon_lift_abi(WASMComponentInstance *inst,
 
         bool has_string_result = false;
         bool has_list_scalar_result = false;
+        bool has_list_string_result = false;
         bool is_primitive_result = false;
         uint8 result_prim_type = 0;
 
@@ -6549,18 +7258,28 @@ resolve_component_canon_lift_abi(WASMComponentInstance *inst,
                         WASM_COMP_RUNTIME_CANON_LIFT_MEMORY_RESULT_COMPOSITE;
             }
             else if (!resolve_component_lift_string_usage(
-                         component, func_type->results->results,
-                         &has_string_result, error_buf, error_buf_size)
-                     || (!has_string_result
-                         && !resolve_component_lift_list_scalar_usage(
-                             component, func_type->results->results,
-                             &has_list_scalar_result, error_buf, error_buf_size)))
+                          component, func_type->results->results,
+                          &has_string_result, error_buf, error_buf_size)
+                      || (!has_string_result
+                          && !resolve_component_lift_list_string_usage(
+                              component, func_type->results->results,
+                              &has_list_string_result, error_buf,
+                              error_buf_size))
+                      || (!has_string_result && !has_list_string_result
+                          && !resolve_component_lift_list_scalar_usage(
+                              component, func_type->results->results,
+                              &has_list_scalar_result, error_buf, error_buf_size)))
                 return false;
         }
         else {
             has_string_result = is_primitive_result
                                 && result_prim_type == WASM_COMP_PRIMVAL_STRING;
             if (!has_string_result
+                && !resolve_component_lift_list_string_usage(
+                    component, func_type->results->results,
+                    &has_list_string_result, error_buf, error_buf_size))
+                return false;
+            if (!has_string_result && !has_list_string_result
                 && !resolve_component_lift_list_scalar_usage(
                     component, func_type->results->results,
                     &has_list_scalar_result, error_buf, error_buf_size))
@@ -6570,11 +7289,14 @@ resolve_component_canon_lift_abi(WASMComponentInstance *inst,
         if (has_string_result)
             function->memory_result_kind =
                 WASM_COMP_RUNTIME_CANON_LIFT_MEMORY_RESULT_STRING;
+        else if (has_list_string_result)
+            function->memory_result_kind =
+                WASM_COMP_RUNTIME_CANON_LIFT_MEMORY_RESULT_STRING;
         else if (has_list_scalar_result)
             function->memory_result_kind =
                 WASM_COMP_RUNTIME_CANON_LIFT_MEMORY_RESULT_LIST_SCALAR;
 
-        if (has_string_result)
+        if (has_string_result || has_list_string_result)
             function->has_string_result = true;
         if (has_list_scalar_result)
             function->has_list_scalar_result = true;
@@ -9995,6 +10717,118 @@ init_component_public_memory_composite_result(
 }
 
 static bool
+init_component_public_memory_list_string_result(
+    WASMComponentInstance *inst, const WASMComponentRuntimeFunc *function,
+    uint32 result_area_ptr, const char *result_area_desc,
+    wasm_component_value_t *value)
+{
+    uint8 *ret_area_bytes = NULL;
+    uint8 *table_bytes = NULL;
+    uint32 table_ptr = 0, element_count = 0, table_byte_count = 0;
+    uint32 stack_entries[32];
+    uint32 *entries = stack_entries;
+    WASMComponentResultPayloadBuilder builder;
+    uint8 count_buf[5];
+    uint32 count_len;
+    bool ok = false;
+
+    if (!value)
+        return false;
+
+    if (!get_component_canon_memory_bytes(inst, function, result_area_ptr, 8,
+                                          result_area_desc, &ret_area_bytes))
+        return false;
+
+    memcpy(&table_ptr, ret_area_bytes, sizeof(table_ptr));
+    memcpy(&element_count, ret_area_bytes + sizeof(table_ptr),
+           sizeof(element_count));
+
+    if (element_count > 0) {
+        if ((table_ptr & 3) != 0)
+            return set_component_call_error(
+                inst, "component canon lift function list<string> result table "
+                      "is misaligned");
+        if (!compute_list_scalar_byte_count(element_count, 8, &table_byte_count))
+            return set_component_call_error(
+                inst, "component canon lift function list<string> result "
+                      "table size overflow");
+        if (element_count > sizeof(stack_entries) / sizeof(stack_entries[0]) / 2) {
+            entries = wasm_runtime_malloc(sizeof(uint32) * element_count * 2);
+            if (!entries)
+                return set_component_call_error(
+                    inst, "component canon lift function could not allocate "
+                          "list<string> result metadata");
+        }
+        if (!get_component_canon_memory_bytes(inst, function, table_ptr,
+                                              table_byte_count,
+                                              "list<string> result table",
+                                              &table_bytes)) {
+            ok = false;
+            goto cleanup;
+        }
+        memcpy(entries, table_bytes, table_byte_count);
+    }
+
+    init_component_result_payload_builder(&builder);
+    count_len = encode_component_unsigned_leb(element_count, count_buf);
+    if (!append_component_result_payload_bytes(inst, &builder, count_buf,
+                                               count_len)) {
+        destroy_component_result_payload_builder(&builder);
+        ok = false;
+        goto cleanup;
+    }
+
+    for (uint32 i = 0; i < element_count; i++) {
+        uint8 *payload_bytes = NULL;
+        uint32 payload_ptr = entries[i * 2];
+        uint32 payload_len = entries[i * 2 + 1];
+
+        if (payload_len > 0) {
+            if (!get_component_canon_memory_bytes(inst, function, payload_ptr,
+                                                  payload_len,
+                                                  "list<string> result payload",
+                                                  &payload_bytes)) {
+                destroy_component_result_payload_builder(&builder);
+                ok = false;
+                goto cleanup;
+            }
+            if (!wasm_component_validate_utf8(payload_bytes, payload_len)) {
+                set_component_call_error(
+                    inst, "component canon lift function result does not "
+                          "contain valid UTF-8");
+                destroy_component_result_payload_builder(&builder);
+                ok = false;
+                goto cleanup;
+            }
+            if (!append_component_result_string_leaf(inst, &builder, payload_bytes,
+                                                    payload_len)) {
+                destroy_component_result_payload_builder(&builder);
+                ok = false;
+                goto cleanup;
+            }
+        }
+        else if (!append_component_result_string_leaf(inst, &builder, NULL, 0)) {
+            destroy_component_result_payload_builder(&builder);
+            ok = false;
+            goto cleanup;
+        }
+    }
+
+    if (!finish_component_result_payload(value, &builder)) {
+        destroy_component_result_payload_builder(&builder);
+        ok = false;
+        goto cleanup;
+    }
+
+    ok = true;
+
+cleanup:
+    if (entries != stack_entries)
+        wasm_runtime_free(entries);
+    return ok;
+}
+
+static bool
 init_component_public_memory_sequence_result(
     WASMComponentInstance *inst, const WASMComponentRuntimeFunc *function,
     const WASMComponentCanonLiftValueInfo *result_info, uint32 result_area_ptr,
@@ -10009,10 +10843,15 @@ init_component_public_memory_sequence_result(
 
     if (!result_info || !value
         || (result_info->kind != WASM_COMP_CANON_LIFT_VALUE_STRING
-            && result_info->kind != WASM_COMP_CANON_LIFT_VALUE_LIST_SCALAR))
+            && result_info->kind != WASM_COMP_CANON_LIFT_VALUE_LIST_SCALAR
+            && result_info->kind != WASM_COMP_CANON_LIFT_VALUE_LIST_STRING))
         return set_component_call_error(
             inst, "component canon lift function result uses unsupported "
                   "memory-backed result shape");
+
+    if (result_info->kind == WASM_COMP_CANON_LIFT_VALUE_LIST_STRING)
+        return init_component_public_memory_list_string_result(
+            inst, function, result_area_ptr, result_area_desc, value);
 
     result_desc = result_info->kind == WASM_COMP_CANON_LIFT_VALUE_STRING
                       ? "string"
@@ -11604,7 +12443,20 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
         }
 
         for (uint32 result_i = 0; result_i < expected_result_count; result_i++) {
-            if (function->has_composite_result) {
+            WASMComponentCanonLiftValueShape callback_result_shape = { 0 };
+            bool result_is_composite = false;
+
+            if (!resolve_component_canon_lift_value_shape(
+                    component, &component_type->results->results[result_i], "result",
+                    result_i, &callback_result_shape, inst))
+                goto host_import_success_fail;
+
+            result_is_composite =
+                !callback_result_shape.is_primitive && callback_result_shape.def_type
+                && (callback_result_shape.def_type->tag == WASM_COMP_DEF_VAL_RECORD
+                    || callback_result_shape.def_type->tag == WASM_COMP_DEF_VAL_TUPLE);
+
+            if (result_is_composite) {
                 if (!validate_host_component_public_composite_result_value(
                         inst, component,
                         &component_type->results->results[result_i],
@@ -11932,7 +12784,7 @@ host_import_cleanup_fail:
             if (!have_retptr_memory || !have_retptr_post_return)
                 return set_component_call_error(
                     inst, "component canon lift function only supports direct "
-                          "scalar multi-value or retptr-backed scalar "
+                          "scalar multi-value or retptr-backed supported "
                           "multi-result signatures");
 
             if (expected_result_count > 16) {
@@ -11954,20 +12806,25 @@ host_import_cleanup_fail:
                     &has_list_string_leaf))
                 goto cleanup;
 
-            if (has_list_string_leaf)
-                return set_component_call_error(
-                    inst, "component canon lift function only supports "
-                          "retptr-backed scalar, string, and list<scalar> "
-                          "multi-result signatures");
-
             for (i = 0; i < expected_result_count; i++) {
+                if (!resolve_component_canon_lift_value_shape(
+                        component, &component_type->results->results[i], "result",
+                        i, &result_shape, inst))
+                    goto cleanup;
+
+                if (!result_shape.is_primitive && result_shape.def_type
+                    && (result_shape.def_type->tag == WASM_COMP_DEF_VAL_RECORD
+                        || result_shape.def_type->tag == WASM_COMP_DEF_VAL_TUPLE))
+                    continue;
+
                 if (!lookup_component_canon_lift_value_type(
                         component, &component_type->results->results[i], "result",
-                        i, true, false, false, true, &result_info, inst))
+                        i, true, false, true, true, &result_info, inst))
                     goto cleanup;
                 if (result_info.kind != WASM_COMP_CANON_LIFT_VALUE_SCALAR
                     && result_info.kind != WASM_COMP_CANON_LIFT_VALUE_STRING
-                    && result_info.kind != WASM_COMP_CANON_LIFT_VALUE_LIST_SCALAR) {
+                    && result_info.kind != WASM_COMP_CANON_LIFT_VALUE_LIST_SCALAR
+                    && result_info.kind != WASM_COMP_CANON_LIFT_VALUE_LIST_STRING) {
                     only_supported_retptr_results = false;
                     break;
                 }
@@ -11976,10 +12833,12 @@ host_import_cleanup_fail:
             if (!only_supported_retptr_results)
                 return set_component_call_error(
                     inst, "component canon lift function only supports "
-                          "retptr-backed scalar, string, and list<scalar> "
+                          "retptr-backed scalar, string, list<scalar>, "
+                          "list<string>, and tuple/record "
                           "multi-result signatures");
 
-            multi_result_retptr_has_string = has_string_leaf;
+            multi_result_retptr_has_string =
+                has_string_leaf || has_list_string_leaf;
             multi_result_retptr_has_list_scalar = has_list_scalar_leaf;
             multi_result_retptr_vector = true;
         }
@@ -12067,11 +12926,12 @@ host_import_cleanup_fail:
             if (!has_owned_resource_result && !has_borrowed_resource_result
                 && !lookup_component_canon_lift_value_type(
                     component, component_type->results->results,
-                    "result", 0, true, false, false, true, &result_info, inst))
+                    "result", 0, true, false, true, true, &result_info, inst))
                 goto cleanup;
 
             if (result_info.kind == WASM_COMP_CANON_LIFT_VALUE_STRING
-                || result_info.kind == WASM_COMP_CANON_LIFT_VALUE_LIST_SCALAR) {
+                || result_info.kind == WASM_COMP_CANON_LIFT_VALUE_LIST_SCALAR
+                || result_info.kind == WASM_COMP_CANON_LIFT_VALUE_LIST_STRING) {
                 if (core_type->result_count != 1
                     || core_type->types[core_type->param_count] != VALUE_TYPE_I32) {
                     set_component_call_error(
@@ -12284,11 +13144,42 @@ host_import_cleanup_fail:
         }
 
         for (i = 0; i < expected_result_count; i++) {
+            WASMComponentCanonLiftValueShape result_shape_local;
             WASMComponentCanonLiftValueInfo result_info_local;
+
+            if (!resolve_component_canon_lift_value_shape(
+                    component, &component_type->results->results[i], "result", i,
+                    &result_shape_local, inst)) {
+                for (uint32 j = 0; j < i; j++)
+                    wasm_component_value_destroy(&results[j]);
+                call_succeeded = false;
+                goto cleanup;
+            }
+
+            if (!result_shape_local.is_primitive && result_shape_local.def_type
+                && (result_shape_local.def_type->tag == WASM_COMP_DEF_VAL_RECORD
+                    || result_shape_local.def_type->tag
+                           == WASM_COMP_DEF_VAL_TUPLE)) {
+                WASMComponentResultPayloadBuilder builder;
+
+                init_component_result_payload_builder(&builder);
+                if (!decode_component_canon_composite_result_value(
+                        inst, function, component,
+                        &component_type->results->results[i], i, ret_area_bytes,
+                        result_vector_size, result_offsets[i], &builder)
+                    || !finish_component_result_payload(&results[i], &builder)) {
+                    destroy_component_result_payload_builder(&builder);
+                    for (uint32 j = 0; j < i; j++)
+                        wasm_component_value_destroy(&results[j]);
+                    call_succeeded = false;
+                    goto cleanup;
+                }
+                continue;
+            }
 
             if (!lookup_component_canon_lift_value_type(
                     component, &component_type->results->results[i], "result", i,
-                    true, false, false, true, &result_info_local, inst)) {
+                    true, false, true, true, &result_info_local, inst)) {
                 for (uint32 j = 0; j < i; j++)
                     wasm_component_value_destroy(&results[j]);
                 call_succeeded = false;
@@ -12318,10 +13209,13 @@ host_import_cleanup_fail:
                          inst, function, &result_info_local,
                          memory_result_retptr + result_offsets[i],
                          result_info_local.kind
-                                 == WASM_COMP_CANON_LIFT_VALUE_STRING
-                             ? "string multi-result area"
-                             : "list<scalar> multi-result area",
-                         &results[i])) {
+                                  == WASM_COMP_CANON_LIFT_VALUE_STRING
+                              ? "string multi-result area"
+                              : result_info_local.kind
+                                        == WASM_COMP_CANON_LIFT_VALUE_LIST_STRING
+                                    ? "list<string> multi-result area"
+                              : "list<scalar> multi-result area",
+                          &results[i])) {
                 for (uint32 j = 0; j < i; j++)
                     wasm_component_value_destroy(&results[j]);
                 call_succeeded = false;
@@ -12404,6 +13298,10 @@ host_import_cleanup_fail:
                     result_info.kind == WASM_COMP_CANON_LIFT_VALUE_STRING
                         ? "component canon lift function string result returned "
                           "an unexpected result kind"
+                        : result_info.kind
+                                  == WASM_COMP_CANON_LIFT_VALUE_LIST_STRING
+                              ? "component canon lift function list<string> "
+                                "result returned an unexpected result kind"
                         : "component canon lift function list<scalar> result "
                           "returned an unexpected result kind");
                 call_succeeded = false;
@@ -12416,6 +13314,9 @@ host_import_cleanup_fail:
                     inst, function, &result_info, memory_result_retptr,
                     result_info.kind == WASM_COMP_CANON_LIFT_VALUE_STRING
                         ? "string result area"
+                        : result_info.kind
+                                  == WASM_COMP_CANON_LIFT_VALUE_LIST_STRING
+                              ? "list<string> result area"
                         : "list<scalar> result area",
                     &results[0])) {
                 call_succeeded = false;
