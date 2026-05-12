@@ -309,6 +309,9 @@ This is now a real but narrow operational slice, not yet full resource semantics
 - `result<scalar,scalar>` type params and results through the canon lift
   path, including both `ok` and `error` discriminants with per-case
   payload dispatch
+- `variant<scalar>` type params and results through the canon lift path,
+  including N-case variants with per-discriminant case selection and
+  payload dispatch
 
 ## 2. What is still missing for full component-model support
 
@@ -440,7 +443,8 @@ Major Canonical ABI gaps remain:
   `list<enum>` / `list<flags>` leaves in exported tuple/record values and
   host-import tuple/record parameter/result values
 - no variant marshalling
-  (enum, flags, option<scalar>, and result<scalar,scalar> are now supported)
+  (enum, flags, option<scalar>, result<scalar,scalar>, and
+  variant<scalar> are now supported)
 - no non-string memory-backed leaves inside tuple/record Canonical ABI values beyond nested `list<scalar>` leaves for exported canon-lift calls and host-import tuple/record parameters
 - no broader composite flattening/lifting rules beyond the current
   string / variable-length `list<scalar>` / variable-length `list<string>`
@@ -509,14 +513,13 @@ What is still missing:
 - first-class runtime semantics for general lists
 - first-class typed runtime semantics for records
 - first-class typed runtime semantics for tuples
-- variants
 - richer defined-type introspection/manipulation
 
-(Enum, flags, list<enum>, list<flags>, option<scalar>, and
-result<scalar,scalar> (both params and results) are now supported in
-the Canonical ABI. Option and result are treated as composite types
-with a discriminant and inner payload(s); the current implementation
-covers scalar payloads.)
+(Enum, flags, list<enum>, list<flags>, option<scalar>,
+result<scalar,scalar>, and variant<scalar> (both params and results)
+are now supported in the Canonical ABI. These types are treated as
+composite types with a discriminant and inner payload(s); the current
+implementation covers scalar payloads.)
 
 Today, composite value support is still mostly "opaque bytes plus limited special cases", not full typed component-value semantics.
 

@@ -63571,3 +63571,73 @@ TEST_F(BinaryParserTest, TestRuntimeBuildsNestedSubcomponentInstances)
     wasm_runtime_deinstantiate(module_inst);
     wasm_runtime_unload(module);
 }
+
+TEST_F(BinaryParserTest, TestRuntimeSupportsVariantScalarParamAndResult)
+{
+    bool ret = helper->read_wasm_file("variant_scalar.component.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "runtime-variant-scalar-test";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    WASMComponentRuntimeFunc *func =
+        wasm_runtime_lookup_component_function(module_inst, "g_param");
+    ASSERT_NE(func, nullptr);
+
+    uint8_t bytes[2] = { 1, 42 };
+    wasm_component_value_t arg =
+        make_component_defined_value(bytes, sizeof(bytes));
+    wasm_component_value_t result = {};
+    ASSERT_TRUE(wasm_runtime_call_component_values(
+        module_inst, func, 1, &result, 1, &arg))
+        << wasm_runtime_get_exception(module_inst);
+    { auto *d = (const uint8 *)wasm_component_value_get_data(&result);
+      ASSERT_NE(d, nullptr); ASSERT_EQ(d[0] & 0x7f, 1u); }
+    wasm_component_value_destroy(&arg);
+    wasm_runtime_drop_component_owned_result(module_inst, func, 0, &result);
+
+    func = wasm_runtime_lookup_component_function(module_inst, "g_red");
+    ASSERT_NE(func, nullptr);
+    result = {};
+    ASSERT_TRUE(wasm_runtime_call_component_values(
+        module_inst, func, 1, &result, 0, nullptr))
+        << wasm_runtime_get_exception(module_inst);
+    { auto *d = (const uint8 *)wasm_component_value_get_data(&result);
+      ASSERT_NE(d, nullptr); ASSERT_EQ(d[0], 0u); }
+    wasm_runtime_drop_component_owned_result(module_inst, func, 0, &result);
+
+    func = wasm_runtime_lookup_component_function(module_inst, "g_green");
+    ASSERT_NE(func, nullptr);
+    result = {};
+    ASSERT_TRUE(wasm_runtime_call_component_values(
+        module_inst, func, 1, &result, 0, nullptr))
+        << wasm_runtime_get_exception(module_inst);
+    { auto *d = (const uint8 *)wasm_component_value_get_data(&result);
+      ASSERT_NE(d, nullptr); ASSERT_EQ(d[0], 1u); ASSERT_EQ(d[1], 42u); }
+    wasm_runtime_drop_component_owned_result(module_inst, func, 0, &result);
+
+    func = wasm_runtime_lookup_component_function(module_inst, "g_blue");
+    ASSERT_NE(func, nullptr);
+    result = {};
+    ASSERT_TRUE(wasm_runtime_call_component_values(
+        module_inst, func, 1, &result, 0, nullptr))
+        << wasm_runtime_get_exception(module_inst);
+    { auto *d = (const uint8 *)wasm_component_value_get_data(&result);
+      ASSERT_NE(d, nullptr); ASSERT_EQ(d[0], 2u); ASSERT_EQ(d[1], 99u); }
+    wasm_runtime_drop_component_owned_result(module_inst, func, 0, &result);
+
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}

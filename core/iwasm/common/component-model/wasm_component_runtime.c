@@ -6043,6 +6043,22 @@ classify_component_runtime_composite_param(const WASMComponent *component,
         case WASM_COMP_DEF_VAL_ENUM:
         case WASM_COMP_DEF_VAL_FLAGS:
             return true;
+        case WASM_COMP_DEF_VAL_VARIANT:
+            if (def_type->def_val.variant) {
+                for (uint32 k = 0; k < def_type->def_val.variant->count; k++) {
+                    if (def_type->def_val.variant->cases[k].value_type) {
+                        if (!classify_component_runtime_composite_param(
+                                component,
+                                def_type->def_val.variant->cases[k].value_type,
+                                param_index, has_string_leaf_out,
+                                has_list_scalar_leaf_out,
+                                has_list_string_leaf_out, error_buf,
+                                error_buf_size))
+                            return false;
+                    }
+                }
+            }
+            return true;
         case WASM_COMP_DEF_VAL_RESULT:
             if (def_type->def_val.result) {
                 if (def_type->def_val.result->result_type) {
@@ -6260,6 +6276,22 @@ classify_component_runtime_composite_result(const WASMComponent *component,
                 "borrow<resource> leaves inside tuple/record results");
         case WASM_COMP_DEF_VAL_ENUM:
         case WASM_COMP_DEF_VAL_FLAGS:
+            return true;
+        case WASM_COMP_DEF_VAL_VARIANT:
+            if (def_type->def_val.variant) {
+                for (uint32 k = 0; k < def_type->def_val.variant->count; k++) {
+                    if (def_type->def_val.variant->cases[k].value_type) {
+                        if (!classify_component_runtime_composite_result(
+                                component,
+                                def_type->def_val.variant->cases[k].value_type,
+                                has_string_leaf_out,
+                                has_list_scalar_leaf_out,
+                                has_list_string_leaf_out, error_buf,
+                                error_buf_size))
+                            return false;
+                    }
+                }
+            }
             return true;
         case WASM_COMP_DEF_VAL_RESULT:
             if (def_type->def_val.result) {
@@ -7832,6 +7864,8 @@ resolve_component_canon_lift_abi(WASMComponentInstance *inst,
                     || param_type_entry->type.def_val_type->tag
                            == WASM_COMP_DEF_VAL_OPTION
                     || param_type_entry->type.def_val_type->tag
+                           == WASM_COMP_DEF_VAL_VARIANT
+                    || param_type_entry->type.def_val_type->tag
                            == WASM_COMP_DEF_VAL_RESULT;
             }
             if (!resolve_component_lift_string_usage(
@@ -7930,6 +7964,8 @@ resolve_component_canon_lift_abi(WASMComponentInstance *inst,
                                == WASM_COMP_DEF_VAL_TUPLE
                         || result_type_entry->type.def_val_type->tag
                                == WASM_COMP_DEF_VAL_OPTION
+                        || result_type_entry->type.def_val_type->tag
+                               == WASM_COMP_DEF_VAL_VARIANT
                         || result_type_entry->type.def_val_type->tag
                                == WASM_COMP_DEF_VAL_RESULT;
                 }
@@ -8038,6 +8074,8 @@ resolve_component_canon_lift_abi(WASMComponentInstance *inst,
                        == WASM_COMP_DEF_VAL_TUPLE
                 || result_type_entry->type.def_val_type->tag
                        == WASM_COMP_DEF_VAL_OPTION
+                || result_type_entry->type.def_val_type->tag
+                       == WASM_COMP_DEF_VAL_VARIANT
                 || result_type_entry->type.def_val_type->tag
                        == WASM_COMP_DEF_VAL_RESULT) {
                 bool composite_has_string = false;
@@ -9044,6 +9082,34 @@ validate_component_public_composite_bytes(
             (*offset_io) += consumed;
             return true;
         }
+        case WASM_COMP_DEF_VAL_VARIANT:
+            if (!shape.def_type->def_val.variant)
+                return set_component_composite_param_leaf_error(inst, param_index);
+            {
+                wasm_val_t ignored_discriminant;
+                uint32 consumed = 0;
+                if (!decode_component_public_scalar_prefix(
+                        inst, data ? data + *offset_io : NULL,
+                        byte_size - *offset_io, WASM_COMP_PRIMVAL_U32, WASM_I32,
+                        "parameter", param_index, &ignored_discriminant,
+                        &consumed))
+                    return false;
+                (*offset_io) += consumed;
+                if ((uint32)ignored_discriminant.of.i32
+                        < shape.def_type->def_val.variant->count
+                    && shape.def_type->def_val.variant
+                           ->cases[ignored_discriminant.of.i32]
+                           .value_type) {
+                    if (!validate_component_public_composite_bytes(
+                            inst, component,
+                            shape.def_type->def_val.variant->cases
+                                [ignored_discriminant.of.i32]
+                                .value_type,
+                            data, byte_size, offset_io, param_index))
+                        return false;
+                }
+            }
+            return true;
         case WASM_COMP_DEF_VAL_RESULT:
             if (!shape.def_type->def_val.result)
                 return set_component_composite_param_leaf_error(inst, param_index);
@@ -9457,6 +9523,57 @@ flatten_component_public_composite_bytes(
             (*core_arg_index_io) += 2;
             return true;
         }
+        case WASM_COMP_DEF_VAL_VARIANT:
+            if (!shape.def_type->def_val.variant)
+                return set_component_composite_param_leaf_error(inst, param_index);
+            {
+                wasm_val_t discriminant_value;
+                uint32 consumed = 0;
+                if (*core_arg_index_io >= core_type->param_count)
+                    return set_component_param_flattening_error(inst);
+                if (core_type->types[*core_arg_index_io] != VALUE_TYPE_I32)
+                    return set_component_call_error_fmt(
+                        inst,
+                        "component canon lift function parameter %u does not "
+                        "match the core function signature",
+                        param_index);
+                if (!decode_component_public_scalar_prefix(
+                        inst, data ? data + *offset_io : NULL,
+                        byte_size - *offset_io, WASM_COMP_PRIMVAL_U32, WASM_I32,
+                        "parameter", param_index, &discriminant_value, &consumed))
+                    return false;
+                core_args[*core_arg_index_io] = discriminant_value;
+                (*core_arg_index_io)++;
+                (*offset_io) += consumed;
+                if ((uint32)discriminant_value.of.i32
+                        < shape.def_type->def_val.variant->count
+                    && shape.def_type->def_val.variant
+                           ->cases[discriminant_value.of.i32]
+                           .value_type) {
+                    if (!flatten_component_public_composite_bytes(
+                            inst, component, function,
+                            shape.def_type->def_val.variant->cases
+                                [discriminant_value.of.i32]
+                                .value_type,
+                            data, byte_size, offset_io, param_index, core_type,
+                            core_args, core_arg_index_io, allocation_tracker))
+                        return false;
+                }
+                else {
+                    if (*core_arg_index_io >= core_type->param_count)
+                        return set_component_param_flattening_error(inst);
+                    if (core_type->types[*core_arg_index_io] != VALUE_TYPE_I32)
+                        return set_component_call_error_fmt(
+                            inst,
+                            "component canon lift function parameter %u does "
+                            "not match the core function signature",
+                            param_index);
+                    core_args[*core_arg_index_io].kind = WASM_I32;
+                    core_args[*core_arg_index_io].of.i32 = 0;
+                    (*core_arg_index_io)++;
+                }
+            }
+            return true;
         case WASM_COMP_DEF_VAL_RESULT:
             if (!shape.def_type->def_val.result)
                 return set_component_composite_param_leaf_error(inst, param_index);
@@ -9816,6 +9933,7 @@ flatten_component_public_param_value(
         && (shape.def_type->tag == WASM_COMP_DEF_VAL_RECORD
             || shape.def_type->tag == WASM_COMP_DEF_VAL_TUPLE
             || shape.def_type->tag == WASM_COMP_DEF_VAL_OPTION
+            || shape.def_type->tag == WASM_COMP_DEF_VAL_VARIANT
             || shape.def_type->tag == WASM_COMP_DEF_VAL_RESULT)) {
         const uint8 *data;
         uint32 offset = 0;
@@ -10535,6 +10653,43 @@ compute_component_canon_abi_layout(WASMComponentInstance *inst,
                       "variable-length list<scalar>/list<string> leaves inside "
                       "tuple/record results",
                 result_index);
+        case WASM_COMP_DEF_VAL_VARIANT:
+        {
+            uint32 inner_size = 0, inner_align = 1;
+            bool inner_has_string = false;
+            bool inner_has_list_scalar = false;
+            bool inner_has_list_string = false;
+
+            if (shape.def_type->def_val.variant) {
+                for (uint32 k = 0; k < shape.def_type->def_val.variant->count; k++) {
+                    if (shape.def_type->def_val.variant->cases[k].value_type) {
+                        uint32 case_size = 0, case_align = 1;
+                        bool case_has_string = false;
+                        bool case_has_list_scalar = false;
+                        bool case_has_list_string = false;
+                        if (!compute_component_canon_abi_layout(
+                                inst, resource_state, component,
+                                shape.def_type->def_val.variant->cases[k].value_type,
+                                result_index, &case_size, &case_align,
+                                &case_has_string, &case_has_list_scalar,
+                                &case_has_list_string))
+                            return false;
+                        inner_size = inner_size > case_size ? inner_size : case_size;
+                        inner_align = inner_align > case_align ? inner_align : case_align;
+                        inner_has_string = inner_has_string || case_has_string;
+                        inner_has_list_scalar = inner_has_list_scalar || case_has_list_scalar;
+                        inner_has_list_string = inner_has_list_string || case_has_list_string;
+                    }
+                }
+            }
+
+            *size_out = 4 + inner_size;
+            *align_out = inner_align > 4 ? inner_align : 4;
+            *has_string_leaf_out = inner_has_string;
+            *has_list_scalar_leaf_out = inner_has_list_scalar;
+            *has_list_string_leaf_out = inner_has_list_string;
+            return true;
+        }
         case WASM_COMP_DEF_VAL_RESULT:
         {
             uint32 inner_size = 0, inner_align = 1;
@@ -11911,6 +12066,58 @@ collect_component_composite_result_leaves(
                         &shape.def_type->def_val.tuple->element_types[i],
                         result_index, flat_leaves, leaf_capacity, leaf_count_io))
                     return false;
+            }
+            return true;
+        case WASM_COMP_DEF_VAL_VARIANT:
+            if (!shape.def_type->def_val.variant)
+                return set_component_composite_result_leaf_error(inst, result_index);
+            /* Add discriminant leaf (u32 scalar) */
+            {
+                WASMComponentCompositeFlatLeaf *flat_leaf;
+                if (*leaf_count_io >= leaf_capacity)
+                    return set_component_result_flattening_error(inst);
+                flat_leaf = &flat_leaves[*leaf_count_io];
+                memset(flat_leaf, 0, sizeof(*flat_leaf));
+                flat_leaf->type_info.kind = WASM_COMP_CANON_LIFT_VALUE_SCALAR;
+                flat_leaf->type_info.prim_type = WASM_COMP_PRIMVAL_U32;
+                flat_leaf->type_info.core_type = VALUE_TYPE_I32;
+                flat_leaf->type_info.public_kind = WASM_I32;
+                (*leaf_count_io)++;
+            }
+            /* Iterate all cases to find the one with max payload leaves */
+            {
+                uint32 max_case_leaves = 0;
+                uint32 best_k = 0;
+                bool found = false;
+                for (uint32 k = 0; k < shape.def_type->def_val.variant->count;
+                     k++) {
+                    if (!shape.def_type->def_val.variant->cases[k].value_type)
+                        continue;
+                    uint32 before = *leaf_count_io;
+                    if (!collect_component_composite_result_leaves(
+                            inst, component, resource_state,
+                            shape.def_type->def_val.variant->cases[k]
+                                .value_type,
+                            result_index, flat_leaves, leaf_capacity,
+                            leaf_count_io))
+                        return false;
+                    uint32 case_leaves = *leaf_count_io - before;
+                    *leaf_count_io = before;
+                    if (case_leaves > max_case_leaves) {
+                        max_case_leaves = case_leaves;
+                        best_k = k;
+                        found = true;
+                    }
+                }
+                if (found) {
+                    if (!collect_component_composite_result_leaves(
+                            inst, component, resource_state,
+                            shape.def_type->def_val.variant->cases[best_k]
+                                .value_type,
+                            result_index, flat_leaves, leaf_capacity,
+                            leaf_count_io))
+                        return false;
+                }
             }
             return true;
         case WASM_COMP_DEF_VAL_RESULT:
@@ -14316,6 +14523,7 @@ host_import_cleanup_fail:
             && (result_shape.def_type->tag == WASM_COMP_DEF_VAL_RECORD
                 || result_shape.def_type->tag == WASM_COMP_DEF_VAL_TUPLE
                 || result_shape.def_type->tag == WASM_COMP_DEF_VAL_OPTION
+                || result_shape.def_type->tag == WASM_COMP_DEF_VAL_VARIANT
                 || result_shape.def_type->tag == WASM_COMP_DEF_VAL_RESULT);
 
         if (has_composite_result) {
