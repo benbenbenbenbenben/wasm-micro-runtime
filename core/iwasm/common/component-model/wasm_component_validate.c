@@ -1553,15 +1553,18 @@ validate_aliases_section(WASMComponentValidationContext *ctx,
                 uint32_t ct = alias_def->target.outer.ct;
                 uint32_t idx = alias_def->target.outer.idx;
 
-                // outer alias sort restricted to type, module (core), or
-                // component
                 if (alias_def->sort->sort == WASM_COMP_SORT_CORE_SORT) {
                     uint8_t cs = alias_def->sort->core_sort;
                     if (cs != WASM_COMP_CORE_SORT_TYPE
-                        && cs != WASM_COMP_CORE_SORT_MODULE) {
+                        && cs != WASM_COMP_CORE_SORT_MODULE
+                        && cs != WASM_COMP_CORE_SORT_FUNC
+                        && cs != WASM_COMP_CORE_SORT_TABLE
+                        && cs != WASM_COMP_CORE_SORT_MEMORY
+                        && cs != WASM_COMP_CORE_SORT_GLOBAL) {
                         set_error_buf_ex(error_buf, error_buf_size,
                                          "outer alias core sort restricted to "
-                                         "type or module");
+                                         "type, module, func, table, memory, "
+                                         "or global");
                         return false;
                     }
                 }
@@ -1597,6 +1600,18 @@ validate_aliases_section(WASMComponentValidationContext *ctx,
                             break;
                         case WASM_COMP_CORE_SORT_MODULE:
                             in_bounds = idx < ancestor->core_module_count;
+                            break;
+                        case WASM_COMP_CORE_SORT_FUNC:
+                            in_bounds = idx < ancestor->core_func_count;
+                            break;
+                        case WASM_COMP_CORE_SORT_TABLE:
+                            in_bounds = idx < ancestor->core_table_count;
+                            break;
+                        case WASM_COMP_CORE_SORT_MEMORY:
+                            in_bounds = idx < ancestor->core_memory_count;
+                            break;
+                        case WASM_COMP_CORE_SORT_GLOBAL:
+                            in_bounds = idx < ancestor->core_global_count;
                             break;
                         default:
                             set_error_buf_ex(

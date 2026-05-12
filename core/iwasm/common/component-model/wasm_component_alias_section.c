@@ -90,11 +90,17 @@ parse_single_alias(const uint8_t **payload, const uint8_t *end,
                 (out->sort->sort == WASM_COMP_SORT_TYPE)
                 || (out->sort->sort == WASM_COMP_SORT_COMPONENT)
                 || (out->sort->sort == WASM_COMP_SORT_CORE_SORT
-                    && out->sort->core_sort == WASM_COMP_CORE_SORT_MODULE);
+                    && (out->sort->core_sort == WASM_COMP_CORE_SORT_MODULE
+                        || out->sort->core_sort == WASM_COMP_CORE_SORT_FUNC
+                        || out->sort->core_sort == WASM_COMP_CORE_SORT_TABLE
+                        || out->sort->core_sort == WASM_COMP_CORE_SORT_MEMORY
+                        || out->sort->core_sort
+                               == WASM_COMP_CORE_SORT_GLOBAL));
             if (!valid_outer_sort) {
                 set_error_buf_ex(
                     error_buf, error_buf_size,
-                    "Outer alias sort must be type, component, or core module");
+                    "Outer alias sort must be type, component, or core "
+                    "module/func/table/memory/global");
                 return false;
             }
             break;

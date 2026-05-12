@@ -32,6 +32,14 @@ typedef struct WASMComponentRuntimeScope {
     struct WASMComponentRuntimeScope *parent;
     uint32 component_count;
     WASMComponentRuntimeComponent **components;
+    uint32 core_func_count;
+    WASMComponentCoreRuntimeRef *core_funcs;
+    uint32 core_table_count;
+    WASMComponentCoreRuntimeRef *core_tables;
+    uint32 core_memory_count;
+    WASMComponentCoreRuntimeRef *core_memories;
+    uint32 core_global_count;
+    WASMComponentCoreRuntimeRef *core_globals;
 } WASMComponentRuntimeScope;
 
 typedef struct WASMNestedComponentLocalBindings {
@@ -472,7 +480,15 @@ static bool
 alloc_component_scope(WASMComponentRuntimeScope **out_scope,
                       WASMComponentRuntimeScope *parent_scope,
                       WASMComponentRuntimeComponent *const *components,
-                      uint32 component_count, char *error_buf,
+                      uint32 component_count,
+                      WASMComponentCoreRuntimeRef *core_funcs,
+                      uint32 core_func_count,
+                      WASMComponentCoreRuntimeRef *core_tables,
+                      uint32 core_table_count,
+                      WASMComponentCoreRuntimeRef *core_memories,
+                      uint32 core_memory_count,
+                      WASMComponentCoreRuntimeRef *core_globals,
+                      uint32 core_global_count, char *error_buf,
                       uint32 error_buf_size)
 {
     WASMComponentRuntimeScope *scope =
@@ -498,6 +514,86 @@ alloc_component_scope(WASMComponentRuntimeScope **out_scope,
         memcpy(scope->components, components,
                sizeof(WASMComponentRuntimeComponent *) * component_count);
     }
+
+    if (core_func_count > 0) {
+        scope->core_funcs = wasm_runtime_malloc(
+            sizeof(WASMComponentCoreRuntimeRef) * core_func_count);
+        if (!scope->core_funcs) {
+            if (scope->components)
+                wasm_runtime_free(scope->components);
+            wasm_runtime_free(scope);
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                "allocate memory failed for %u core func scope entries",
+                core_func_count);
+        }
+        memcpy(scope->core_funcs, core_funcs,
+               sizeof(WASMComponentCoreRuntimeRef) * core_func_count);
+    }
+    scope->core_func_count = core_func_count;
+
+    if (core_table_count > 0) {
+        scope->core_tables = wasm_runtime_malloc(
+            sizeof(WASMComponentCoreRuntimeRef) * core_table_count);
+        if (!scope->core_tables) {
+            if (scope->core_funcs)
+                wasm_runtime_free(scope->core_funcs);
+            if (scope->components)
+                wasm_runtime_free(scope->components);
+            wasm_runtime_free(scope);
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                "allocate memory failed for %u core table scope entries",
+                core_table_count);
+        }
+        memcpy(scope->core_tables, core_tables,
+               sizeof(WASMComponentCoreRuntimeRef) * core_table_count);
+    }
+    scope->core_table_count = core_table_count;
+
+    if (core_memory_count > 0) {
+        scope->core_memories = wasm_runtime_malloc(
+            sizeof(WASMComponentCoreRuntimeRef) * core_memory_count);
+        if (!scope->core_memories) {
+            if (scope->core_tables)
+                wasm_runtime_free(scope->core_tables);
+            if (scope->core_funcs)
+                wasm_runtime_free(scope->core_funcs);
+            if (scope->components)
+                wasm_runtime_free(scope->components);
+            wasm_runtime_free(scope);
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                "allocate memory failed for %u core memory scope entries",
+                core_memory_count);
+        }
+        memcpy(scope->core_memories, core_memories,
+               sizeof(WASMComponentCoreRuntimeRef) * core_memory_count);
+    }
+    scope->core_memory_count = core_memory_count;
+
+    if (core_global_count > 0) {
+        scope->core_globals = wasm_runtime_malloc(
+            sizeof(WASMComponentCoreRuntimeRef) * core_global_count);
+        if (!scope->core_globals) {
+            if (scope->core_memories)
+                wasm_runtime_free(scope->core_memories);
+            if (scope->core_tables)
+                wasm_runtime_free(scope->core_tables);
+            if (scope->core_funcs)
+                wasm_runtime_free(scope->core_funcs);
+            if (scope->components)
+                wasm_runtime_free(scope->components);
+            wasm_runtime_free(scope);
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                "allocate memory failed for %u core global scope entries",
+                core_global_count);
+        }
+        memcpy(scope->core_globals, core_globals,
+               sizeof(WASMComponentCoreRuntimeRef) * core_global_count);
+    }
+    scope->core_global_count = core_global_count;
 
     *out_scope = scope;
     return true;
@@ -783,6 +879,14 @@ destroy_component_runtime_instance(WASMComponentRuntimeInstance *component_inst)
             if (component_inst->owned_components[i].owns_scope && scope) {
                 if (scope->components)
                     wasm_runtime_free(scope->components);
+                if (scope->core_funcs)
+                    wasm_runtime_free(scope->core_funcs);
+                if (scope->core_tables)
+                    wasm_runtime_free(scope->core_tables);
+                if (scope->core_memories)
+                    wasm_runtime_free(scope->core_memories);
+                if (scope->core_globals)
+                    wasm_runtime_free(scope->core_globals);
                 wasm_runtime_free(scope);
             }
         }
@@ -956,6 +1060,14 @@ destroy_component_instance_graph(WASMComponentInstance *inst)
             if (inst->components[i].owns_scope && scope) {
                 if (scope->components)
                     wasm_runtime_free(scope->components);
+                if (scope->core_funcs)
+                    wasm_runtime_free(scope->core_funcs);
+                if (scope->core_tables)
+                    wasm_runtime_free(scope->core_tables);
+                if (scope->core_memories)
+                    wasm_runtime_free(scope->core_memories);
+                if (scope->core_globals)
+                    wasm_runtime_free(scope->core_globals);
                 wasm_runtime_free(scope);
             }
         }
@@ -1719,6 +1831,66 @@ resolve_outer_component_alias(WASMComponentRuntimeScope *scope, uint32 ct,
 }
 
 static bool
+resolve_outer_core_alias(WASMComponentRuntimeScope *scope, uint32 ct,
+                         uint32 idx, uint8 core_sort,
+                         WASMComponentCoreRuntimeRef *out_ref,
+                         char *error_buf, uint32 error_buf_size)
+{
+    uint32 level;
+
+    if (!scope)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "outer alias ct exceeds component nesting depth");
+
+    for (level = 0; level < ct; level++) {
+        scope = scope->parent;
+        if (!scope)
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                "outer alias ct exceeds component nesting depth");
+    }
+
+    switch (core_sort) {
+        case WASM_COMP_CORE_SORT_FUNC:
+            if (idx >= scope->core_func_count)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "outer alias func idx %u out of bounds", idx);
+            *out_ref = scope->core_funcs[idx];
+            break;
+        case WASM_COMP_CORE_SORT_TABLE:
+            if (idx >= scope->core_table_count)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "outer alias table idx %u out of bounds", idx);
+            *out_ref = scope->core_tables[idx];
+            break;
+        case WASM_COMP_CORE_SORT_MEMORY:
+            if (idx >= scope->core_memory_count)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "outer alias memory idx %u out of bounds", idx);
+            *out_ref = scope->core_memories[idx];
+            break;
+        case WASM_COMP_CORE_SORT_GLOBAL:
+            if (idx >= scope->core_global_count)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "outer alias global idx %u out of bounds", idx);
+            *out_ref = scope->core_globals[idx];
+            break;
+        default:
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                "unsupported core sort 0x%02x in outer alias",
+                (unsigned)core_sort);
+    }
+
+    return true;
+}
+
+static bool
 append_top_level_component_definition(WASMComponentInstance *inst,
                                       WASMComponent *component, char *error_buf,
                                       uint32 error_buf_size)
@@ -1742,8 +1914,12 @@ append_top_level_component_definition(WASMComponentInstance *inst,
 
     memset(runtime_component, 0, sizeof(*runtime_component));
     if (!alloc_component_scope(&runtime_component->scope, NULL, visible_components,
-                               inst->component_count, error_buf,
-                               error_buf_size)) {
+                               inst->component_count,
+                               inst->core_funcs, inst->core_func_count,
+                               inst->core_tables, inst->core_table_count,
+                               inst->core_memories, inst->core_memory_count,
+                               inst->core_globals, inst->core_global_count,
+                               error_buf, error_buf_size)) {
         if (visible_components)
             wasm_runtime_free(visible_components);
         return false;
@@ -1769,6 +1945,10 @@ append_nested_component_definition(WASMComponentRuntimeInstance *runtime_inst,
     memset(runtime_component, 0, sizeof(*runtime_component));
     if (!alloc_component_scope(&runtime_component->scope, bindings->parent_scope,
                                bindings->components, bindings->component_count,
+                               bindings->core_funcs, bindings->core_func_count,
+                               bindings->core_tables, bindings->core_table_count,
+                               bindings->core_memories, bindings->core_memory_count,
+                               bindings->core_globals, bindings->core_global_count,
                                error_buf, error_buf_size))
         return false;
 
@@ -20570,20 +20750,62 @@ resolve_nested_component_alias_section(
         memset(&ref, 0, sizeof(ref));
 
         if (alias_def->alias_target_type == WASM_COMP_ALIAS_TARGET_OUTER) {
-            if (!alias_def->sort
-                || alias_def->sort->sort != WASM_COMP_SORT_COMPONENT)
+            if (!alias_def->sort)
                 return set_component_runtime_error_fmt(
                     error_buf, error_buf_size,
-                    "nested outer aliases currently support only component "
-                    "sort");
+                    "nested outer aliases missing sort");
 
-            if (!resolve_outer_component_alias(
-                    bindings->parent_scope, alias_def->target.outer.ct,
-                    alias_def->target.outer.idx, &component_ref, error_buf,
-                    error_buf_size)
-                || !append_nested_component_local_component(
-                    bindings, component_ref, error_buf, error_buf_size))
-                return false;
+            if (alias_def->sort->sort == WASM_COMP_SORT_COMPONENT) {
+                if (!resolve_outer_component_alias(
+                        bindings->parent_scope, alias_def->target.outer.ct,
+                        alias_def->target.outer.idx, &component_ref,
+                        error_buf, error_buf_size)
+                    || !append_nested_component_local_component(
+                        bindings, component_ref, error_buf, error_buf_size))
+                    return false;
+            }
+            else if (alias_def->sort->sort == WASM_COMP_SORT_CORE_SORT) {
+                WASMComponentCoreRuntimeRef core_ref;
+                uint8_t core_sort = alias_def->sort->core_sort;
+
+                if (!resolve_outer_core_alias(
+                        bindings->parent_scope, alias_def->target.outer.ct,
+                        alias_def->target.outer.idx, core_sort, &core_ref,
+                        error_buf, error_buf_size))
+                    return false;
+
+                switch (core_sort) {
+                    case WASM_COMP_CORE_SORT_FUNC:
+                        if (!append_nested_component_local_core_func(
+                                bindings, core_ref, error_buf, error_buf_size))
+                            return false;
+                        break;
+                    case WASM_COMP_CORE_SORT_TABLE:
+                        if (!append_nested_component_local_core_table(
+                                bindings, core_ref, error_buf, error_buf_size))
+                            return false;
+                        break;
+                    case WASM_COMP_CORE_SORT_MEMORY:
+                        if (!append_nested_component_local_core_memory(
+                                bindings, core_ref, error_buf, error_buf_size))
+                            return false;
+                        break;
+                    case WASM_COMP_CORE_SORT_GLOBAL:
+                        if (!append_nested_component_local_core_global(
+                                bindings, core_ref, error_buf, error_buf_size))
+                            return false;
+                        break;
+                    default:
+                        return set_component_runtime_error_fmt(
+                            error_buf, error_buf_size,
+                            "unsupported core sort in nested outer alias");
+                }
+            }
+            else {
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "nested outer alias sort must be component or core sort");
+            }
             continue;
         }
 
