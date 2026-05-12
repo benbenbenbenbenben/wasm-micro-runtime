@@ -306,6 +306,9 @@ This is now a real but narrow operational slice, not yet full resource semantics
   including both the `none` and `some` discriminants with dummy payload
   emission for the param path and flat composite result decoding for the
   result path
+- `result<scalar,scalar>` type params and results through the canon lift
+  path, including both `ok` and `error` discriminants with per-case
+  payload dispatch
 
 ## 2. What is still missing for full component-model support
 
@@ -436,8 +439,8 @@ Major Canonical ABI gaps remain:
   direct tuple/record `list<string>`-leaf plus nested `list<scalar>` /
   `list<enum>` / `list<flags>` leaves in exported tuple/record values and
   host-import tuple/record parameter/result values
-- no variant / result marshalling
-  (enum, flags, and option<scalar> params+results are now supported)
+- no variant marshalling
+  (enum, flags, option<scalar>, and result<scalar,scalar> are now supported)
 - no non-string memory-backed leaves inside tuple/record Canonical ABI values beyond nested `list<scalar>` leaves for exported canon-lift calls and host-import tuple/record parameters
 - no broader composite flattening/lifting rules beyond the current
   string / variable-length `list<scalar>` / variable-length `list<string>`
@@ -507,13 +510,13 @@ What is still missing:
 - first-class typed runtime semantics for records
 - first-class typed runtime semantics for tuples
 - variants
-- results
 - richer defined-type introspection/manipulation
 
-(Enum, flags, list<enum>, list<flags>, and option<scalar> (both params
-and results) are now supported in the Canonical ABI. Option is treated
-as a composite type with a discriminant and inner payload; the current
-implementation covers scalar payloads.)
+(Enum, flags, list<enum>, list<flags>, option<scalar>, and
+result<scalar,scalar> (both params and results) are now supported in
+the Canonical ABI. Option and result are treated as composite types
+with a discriminant and inner payload(s); the current implementation
+covers scalar payloads.)
 
 Today, composite value support is still mostly "opaque bytes plus limited special cases", not full typed component-value semantics.
 
