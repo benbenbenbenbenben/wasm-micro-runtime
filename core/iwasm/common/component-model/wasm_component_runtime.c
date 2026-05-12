@@ -9205,6 +9205,38 @@ validate_component_public_composite_bytes(
     }
 }
 
+static uint32
+component_type_flat_i32_count(const WASMComponent *component,
+                               const WASMComponentValueType *value_type)
+{
+    if (!value_type)
+        return 0;
+
+    if (value_type->type == WASM_COMP_VAL_TYPE_PRIMVAL) {
+        uint8 prim_type = value_type->type_specific.primval_type;
+        if (prim_type == WASM_COMP_PRIMVAL_STRING)
+            return 2;
+        uint8 core_type = 0;
+        wasm_valkind_t kind = WASM_I32;
+        if (component_scalar_prim_to_core(prim_type, &core_type, &kind))
+            return 1;
+        return 0;
+    }
+
+    const WASMComponentTypes *entry =
+        wasm_component_lookup_type(component, value_type->type_specific.type_idx);
+    if (!entry || entry->tag != WASM_COMP_DEF_TYPE || !entry->type.def_val_type)
+        return 0;
+
+    switch (entry->type.def_val_type->tag) {
+        case WASM_COMP_DEF_VAL_ENUM:
+        case WASM_COMP_DEF_VAL_FLAGS:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
 static bool
 flatten_component_public_composite_bytes(
     WASMComponentInstance *inst, const WASMComponent *component,
@@ -9578,6 +9610,15 @@ flatten_component_public_composite_bytes(
                 core_args[*core_arg_index_io] = discriminant_value;
                 (*core_arg_index_io)++;
                 (*offset_io) += consumed;
+                /* Compute max payload flat width across all variant cases */
+                uint32 max_payload_width = 0;
+                for (uint32 case_i = 0; case_i < shape.def_type->def_val.variant->count; case_i++) {
+                    uint32 case_width = component_type_flat_i32_count(
+                        component,
+                        shape.def_type->def_val.variant->cases[case_i].value_type);
+                    if (case_width > max_payload_width)
+                        max_payload_width = case_width;
+                }
                 if ((uint32)discriminant_value.of.i32
                         < shape.def_type->def_val.variant->count
                     && shape.def_type->def_val.variant
@@ -9591,19 +9632,40 @@ flatten_component_public_composite_bytes(
                             data, byte_size, offset_io, param_index, core_type,
                             core_args, core_arg_index_io, allocation_tracker))
                         return false;
+                    /* Pad to max_payload_width */
+                    for (uint32 k = component_type_flat_i32_count(
+                             component,
+                             shape.def_type->def_val.variant->cases
+                                 [discriminant_value.of.i32]
+                                 .value_type);
+                         k < max_payload_width; k++) {
+                        if (*core_arg_index_io >= core_type->param_count)
+                            return set_component_param_flattening_error(inst);
+                        if (core_type->types[*core_arg_index_io] != VALUE_TYPE_I32)
+                            return set_component_call_error_fmt(
+                                inst,
+                                "component canon lift function parameter %u does "
+                                "not match the core function signature",
+                                param_index);
+                        core_args[*core_arg_index_io].kind = WASM_I32;
+                        core_args[*core_arg_index_io].of.i32 = 0;
+                        (*core_arg_index_io)++;
+                    }
                 }
                 else {
-                    if (*core_arg_index_io >= core_type->param_count)
-                        return set_component_param_flattening_error(inst);
-                    if (core_type->types[*core_arg_index_io] != VALUE_TYPE_I32)
-                        return set_component_call_error_fmt(
-                            inst,
-                            "component canon lift function parameter %u does "
-                            "not match the core function signature",
-                            param_index);
-                    core_args[*core_arg_index_io].kind = WASM_I32;
-                    core_args[*core_arg_index_io].of.i32 = 0;
-                    (*core_arg_index_io)++;
+                    for (uint32 k = 0; k < max_payload_width; k++) {
+                        if (*core_arg_index_io >= core_type->param_count)
+                            return set_component_param_flattening_error(inst);
+                        if (core_type->types[*core_arg_index_io] != VALUE_TYPE_I32)
+                            return set_component_call_error_fmt(
+                                inst,
+                                "component canon lift function parameter %u does "
+                                "not match the core function signature",
+                                param_index);
+                        core_args[*core_arg_index_io].kind = WASM_I32;
+                        core_args[*core_arg_index_io].of.i32 = 0;
+                        (*core_arg_index_io)++;
+                    }
                 }
             }
             return true;
@@ -9629,6 +9691,17 @@ flatten_component_public_composite_bytes(
                 core_args[*core_arg_index_io] = discriminant_value;
                 (*core_arg_index_io)++;
                 (*offset_io) += consumed;
+                /* Compute max payload flat width across ok and error types */
+                uint32 max_payload_width = 0;
+                {
+                    uint32 ok_width = component_type_flat_i32_count(
+                        component,
+                        shape.def_type->def_val.result->result_type);
+                    uint32 err_width = component_type_flat_i32_count(
+                        component,
+                        shape.def_type->def_val.result->error_type);
+                    max_payload_width = ok_width > err_width ? ok_width : err_width;
+                }
                 if (discriminant_value.of.i32 == 0
                     && shape.def_type->def_val.result->result_type) {
                     if (!flatten_component_public_composite_bytes(
@@ -9637,6 +9710,23 @@ flatten_component_public_composite_bytes(
                             byte_size, offset_io, param_index, core_type,
                             core_args, core_arg_index_io, allocation_tracker))
                         return false;
+                    /* Pad to max_payload_width */
+                    for (uint32 k = component_type_flat_i32_count(
+                             component,
+                             shape.def_type->def_val.result->result_type);
+                         k < max_payload_width; k++) {
+                        if (*core_arg_index_io >= core_type->param_count)
+                            return set_component_param_flattening_error(inst);
+                        if (core_type->types[*core_arg_index_io] != VALUE_TYPE_I32)
+                            return set_component_call_error_fmt(
+                                inst,
+                                "component canon lift function parameter %u does "
+                                "not match the core function signature",
+                                param_index);
+                        core_args[*core_arg_index_io].kind = WASM_I32;
+                        core_args[*core_arg_index_io].of.i32 = 0;
+                        (*core_arg_index_io)++;
+                    }
                 }
                 else if (discriminant_value.of.i32 == 1
                          && shape.def_type->def_val.result->error_type) {
@@ -9646,19 +9736,38 @@ flatten_component_public_composite_bytes(
                             byte_size, offset_io, param_index, core_type,
                             core_args, core_arg_index_io, allocation_tracker))
                         return false;
+                    /* Pad to max_payload_width */
+                    for (uint32 k = component_type_flat_i32_count(
+                             component,
+                             shape.def_type->def_val.result->error_type);
+                         k < max_payload_width; k++) {
+                        if (*core_arg_index_io >= core_type->param_count)
+                            return set_component_param_flattening_error(inst);
+                        if (core_type->types[*core_arg_index_io] != VALUE_TYPE_I32)
+                            return set_component_call_error_fmt(
+                                inst,
+                                "component canon lift function parameter %u does "
+                                "not match the core function signature",
+                                param_index);
+                        core_args[*core_arg_index_io].kind = WASM_I32;
+                        core_args[*core_arg_index_io].of.i32 = 0;
+                        (*core_arg_index_io)++;
+                    }
                 }
                 else {
-                    if (*core_arg_index_io >= core_type->param_count)
-                        return set_component_param_flattening_error(inst);
-                    if (core_type->types[*core_arg_index_io] != VALUE_TYPE_I32)
-                        return set_component_call_error_fmt(
-                            inst,
-                            "component canon lift function parameter %u does "
-                            "not match the core function signature",
-                            param_index);
-                    core_args[*core_arg_index_io].kind = WASM_I32;
-                    core_args[*core_arg_index_io].of.i32 = 0;
-                    (*core_arg_index_io)++;
+                    for (uint32 k = 0; k < max_payload_width; k++) {
+                        if (*core_arg_index_io >= core_type->param_count)
+                            return set_component_param_flattening_error(inst);
+                        if (core_type->types[*core_arg_index_io] != VALUE_TYPE_I32)
+                            return set_component_call_error_fmt(
+                                inst,
+                                "component canon lift function parameter %u does "
+                                "not match the core function signature",
+                                param_index);
+                        core_args[*core_arg_index_io].kind = WASM_I32;
+                        core_args[*core_arg_index_io].of.i32 = 0;
+                        (*core_arg_index_io)++;
+                    }
                 }
             }
             return true;
