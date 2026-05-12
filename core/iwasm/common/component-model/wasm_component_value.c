@@ -403,6 +403,62 @@ wasm_component_value_destroy(wasm_component_value_t *value)
     memset(value, 0, sizeof(*value));
 }
 
+static bool
+init_component_runtime_resource_handle_value(
+    WASMComponentRuntimeValue *runtime_value, const WASMComponent *component,
+    const WASMComponentValueType *value_type,
+    const wasm_component_value_t *public_value, char *error_buf,
+    uint32 error_buf_size)
+{
+    const WASMComponentPublicResourceValue *resource_value =
+        public_value && public_value->storage_kind == WASM_COMPONENT_VALUE_STORAGE_RESOURCE
+            ? (const WASMComponentPublicResourceValue *)public_value->storage.owned_data
+            : NULL;
+    uint32 handle = 0;
+    uint8 encoded_handle[5];
+    uint32 encoded_size = 0;
+
+    if (!resource_value
+        || resource_value->magic != WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_MAGIC)
+        return set_component_value_error(error_buf, error_buf_size,
+                                         "component runtime public resource value "
+                                         "is invalid");
+
+    if (resource_value->kind == WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_TRANSFERRED) {
+        WASMComponentPublicResourceValue *mutable_resource_value =
+            (WASMComponentPublicResourceValue *)resource_value;
+
+        handle = resource_value->handle;
+        if (!handle
+            || !wasm_component_resource_restore_owned_handle(
+                mutable_resource_value, error_buf, error_buf_size))
+            return false;
+    }
+    else if (resource_value->kind == WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_BORROWED) {
+        if (!wasm_component_resource_get_borrowed_owner(
+                resource_value, NULL, NULL, &handle, error_buf, error_buf_size))
+            return false;
+    }
+    else {
+        return set_component_value_error(
+            error_buf, error_buf_size,
+            "component runtime values do not support pending imported "
+            "resource results");
+    }
+
+    do {
+        uint8 byte = (uint8)(handle & 0x7f);
+        handle >>= 7;
+        if (handle != 0)
+            byte |= 0x80;
+        encoded_handle[encoded_size++] = byte;
+    } while (handle != 0);
+
+    return wasm_component_runtime_value_init_inline(
+        runtime_value, component, value_type, encoded_handle, encoded_size,
+        error_buf, error_buf_size);
+}
+
 bool
 wasm_component_runtime_value_init_public(
     WASMComponentRuntimeValue *runtime_value, const WASMComponent *component,
@@ -444,6 +500,11 @@ wasm_component_runtime_value_init_public(
         return set_component_value_error(error_buf, error_buf_size,
                                          "component runtime public value has an "
                                          "unsupported type kind");
+
+    if (public_value->storage_kind == WASM_COMPONENT_VALUE_STORAGE_RESOURCE)
+        return init_component_runtime_resource_handle_value(
+            runtime_value, component, value_type, public_value, error_buf,
+            error_buf_size);
 
     if (public_value->byte_size > 0) {
         data = get_component_public_value_data(public_value);

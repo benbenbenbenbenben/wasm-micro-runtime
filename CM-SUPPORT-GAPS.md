@@ -512,7 +512,9 @@ Supported today:
 - materializing multiple start results when the start function is a
   canon-lifted multi-result function using the retptr-backed Canonical ABI
   result-area shape for the current supported scalar / UTF-8 string /
-  `list<scalar>` / `list<string>` / tuple-record-leaf result-vector subset
+  `list<scalar>` / `list<string>` / tuple-record-leaf result-vector subset,
+  plus the tested direct local-resource `own<resource> + s32` /
+  `borrow<resource> + s32` subset
 - materializing multiple start results when the start function is a
   host-imported multi-result component function whose results stay within the
   tested scalar-only or non-scalar `string + s32` / `list<scalar> + s32` /
@@ -525,12 +527,17 @@ Still missing:
 - broader start-section execution for non-scalar multi-result host-imported
   component functions beyond the current tested `string + s32` /
   `list<scalar> + s32` / `record{s32, string, list<scalar>} + s32` subset
-- host-import multi-result execution for broader retptr/canon-lifted
-  resource-result seams beyond the current tested direct callback and direct
-  lowered `own<resource> + s32` / `borrow<resource> + s32` subset
+- host-import multi-result execution for broader resource-result seams beyond
+  the current tested direct callback and direct lowered
+  `own<resource> + s32` / `borrow<resource> + s32` subset
+- start-section execution for retptr/canon-lifted resource multi-result
+  functions beyond the current tested local
+  `own<resource> + s32` / `borrow<resource> + s32` subset
 - retptr-backed Canonical ABI multi-results beyond the current scalar /
   UTF-8 string / `list<scalar>` / `list<string>` / tuple-record-leaf
-  result-vector subset
+  result-vector subset plus the current direct top-level local/imported
+  `own<resource> + s32` / `borrow<resource> + s32` public-call subset and the
+  tested direct local `own<resource> + string` witness
 - Canonical ABI beyond the current supported public-value subset
 - the more complete execution space needed for start-heavy real-world components
 
@@ -592,6 +599,17 @@ What exists:
     `own<resource> + s32` host-import seam on the retptr/result-area path
   - rollback/restoration when a later result lane fails after an earlier local
     owned-resource round-trip lane succeeded
+- retptr-backed canon-lift multi-result transport for the current tested direct
+  top-level exported-function/start subset:
+  - direct canon-lift `own<resource> + s32` result vectors that round-trip an
+    existing live owned handle for the current local/imported-resource subset
+  - direct canon-lift `borrow<resource> + s32` result vectors that return a
+    borrowed alias of the current borrowed argument for the current
+    local/imported-resource subset
+  - direct canon-lift `own<resource> + string` result vectors for the current
+    local-resource subset
+  - top-level start-section materialization of direct canon-lift local
+    `own<resource> + s32` / `borrow<resource> + s32` result vectors
 - synchronous host callback transport of borrowed resource parameters for host
   function imports, including both local owned handles and imported handles
   without consuming ownership
@@ -653,10 +671,15 @@ What is still missing:
   imported-resource binding, and the current owned-resource /
   borrowed-parameter / scalar borrowed-result call subset plus the current
   direct host-import/lowered `own<resource> + s32` /
-  `borrow<resource> + s32` multi-result subset; broader borrow/lend behavior,
-  retptr/canon-lift multi-result resource flows, composite/non-scalar
-  borrow-result flows, and stricter caller-side ownership/consumption
-  semantics still remain open
+  `borrow<resource> + s32` multi-result subset plus the current direct
+  top-level retptr/canon-lift local/imported `own<resource> + s32` /
+  `borrow<resource> + s32` subset, the tested local
+  `own<resource> + string` retptr witness, and top-level start materialization
+  of the local retptr `own<resource> + s32` / `borrow<resource> + s32` subset;
+  broader borrow/lend behavior, imported-resource retptr start flows, broader
+  mixed/composite resource retptr vectors, composite/non-scalar borrow-result
+  flows, and stricter caller-side ownership/consumption semantics still remain
+  open
 - full trap/failure-path operational cleanup semantics
 
 So resources now have a narrow executable seam, not a finished runtime.
@@ -672,6 +695,9 @@ Nested components now support:
 - nested local `core instance` sections in instantiate/`with_args` form
 - nested inline/`without_args` `core instance` expressions for core-module
   re-exports
+- nested `alias core export` for `func`
+- nested `alias core export` for `memory`, including re-export through a nested
+  inline core instance
 - nested `core type` sections as tolerated structural metadata around those
   flows
 - typed nested `core module` imports that use those `core type` entries for
@@ -679,11 +705,15 @@ Nested components now support:
 
 Nested components still reject:
 
+- nested `alias core export` for broader still-unwired core sorts such as
+  `table` / `global`
+- nested `alias outer` for core runtime refs
 - broader operational use of nested `core type` entries beyond the current
   typed core-module import matching subset
 
 The runtime can now thread nested local core-module handles and construct nested
-local/synthetic core instances, but it still does **not** construct a full
+local/synthetic core instances, including the current nested core-function and
+core-memory alias/re-export subset, but it still does **not** construct a full
 nested core runtime.
 
 ## 9. Remaining spec limitations still apply
@@ -731,4 +761,4 @@ If this feature is described as:
 
 The right maturity label today is:
 
-> **A real but still partial component runtime: public host APIs, scalar / UTF-8 string / `list<scalar>` / limited tuple-record canon-lift calls, a narrow executable direct-core-call `canon lower` subset, supported host-provided component-function imports, runtime values, value imports/exports, start execution slices, and a narrow scalar local/imported resource-call subset (including borrowed callback results) are implemented; full support is still blocked on broader canon-lower/imported-function lowering, broader composite Canonical ABI and value semantics, operational resources, remaining host API gaps, and nested core-runtime support.**
+> **A real but still partial component runtime: public host APIs, scalar / UTF-8 string / `list<scalar>` / limited tuple-record canon-lift calls, a narrow executable direct-core-call `canon lower` subset, supported host-provided component-function imports, runtime values, value imports/exports, start execution slices, a narrow scalar local/imported resource-call subset (including borrowed callback results), and a limited nested core-runtime subset for local core modules/instances plus nested core `func`/`memory` aliases are implemented; full support is still blocked on broader canon-lower/imported-function lowering, broader composite Canonical ABI and value semantics, operational resources, remaining host API gaps, and the rest of nested core-runtime support.**

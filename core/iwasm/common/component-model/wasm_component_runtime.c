@@ -41,6 +41,9 @@ typedef struct WASMNestedComponentLocalBindings {
     uint32 core_instance_count;
     uint32 core_instance_capacity;
     WASMComponentCoreRuntimeInstance **core_instances;
+    uint32 core_memory_count;
+    uint32 core_memory_capacity;
+    WASMComponentCoreRuntimeRef *core_memories;
     uint32 core_func_count;
     uint32 core_func_capacity;
     WASMComponentCoreRuntimeRef *core_funcs;
@@ -947,7 +950,8 @@ alloc_component_runtime_array(void **buffer, uint32 count, uint32 elem_size,
 static bool
 alloc_nested_component_local_bindings(
     WASMNestedComponentLocalBindings *bindings, uint32 core_module_capacity,
-    uint32 core_instance_capacity, uint32 core_func_capacity,
+    uint32 core_instance_capacity, uint32 core_memory_capacity,
+    uint32 core_func_capacity,
     uint32 func_capacity, uint32 value_capacity, uint32 instance_capacity,
     uint32 component_capacity, char *error_buf, uint32 error_buf_size)
 {
@@ -960,6 +964,10 @@ alloc_nested_component_local_bindings(
         || !alloc_component_runtime_array((void **)&bindings->core_instances,
                                           core_instance_capacity,
                                           sizeof(*bindings->core_instances),
+                                          error_buf, error_buf_size)
+        || !alloc_component_runtime_array((void **)&bindings->core_memories,
+                                          core_memory_capacity,
+                                          sizeof(*bindings->core_memories),
                                           error_buf, error_buf_size)
         || !alloc_component_runtime_array((void **)&bindings->core_funcs,
                                           core_func_capacity,
@@ -992,6 +1000,10 @@ alloc_nested_component_local_bindings(
             wasm_runtime_free(bindings->funcs);
             bindings->funcs = NULL;
         }
+        if (bindings->core_memories) {
+            wasm_runtime_free(bindings->core_memories);
+            bindings->core_memories = NULL;
+        }
         if (bindings->core_funcs) {
             wasm_runtime_free(bindings->core_funcs);
             bindings->core_funcs = NULL;
@@ -1013,6 +1025,7 @@ alloc_nested_component_local_bindings(
 
     bindings->core_module_capacity = core_module_capacity;
     bindings->core_instance_capacity = core_instance_capacity;
+    bindings->core_memory_capacity = core_memory_capacity;
     bindings->core_func_capacity = core_func_capacity;
     bindings->func_capacity = func_capacity;
     bindings->value_capacity = value_capacity;
@@ -1031,6 +1044,10 @@ free_nested_component_local_bindings(WASMNestedComponentLocalBindings *bindings)
     if (bindings->core_instances) {
         wasm_runtime_free(bindings->core_instances);
         bindings->core_instances = NULL;
+    }
+    if (bindings->core_memories) {
+        wasm_runtime_free(bindings->core_memories);
+        bindings->core_memories = NULL;
     }
     if (bindings->core_funcs) {
         wasm_runtime_free(bindings->core_funcs);
@@ -1057,6 +1074,8 @@ free_nested_component_local_bindings(WASMNestedComponentLocalBindings *bindings)
     bindings->core_module_capacity = 0;
     bindings->core_instance_count = 0;
     bindings->core_instance_capacity = 0;
+    bindings->core_memory_count = 0;
+    bindings->core_memory_capacity = 0;
     bindings->core_func_count = 0;
     bindings->core_func_capacity = 0;
     bindings->func_count = 0;
@@ -1095,6 +1114,20 @@ append_nested_component_local_core_instance(
             "nested component local core instance space overflow");
 
     bindings->core_instances[bindings->core_instance_count++] = core_instance;
+    return true;
+}
+
+static bool
+append_nested_component_local_core_memory(
+    WASMNestedComponentLocalBindings *bindings, WASMComponentCoreRuntimeRef ref,
+    char *error_buf, uint32 error_buf_size)
+{
+    if (bindings->core_memory_count >= bindings->core_memory_capacity)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "nested component local core memory space overflow");
+
+    bindings->core_memories[bindings->core_memory_count++] = ref;
     return true;
 }
 
@@ -1296,6 +1329,14 @@ resolve_nested_component_local_core_sort_idx(
             memset(out_ref, 0, sizeof(*out_ref));
             out_ref->type = WASM_COMP_CORE_RUNTIME_REF_MODULE;
             out_ref->of.module = bindings->core_modules[sort_idx->idx];
+            return true;
+        case WASM_COMP_CORE_SORT_MEMORY:
+            if (sort_idx->idx >= bindings->core_memory_count)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "nested component core memory index %u is out of bounds",
+                    sort_idx->idx);
+            *out_ref = bindings->core_memories[sort_idx->idx];
             return true;
         case WASM_COMP_CORE_SORT_INSTANCE:
             if (sort_idx->idx >= bindings->core_instance_count)
@@ -6271,6 +6312,38 @@ try_lookup_component_owned_resource_transfer_type(
 }
 
 static bool
+classify_component_canon_lift_retptr_result_type(
+    WASMComponentInstance *inst,
+    const WASMComponentRuntimeResourceState *resource_state,
+    const WASMComponent *component, const WASMComponentValueType *value_type,
+    const char *position, uint32 index, bool *is_owned_resource_out,
+    bool *is_borrowed_resource_out,
+    WASMComponentCanonLiftValueInfo *type_info_out,
+    uint32 *resource_type_idx_out)
+{
+    *is_owned_resource_out = false;
+    *is_borrowed_resource_out = false;
+
+    if (!try_lookup_component_droppable_owned_resource_type(
+            inst, resource_state, component, value_type, position, index,
+            is_owned_resource_out, type_info_out, resource_type_idx_out))
+        return false;
+
+    if (*is_owned_resource_out)
+        return true;
+
+    if (!try_lookup_component_borrowed_resource_param_type(
+            inst, resource_state, component, value_type, position, index,
+            is_borrowed_resource_out, type_info_out, resource_type_idx_out))
+        return false;
+
+    return *is_borrowed_resource_out
+               || lookup_component_canon_lift_value_type(
+                   component, value_type, position, index, true, false, true,
+                   true, type_info_out, inst);
+}
+
+static bool
 resolve_component_owned_result_type(
     WASMComponentInstance *inst, const WASMComponentRuntimeFunc *function,
     uint32 result_index,
@@ -7278,6 +7351,9 @@ resolve_component_canon_lift_abi(WASMComponentInstance *inst,
                 bool is_string_result = false;
                 bool is_list_scalar_result = false;
                 bool is_list_string_result = false;
+                bool has_owned_resource_result = false;
+                bool has_borrowed_resource_result = false;
+                WASMComponentCanonLiftValueInfo result_type_info = { 0 };
 
                 if (!resolve_component_runtime_primitive_type(
                         component, &func_type->results->results[i],
@@ -7363,11 +7439,24 @@ resolve_component_canon_lift_abi(WASMComponentInstance *inst,
                     continue;
                 }
 
+                if (!classify_component_canon_lift_retptr_result_type(
+                        inst, function->resource_state ? function->resource_state
+                                                       : inst->resource_state,
+                        component, &func_type->results->results[i], "result", i,
+                        &has_owned_resource_result,
+                        &has_borrowed_resource_result, &result_type_info, NULL))
+                    return set_component_runtime_error_from_exception(
+                        inst, error_buf, error_buf_size,
+                        "component canon lift function result type resolution "
+                        "failed");
+                if (has_owned_resource_result || has_borrowed_resource_result)
+                    continue;
+
                 if (!is_primitive_result || result_prim_type == WASM_COMP_PRIMVAL_STRING)
                     return set_component_runtime_error_fmt(
                         error_buf, error_buf_size,
                         "component canon lift function only supports scalar, "
-                        "string, list<scalar>, or tuple/record "
+                        "string, list<scalar>, own/borrow resource, or tuple/record "
                         "multi-result signatures");
             }
             goto validate_required_opts;
@@ -13075,9 +13164,13 @@ host_import_cleanup_fail:
                         || result_shape.def_type->tag == WASM_COMP_DEF_VAL_TUPLE))
                     continue;
 
-                if (!lookup_component_canon_lift_value_type(
+                if (!classify_component_canon_lift_retptr_result_type(
+                        inst, function->resource_state ? function->resource_state
+                                                       : inst->resource_state,
                         component, &component_type->results->results[i], "result",
-                        i, true, false, true, true, &result_info, inst))
+                        i, &has_owned_resource_result,
+                        &has_borrowed_resource_result, &result_info,
+                        &borrowed_result_resource_type_idx))
                     goto cleanup;
                 if (result_info.kind != WASM_COMP_CANON_LIFT_VALUE_SCALAR
                     && result_info.kind != WASM_COMP_CANON_LIFT_VALUE_STRING
@@ -13374,6 +13467,11 @@ host_import_cleanup_fail:
     }
     else if (multi_result_retptr_vector) {
         uint8 *ret_area_bytes = NULL;
+        uint32 stack_retptr_owned_result_handles[16];
+        uint32 stack_retptr_owned_result_type_idxs[16];
+        uint32 *retptr_owned_result_handles = stack_retptr_owned_result_handles;
+        uint32 *retptr_owned_result_type_idxs = stack_retptr_owned_result_type_idxs;
+        uint32 retptr_owned_result_count = 0;
 
         if (core_results[0].kind != WASM_I32) {
             set_component_call_error(
@@ -13401,15 +13499,37 @@ host_import_cleanup_fail:
             goto cleanup;
         }
 
+        if (expected_result_count
+            > sizeof(stack_retptr_owned_result_handles)
+                  / sizeof(stack_retptr_owned_result_handles[0])) {
+            retptr_owned_result_handles =
+                wasm_runtime_malloc(sizeof(uint32) * expected_result_count * 2);
+            if (!retptr_owned_result_handles) {
+                set_component_call_error(
+                    inst, "component canon lift function could not allocate "
+                          "resource multi-result tracking");
+                call_succeeded = false;
+                goto cleanup;
+            }
+            retptr_owned_result_type_idxs =
+                retptr_owned_result_handles + expected_result_count;
+        }
+
         for (i = 0; i < expected_result_count; i++) {
             WASMComponentCanonLiftValueShape result_shape_local;
             WASMComponentCanonLiftValueInfo result_info_local;
+            bool result_has_owned_resource = false;
+            bool result_has_borrowed_resource = false;
+            uint32 result_resource_type_idx =
+                WASM_COMPONENT_RESOURCE_INVALID_TYPE_IDX;
 
             if (!resolve_component_canon_lift_value_shape(
                     component, &component_type->results->results[i], "result", i,
                     &result_shape_local, inst)) {
                 for (uint32 j = 0; j < i; j++)
                     wasm_component_value_destroy(&results[j]);
+                if (retptr_owned_result_handles != stack_retptr_owned_result_handles)
+                    wasm_runtime_free(retptr_owned_result_handles);
                 call_succeeded = false;
                 goto cleanup;
             }
@@ -13429,36 +13549,131 @@ host_import_cleanup_fail:
                     destroy_component_result_payload_builder(&builder);
                     for (uint32 j = 0; j < i; j++)
                         wasm_component_value_destroy(&results[j]);
+                    if (retptr_owned_result_handles
+                        != stack_retptr_owned_result_handles)
+                        wasm_runtime_free(retptr_owned_result_handles);
                     call_succeeded = false;
                     goto cleanup;
                 }
                 continue;
             }
 
-            if (!lookup_component_canon_lift_value_type(
-                    component, &component_type->results->results[i], "result", i,
-                    true, false, true, true, &result_info_local, inst)) {
+            if (!classify_component_canon_lift_retptr_result_type(
+                    inst, call_resource_state, component,
+                    &component_type->results->results[i], "result", i,
+                    &result_has_owned_resource, &result_has_borrowed_resource,
+                    &result_info_local, &result_resource_type_idx)) {
                 for (uint32 j = 0; j < i; j++)
                     wasm_component_value_destroy(&results[j]);
+                if (retptr_owned_result_handles != stack_retptr_owned_result_handles)
+                    wasm_runtime_free(retptr_owned_result_handles);
                 call_succeeded = false;
                 goto cleanup;
             }
 
             if (result_info_local.kind == WASM_COMP_CANON_LIFT_VALUE_SCALAR) {
                 wasm_val_t scalar_value = { 0 };
+                bool duplicate_handle = false;
 
                 if (!load_component_canon_memory_scalar_value(
                         inst, result_info_local.prim_type,
                         result_info_local.public_kind,
                         ret_area_bytes + result_offsets[i], result_sizes[i],
-                        &scalar_value)
-                    || !validate_component_scalar_value(
+                        &scalar_value)) {
+                    for (uint32 j = 0; j < i; j++)
+                        wasm_component_value_destroy(&results[j]);
+                    if (retptr_owned_result_handles != stack_retptr_owned_result_handles)
+                        wasm_runtime_free(retptr_owned_result_handles);
+                    call_succeeded = false;
+                    goto cleanup;
+                }
+
+                if (result_has_borrowed_resource) {
+                    WASMComponentCanonBorrowedResourceParam *borrowed_param =
+                        wasm_component_find_borrowed_resource_param_by_handle(
+                            &borrowed_resource_tracker,
+                            (uint32)scalar_value.of.i32, result_resource_type_idx);
+
+                    if (!borrowed_param
+                        || !wasm_component_init_public_borrowed_resource_value(
+                            inst, borrowed_param->owner_resource_state,
+                            borrowed_param->owner_resource_type_idx,
+                            borrowed_param->owner_handle, &results[i])) {
+                        if (!wasm_runtime_get_exception(
+                                (WASMModuleInstanceCommon *)inst))
+                            set_component_call_error(
+                                inst, "component canon lift function borrowed "
+                                      "multi-result must alias a current borrowed "
+                                      "parameter");
+                        for (uint32 j = 0; j < i; j++)
+                            wasm_component_value_destroy(&results[j]);
+                        if (retptr_owned_result_handles
+                            != stack_retptr_owned_result_handles)
+                            wasm_runtime_free(retptr_owned_result_handles);
+                        call_succeeded = false;
+                        goto cleanup;
+                    }
+                    continue;
+                }
+
+                if (!validate_component_scalar_value(
                         inst, &scalar_value, result_info_local.public_kind,
-                        result_info_local.prim_type, "result", i)
-                    || !init_component_public_scalar_result(
+                        result_info_local.prim_type, "result", i)) {
+                    for (uint32 j = 0; j < i; j++)
+                        wasm_component_value_destroy(&results[j]);
+                    if (retptr_owned_result_handles != stack_retptr_owned_result_handles)
+                        wasm_runtime_free(retptr_owned_result_handles);
+                    call_succeeded = false;
+                    goto cleanup;
+                }
+
+                if (result_has_owned_resource
+                    && !wasm_component_validate_public_owned_resource_handle(
+                        inst, call_resource_state, result_resource_type_idx,
+                        (uint32)scalar_value.of.i32)) {
+                    for (uint32 j = 0; j < i; j++)
+                        wasm_component_value_destroy(&results[j]);
+                    if (retptr_owned_result_handles != stack_retptr_owned_result_handles)
+                        wasm_runtime_free(retptr_owned_result_handles);
+                    call_succeeded = false;
+                    goto cleanup;
+                }
+
+                if (result_has_owned_resource) {
+                    for (uint32 j = 0; j < retptr_owned_result_count; j++) {
+                        if (retptr_owned_result_type_idxs[j] == result_resource_type_idx
+                            && retptr_owned_result_handles[j]
+                                   == (uint32)scalar_value.of.i32) {
+                            duplicate_handle = true;
+                            break;
+                        }
+                    }
+                    if (duplicate_handle) {
+                        set_component_call_error(
+                            inst, "component canon lift function own<resource> "
+                                  "multi-result cannot return the same handle twice");
+                        for (uint32 j = 0; j < i; j++)
+                            wasm_component_value_destroy(&results[j]);
+                        if (retptr_owned_result_handles
+                            != stack_retptr_owned_result_handles)
+                            wasm_runtime_free(retptr_owned_result_handles);
+                        call_succeeded = false;
+                        goto cleanup;
+                    }
+
+                    retptr_owned_result_type_idxs[retptr_owned_result_count] =
+                        result_resource_type_idx;
+                    retptr_owned_result_handles[retptr_owned_result_count] =
+                        (uint32)scalar_value.of.i32;
+                    retptr_owned_result_count++;
+                }
+
+                if (!init_component_public_scalar_result(
                         inst, &result_info_local, &scalar_value, &results[i])) {
                     for (uint32 j = 0; j < i; j++)
                         wasm_component_value_destroy(&results[j]);
+                    if (retptr_owned_result_handles != stack_retptr_owned_result_handles)
+                        wasm_runtime_free(retptr_owned_result_handles);
                     call_succeeded = false;
                     goto cleanup;
                 }
@@ -13471,15 +13686,20 @@ host_import_cleanup_fail:
                               ? "string multi-result area"
                               : result_info_local.kind
                                         == WASM_COMP_CANON_LIFT_VALUE_LIST_STRING
-                                    ? "list<string> multi-result area"
-                              : "list<scalar> multi-result area",
-                          &results[i])) {
+                                     ? "list<string> multi-result area"
+                               : "list<scalar> multi-result area",
+                           &results[i])) {
                 for (uint32 j = 0; j < i; j++)
                     wasm_component_value_destroy(&results[j]);
+                if (retptr_owned_result_handles != stack_retptr_owned_result_handles)
+                    wasm_runtime_free(retptr_owned_result_handles);
                 call_succeeded = false;
                 goto cleanup;
             }
         }
+
+        if (retptr_owned_result_handles != stack_retptr_owned_result_handles)
+            wasm_runtime_free(retptr_owned_result_handles);
     }
     else if (expected_result_count == 1) {
         if (has_composite_result) {
@@ -13586,7 +13806,7 @@ host_import_cleanup_fail:
     call_succeeded = true;
 
 cleanup:
-    if (core_call_attempted)
+    if (core_call_attempted && call_succeeded)
         wasm_component_consume_owned_resource_params(&owned_resource_tracker);
     wasm_component_cleanup_borrowed_resource_params(inst,
                                                     &borrowed_resource_tracker);
@@ -15380,6 +15600,7 @@ count_nested_component_local_bindings(const WASMComponent *nested_component,
                                       uint32 *import_count,
                                       uint32 *core_module_count,
                                       uint32 *core_instance_count,
+                                      uint32 *core_memory_count,
                                       uint32 *core_func_count,
                                       uint32 *func_count,
                                       uint32 *value_count,
@@ -15396,9 +15617,10 @@ count_nested_component_local_bindings(const WASMComponent *nested_component,
 {
     uint32 i;
 
-    *import_count = *core_module_count = *core_instance_count = *core_func_count
-        = *func_count = *value_count = *instance_count = *component_count
-        = *owned_func_count = *owned_value_count = *owned_component_count
+    *import_count = *core_module_count = *core_instance_count
+        = *core_memory_count = *core_func_count = *func_count = *value_count
+        = *instance_count = *component_count = *owned_func_count
+        = *owned_value_count = *owned_component_count
         = *owned_core_instance_count = *owned_lowered_func_count
         = *owned_instance_count = *export_count = 0;
 
@@ -15524,6 +15746,9 @@ count_nested_component_local_bindings(const WASMComponent *nested_component,
                         switch (alias_def->sort->core_sort) {
                             case WASM_COMP_CORE_SORT_FUNC:
                                 (*core_func_count)++;
+                                break;
+                            case WASM_COMP_CORE_SORT_MEMORY:
+                                (*core_memory_count)++;
                                 break;
                             default:
                                 return set_component_runtime_error_fmt(
@@ -18603,6 +18828,9 @@ resolve_nested_component_alias_section(
                 case WASM_COMP_CORE_SORT_FUNC:
                     expected_core_type = WASM_COMP_CORE_RUNTIME_REF_FUNC;
                     break;
+                case WASM_COMP_CORE_SORT_MEMORY:
+                    expected_core_type = WASM_COMP_CORE_RUNTIME_REF_MEMORY;
+                    break;
                 default:
                     return set_component_runtime_error_fmt(
                         error_buf, error_buf_size,
@@ -18614,9 +18842,15 @@ resolve_nested_component_alias_section(
                 bindings->core_instances[alias_def->target.core_exported.instance_idx];
             name = alias_def->target.core_exported.name->name;
             if (!lookup_core_instance_export(core_instance, name, expected_core_type,
-                                             &core_ref, error_buf, error_buf_size)
-                || !append_nested_component_local_core_func(
-                    bindings, core_ref, error_buf, error_buf_size))
+                                             &core_ref, error_buf, error_buf_size))
+                return false;
+            if (expected_core_type == WASM_COMP_CORE_RUNTIME_REF_MEMORY) {
+                if (!append_nested_component_local_core_memory(
+                        bindings, core_ref, error_buf, error_buf_size))
+                    return false;
+            }
+            else if (!append_nested_component_local_core_func(
+                         bindings, core_ref, error_buf, error_buf_size))
                 return false;
             continue;
         }
@@ -18756,7 +18990,8 @@ build_component_runtime_instance_from_component(
 
     if (!count_nested_component_local_bindings(
             component, &import_count, &bindings.core_module_capacity,
-            &bindings.core_instance_capacity, &bindings.core_func_capacity,
+            &bindings.core_instance_capacity, &bindings.core_memory_capacity,
+            &bindings.core_func_capacity,
             &bindings.func_capacity, &bindings.value_capacity,
             &bindings.instance_capacity, &bindings.component_capacity,
             &owned_func_count, &owned_value_count, &owned_component_count,
@@ -18772,7 +19007,8 @@ build_component_runtime_instance_from_component(
 
     if (!alloc_nested_component_local_bindings(
             &bindings, bindings.core_module_capacity,
-            bindings.core_instance_capacity, bindings.core_func_capacity,
+            bindings.core_instance_capacity, bindings.core_memory_capacity,
+            bindings.core_func_capacity,
             bindings.func_capacity, bindings.value_capacity,
             bindings.instance_capacity, bindings.component_capacity, error_buf,
             error_buf_size)
