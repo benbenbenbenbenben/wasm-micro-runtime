@@ -3386,6 +3386,38 @@ validate_lowered_import_composite_param_signature(
                 "component canon lower direct core-call bindings only support "
                 "variable-length list<scalar>/list<string> leaves inside "
                 "parameters");
+        case WASM_COMP_DEF_VAL_ENUM:
+        {
+            uint8 expected_core_type;
+            wasm_valkind_t ignored_public_kind;
+
+            if (!component_scalar_prim_to_core(WASM_COMP_PRIMVAL_U32,
+                                               &expected_core_type,
+                                               &ignored_public_kind))
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "component canon lower direct core-call bindings only "
+                    "support tuple/record parameters with scalar, UTF-8 "
+                    "string, or variable-length list<scalar> leaves");
+
+            if (*core_param_index_io >= expected_type->param_count
+                || expected_type->types[*core_param_index_io] != expected_core_type)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "core import parameter %u does not match the lowered "
+                    "component function signature",
+                    *core_param_index_io);
+
+            (*core_param_index_io)++;
+            (*flat_param_count_io)++;
+            return *flat_param_count_io <= 16
+                       ? true
+                       : set_component_runtime_error_fmt(
+                             error_buf, error_buf_size,
+                             "component canon lower direct core-call bindings "
+                             "do not support composite parameters flattened "
+                             "beyond 16 core arguments");
+        }
         default:
             return set_component_runtime_error_fmt(
                 error_buf, error_buf_size,
@@ -5964,6 +5996,8 @@ classify_component_runtime_composite_param(const WASMComponent *component,
                 "variable-length list<scalar>/list<string> leaves inside "
                 "tuple/record parameters",
                 param_index);
+        case WASM_COMP_DEF_VAL_ENUM:
+            return true;
         default:
             return set_component_runtime_error_fmt(
                 error_buf, error_buf_size,
@@ -6122,6 +6156,8 @@ classify_component_runtime_composite_result(const WASMComponent *component,
                 error_buf, error_buf_size,
                 "component canon lift function result 0 does not support "
                 "borrow<resource> leaves inside tuple/record results");
+        case WASM_COMP_DEF_VAL_ENUM:
+            return true;
         default:
             return set_component_runtime_error_fmt(
                 error_buf, error_buf_size,
@@ -6318,6 +6354,16 @@ lookup_component_canon_lift_value_type(const WASMComponent *component,
             inst, "component canon lift function %s %u requires memory-backed "
                   "Canonical ABI for %s",
             position, index, component_def_type_name(def_type->tag));
+    }
+
+    if (def_type->tag == WASM_COMP_DEF_VAL_ENUM) {
+        memset(out_info, 0, sizeof(*out_info));
+        out_info->kind = WASM_COMP_CANON_LIFT_VALUE_SCALAR;
+        out_info->declared_as_defined = true;
+        out_info->prim_type = WASM_COMP_PRIMVAL_U32;
+        out_info->core_type = VALUE_TYPE_I32;
+        out_info->public_kind = WASM_I32;
+        return true;
     }
 
     return set_component_call_error_fmt(
