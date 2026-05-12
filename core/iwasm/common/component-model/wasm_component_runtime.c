@@ -3387,6 +3387,7 @@ validate_lowered_import_composite_param_signature(
                 "variable-length list<scalar>/list<string> leaves inside "
                 "parameters");
         case WASM_COMP_DEF_VAL_ENUM:
+        case WASM_COMP_DEF_VAL_FLAGS:
         {
             uint8 expected_core_type;
             wasm_valkind_t ignored_public_kind;
@@ -5997,6 +5998,7 @@ classify_component_runtime_composite_param(const WASMComponent *component,
                 "tuple/record parameters",
                 param_index);
         case WASM_COMP_DEF_VAL_ENUM:
+        case WASM_COMP_DEF_VAL_FLAGS:
             return true;
         default:
             return set_component_runtime_error_fmt(
@@ -6157,6 +6159,7 @@ classify_component_runtime_composite_result(const WASMComponent *component,
                 "component canon lift function result 0 does not support "
                 "borrow<resource> leaves inside tuple/record results");
         case WASM_COMP_DEF_VAL_ENUM:
+        case WASM_COMP_DEF_VAL_FLAGS:
             return true;
         default:
             return set_component_runtime_error_fmt(
@@ -6356,7 +6359,8 @@ lookup_component_canon_lift_value_type(const WASMComponent *component,
             position, index, component_def_type_name(def_type->tag));
     }
 
-    if (def_type->tag == WASM_COMP_DEF_VAL_ENUM) {
+    if (def_type->tag == WASM_COMP_DEF_VAL_ENUM
+        || def_type->tag == WASM_COMP_DEF_VAL_FLAGS) {
         memset(out_info, 0, sizeof(*out_info));
         out_info->kind = WASM_COMP_CANON_LIFT_VALUE_SCALAR;
         out_info->declared_as_defined = true;

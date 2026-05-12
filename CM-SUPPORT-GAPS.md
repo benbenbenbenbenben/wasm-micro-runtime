@@ -298,6 +298,8 @@ This is now a real but narrow operational slice, not yet full resource semantics
   same tested subset
 - enum type params and results through the component value API, including
   first-time proven lifted execution of component `enum` types
+- flags type params and results through the component value API, including
+  first-time proven lifted execution of component `flags` types
 
 ## 2. What is still missing for full component-model support
 
@@ -427,8 +429,8 @@ Major Canonical ABI gaps remain:
   `list<scalar>`, and the tested top-level direct tuple/record
   `list<string>`-leaf plus nested `list<scalar>` leaves in exported
   tuple/record values and host-import tuple/record parameter/result values
-- no variant / flags / option / result marshalling
-  (enum is now supported)
+- no variant / option / result marshalling
+  (enum and flags are now supported)
 - no non-string memory-backed leaves inside tuple/record Canonical ABI values beyond nested `list<scalar>` leaves for exported canon-lift calls and host-import tuple/record parameters
 - no broader composite flattening/lifting rules beyond the current
   string / variable-length `list<scalar>` / variable-length `list<string>`
@@ -498,12 +500,12 @@ What is still missing:
 - first-class typed runtime semantics for records
 - first-class typed runtime semantics for tuples
 - variants
-- flags
 - options
 - results
 - richer defined-type introspection/manipulation
 
-(Enum is now supported as a scalar i32 in the Canonical ABI.)
+(Enum and flags are now supported as scalar i32 bitfields in the
+Canonical ABI.)
 
 Today, composite value support is still mostly "opaque bytes plus limited special cases", not full typed component-value semantics.
 
@@ -785,4 +787,4 @@ If this feature is described as:
 
 The right maturity label today is:
 
-> **A real but still partial component runtime: public host APIs, scalar / UTF-8 string / `list<scalar>` / limited tuple-record / enum canon-lift calls, a narrow executable direct-core-call `canon lower` subset, supported host-provided component-function imports, runtime values, value imports/exports, start execution slices, a narrow scalar local/imported resource-call subset (including borrowed callback results), and a limited nested core-runtime subset for local core modules/instances plus nested core `func`/`memory`/`table`/`global` aliases are implemented; full support is still blocked on broader canon-lower/imported-function lowering, broader composite Canonical ABI and value semantics, operational resources, remaining host API gaps, and the rest of nested core-runtime support.**
+> **A real but still partial component runtime: public host APIs, scalar / UTF-8 string / `list<scalar>` / limited tuple-record / enum / flags canon-lift calls, a narrow executable direct-core-call `canon lower` subset, supported host-provided component-function imports, runtime values, value imports/exports, start execution slices, a narrow scalar local/imported resource-call subset (including borrowed callback results), and a limited nested core-runtime subset for local core modules/instances plus nested core `func`/`memory`/`table`/`global` aliases are implemented; full support is still blocked on broader canon-lower/imported-function lowering, broader composite Canonical ABI and value semantics, operational resources, remaining host API gaps, and the rest of nested core-runtime support.**
