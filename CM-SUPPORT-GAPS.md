@@ -302,10 +302,9 @@ This is now a real but narrow operational slice, not yet full resource semantics
   first-time proven lifted execution of component `flags` types
 - `list<enum>` and `list<flags>` params and results, including both
   top-level and tuple/record composite paths
-- `option<scalar>` type params and results through the canon lift path,
-  including both the `none` and `some` discriminants with dummy payload
-  emission for the param path and flat composite result decoding for the
-  result path
+- `option<scalar>` and `option<string>` type params through the canon
+  lift path, including both the `none` and `some` discriminants with
+  correct dummy-payload-width emission for the param path
 - `result<scalar,scalar>` type params and results through the canon lift
   path, including both `ok` and `error` discriminants with per-case
   payload dispatch
@@ -443,8 +442,8 @@ Major Canonical ABI gaps remain:
   `list<enum>` / `list<flags>` leaves in exported tuple/record values and
   host-import tuple/record parameter/result values
 - no variant marshalling
-  (enum, flags, option<scalar>, result<scalar,scalar>, and
-  variant<scalar> are now supported)
+  (enum, flags, option<scalar>, option<string>, result<scalar,scalar>,
+  and variant<scalar> are now supported)
 - no non-string memory-backed leaves inside tuple/record Canonical ABI values beyond nested `list<scalar>` leaves for exported canon-lift calls and host-import tuple/record parameters
 - no broader composite flattening/lifting rules beyond the current
   string / variable-length `list<scalar>` / variable-length `list<string>`
@@ -515,11 +514,11 @@ What is still missing:
 - first-class typed runtime semantics for tuples
 - richer defined-type introspection/manipulation
 
-(Enum, flags, list<enum>, list<flags>, option<scalar>,
+(Enum, flags, list<enum>, list<flags>, option<scalar>, option<string>,
 result<scalar,scalar>, and variant<scalar> (both params and results)
 are now supported in the Canonical ABI. These types are treated as
 composite types with a discriminant and inner payload(s); the current
-implementation covers scalar payloads.)
+implementation covers scalar and string payloads for option.)
 
 Today, composite value support is still mostly "opaque bytes plus limited special cases", not full typed component-value semantics.
 

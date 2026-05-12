@@ -9668,6 +9668,7 @@ flatten_component_public_composite_bytes(
             {
                 wasm_val_t discriminant_value;
                 uint32 consumed = 0;
+                uint32 dummy_count = 1;
                 if (*core_arg_index_io >= core_type->param_count)
                     return set_component_param_flattening_error(inst);
                 if (core_type->types[*core_arg_index_io] != VALUE_TYPE_I32)
@@ -9684,6 +9685,35 @@ flatten_component_public_composite_bytes(
                 core_args[*core_arg_index_io] = discriminant_value;
                 (*core_arg_index_io)++;
                 (*offset_io) += consumed;
+                /* Compute the payload's flat scalar count so we emit the
+                   right number of dummy args for the "none" case. */
+                if (shape.def_type->def_val.option->element_type) {
+                    WASMComponentCanonLiftValueShape payload_shape;
+                    if (!resolve_component_canon_lift_value_shape(
+                            component,
+                            shape.def_type->def_val.option->element_type,
+                            "parameter", param_index, &payload_shape, inst))
+                        return false;
+                    if (payload_shape.is_primitive) {
+                        if (payload_shape.prim_type == WASM_COMP_PRIMVAL_STRING)
+                            dummy_count = 2;
+                        else {
+                            uint8 ignored_core = 0;
+                            wasm_valkind_t ignored_kind = WASM_I32;
+                            if (component_scalar_prim_to_core(
+                                    payload_shape.prim_type, &ignored_core,
+                                    &ignored_kind))
+                                dummy_count = 1;
+                        }
+                    }
+                    else if (payload_shape.def_type) {
+                        if (payload_shape.def_type->tag
+                                == WASM_COMP_DEF_VAL_ENUM
+                            || payload_shape.def_type->tag
+                                   == WASM_COMP_DEF_VAL_FLAGS)
+                            dummy_count = 1;
+                    }
+                }
                 if (discriminant_value.of.i32 == 1
                     && shape.def_type->def_val.option->element_type) {
                     if (!flatten_component_public_composite_bytes(
@@ -9694,17 +9724,20 @@ flatten_component_public_composite_bytes(
                         return false;
                 }
                 else {
-                    if (*core_arg_index_io >= core_type->param_count)
-                        return set_component_param_flattening_error(inst);
-                    if (core_type->types[*core_arg_index_io] != VALUE_TYPE_I32)
-                        return set_component_call_error_fmt(
-                            inst,
-                            "component canon lift function parameter %u does "
-                            "not match the core function signature",
-                            param_index);
-                    core_args[*core_arg_index_io].kind = WASM_I32;
-                    core_args[*core_arg_index_io].of.i32 = 0;
-                    (*core_arg_index_io)++;
+                    for (uint32 k = 0; k < dummy_count; k++) {
+                        if (*core_arg_index_io >= core_type->param_count)
+                            return set_component_param_flattening_error(inst);
+                        if (core_type->types[*core_arg_index_io]
+                            != VALUE_TYPE_I32)
+                            return set_component_call_error_fmt(
+                                inst,
+                                "component canon lift function parameter %u "
+                                "does not match the core function signature",
+                                param_index);
+                        core_args[*core_arg_index_io].kind = WASM_I32;
+                        core_args[*core_arg_index_io].of.i32 = 0;
+                        (*core_arg_index_io)++;
+                    }
                 }
             }
             return true;
