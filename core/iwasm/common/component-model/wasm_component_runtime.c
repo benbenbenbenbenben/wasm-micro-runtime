@@ -44,6 +44,12 @@ typedef struct WASMNestedComponentLocalBindings {
     uint32 core_memory_count;
     uint32 core_memory_capacity;
     WASMComponentCoreRuntimeRef *core_memories;
+    uint32 core_table_count;
+    uint32 core_table_capacity;
+    WASMComponentCoreRuntimeRef *core_tables;
+    uint32 core_global_count;
+    uint32 core_global_capacity;
+    WASMComponentCoreRuntimeRef *core_globals;
     uint32 core_func_count;
     uint32 core_func_capacity;
     WASMComponentCoreRuntimeRef *core_funcs;
@@ -997,6 +1003,7 @@ static bool
 alloc_nested_component_local_bindings(
     WASMNestedComponentLocalBindings *bindings, uint32 core_module_capacity,
     uint32 core_instance_capacity, uint32 core_memory_capacity,
+    uint32 core_table_capacity, uint32 core_global_capacity,
     uint32 core_func_capacity,
     uint32 func_capacity, uint32 value_capacity, uint32 instance_capacity,
     uint32 component_capacity, uint32 resource_type_capacity, char *error_buf,
@@ -1015,6 +1022,14 @@ alloc_nested_component_local_bindings(
         || !alloc_component_runtime_array((void **)&bindings->core_memories,
                                           core_memory_capacity,
                                           sizeof(*bindings->core_memories),
+                                          error_buf, error_buf_size)
+        || !alloc_component_runtime_array((void **)&bindings->core_tables,
+                                          core_table_capacity,
+                                          sizeof(*bindings->core_tables),
+                                          error_buf, error_buf_size)
+        || !alloc_component_runtime_array((void **)&bindings->core_globals,
+                                          core_global_capacity,
+                                          sizeof(*bindings->core_globals),
                                           error_buf, error_buf_size)
         || !alloc_component_runtime_array((void **)&bindings->core_funcs,
                                           core_func_capacity,
@@ -1054,6 +1069,14 @@ alloc_nested_component_local_bindings(
             wasm_runtime_free(bindings->values);
             bindings->values = NULL;
         }
+        if (bindings->core_globals) {
+            wasm_runtime_free(bindings->core_globals);
+            bindings->core_globals = NULL;
+        }
+        if (bindings->core_tables) {
+            wasm_runtime_free(bindings->core_tables);
+            bindings->core_tables = NULL;
+        }
         if (bindings->core_funcs) {
             wasm_runtime_free(bindings->core_funcs);
             bindings->core_funcs = NULL;
@@ -1080,6 +1103,8 @@ alloc_nested_component_local_bindings(
     bindings->core_module_capacity = core_module_capacity;
     bindings->core_instance_capacity = core_instance_capacity;
     bindings->core_memory_capacity = core_memory_capacity;
+    bindings->core_table_capacity = core_table_capacity;
+    bindings->core_global_capacity = core_global_capacity;
     bindings->core_func_capacity = core_func_capacity;
     bindings->func_capacity = func_capacity;
     bindings->value_capacity = value_capacity;
@@ -1099,6 +1124,14 @@ free_nested_component_local_bindings(WASMNestedComponentLocalBindings *bindings)
     if (bindings->core_instances) {
         wasm_runtime_free(bindings->core_instances);
         bindings->core_instances = NULL;
+    }
+    if (bindings->core_globals) {
+        wasm_runtime_free(bindings->core_globals);
+        bindings->core_globals = NULL;
+    }
+    if (bindings->core_tables) {
+        wasm_runtime_free(bindings->core_tables);
+        bindings->core_tables = NULL;
     }
     if (bindings->core_memories) {
         wasm_runtime_free(bindings->core_memories);
@@ -1135,6 +1168,10 @@ free_nested_component_local_bindings(WASMNestedComponentLocalBindings *bindings)
     bindings->core_instance_capacity = 0;
     bindings->core_memory_count = 0;
     bindings->core_memory_capacity = 0;
+    bindings->core_table_count = 0;
+    bindings->core_table_capacity = 0;
+    bindings->core_global_count = 0;
+    bindings->core_global_capacity = 0;
     bindings->core_func_count = 0;
     bindings->core_func_capacity = 0;
     bindings->func_count = 0;
@@ -1203,6 +1240,34 @@ append_nested_component_local_core_func(
             "nested component local core func space overflow");
 
     bindings->core_funcs[bindings->core_func_count++] = ref;
+    return true;
+}
+
+static bool
+append_nested_component_local_core_table(
+    WASMNestedComponentLocalBindings *bindings, WASMComponentCoreRuntimeRef ref,
+    char *error_buf, uint32 error_buf_size)
+{
+    if (bindings->core_table_count >= bindings->core_table_capacity)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "nested component local core table space overflow");
+
+    bindings->core_tables[bindings->core_table_count++] = ref;
+    return true;
+}
+
+static bool
+append_nested_component_local_core_global(
+    WASMNestedComponentLocalBindings *bindings, WASMComponentCoreRuntimeRef ref,
+    char *error_buf, uint32 error_buf_size)
+{
+    if (bindings->core_global_count >= bindings->core_global_capacity)
+        return set_component_runtime_error_fmt(
+            error_buf, error_buf_size,
+            "nested component local core global space overflow");
+
+    bindings->core_globals[bindings->core_global_count++] = ref;
     return true;
 }
 
@@ -1544,6 +1609,22 @@ resolve_nested_component_local_core_sort_idx(
                     "nested component core memory index %u is out of bounds",
                     sort_idx->idx);
             *out_ref = bindings->core_memories[sort_idx->idx];
+            return true;
+        case WASM_COMP_CORE_SORT_TABLE:
+            if (sort_idx->idx >= bindings->core_table_count)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "nested component core table index %u is out of bounds",
+                    sort_idx->idx);
+            *out_ref = bindings->core_tables[sort_idx->idx];
+            return true;
+        case WASM_COMP_CORE_SORT_GLOBAL:
+            if (sort_idx->idx >= bindings->core_global_count)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "nested component core global index %u is out of bounds",
+                    sort_idx->idx);
+            *out_ref = bindings->core_globals[sort_idx->idx];
             return true;
         case WASM_COMP_CORE_SORT_INSTANCE:
             if (sort_idx->idx >= bindings->core_instance_count)
@@ -16123,6 +16204,8 @@ count_nested_component_local_bindings(const WASMComponent *nested_component,
                                       uint32 *core_module_count,
                                       uint32 *core_instance_count,
                                       uint32 *core_memory_count,
+                                      uint32 *core_table_count,
+                                      uint32 *core_global_count,
                                       uint32 *core_func_count,
                                       uint32 *func_count,
                                       uint32 *value_count,
@@ -16141,8 +16224,8 @@ count_nested_component_local_bindings(const WASMComponent *nested_component,
     uint32 i;
 
     *import_count = *core_module_count = *core_instance_count
-        = *core_memory_count = *core_func_count = *func_count = *value_count
-        = *instance_count = *component_count = *owned_func_count
+        = *core_memory_count = *core_table_count = *core_global_count
+        = *core_func_count = *func_count = *value_count
         = *owned_value_count = *owned_component_count
         = *owned_core_instance_count = *owned_lowered_func_count
         = *owned_instance_count = *export_count = *resource_type_count = 0;
@@ -16276,6 +16359,12 @@ count_nested_component_local_bindings(const WASMComponent *nested_component,
                                 break;
                             case WASM_COMP_CORE_SORT_MEMORY:
                                 (*core_memory_count)++;
+                                break;
+                            case WASM_COMP_CORE_SORT_TABLE:
+                                (*core_table_count)++;
+                                break;
+                            case WASM_COMP_CORE_SORT_GLOBAL:
+                                (*core_global_count)++;
                                 break;
                             default:
                                 return set_component_runtime_error_fmt(
@@ -19368,6 +19457,12 @@ resolve_nested_component_alias_section(
                 case WASM_COMP_CORE_SORT_MEMORY:
                     expected_core_type = WASM_COMP_CORE_RUNTIME_REF_MEMORY;
                     break;
+                case WASM_COMP_CORE_SORT_TABLE:
+                    expected_core_type = WASM_COMP_CORE_RUNTIME_REF_TABLE;
+                    break;
+                case WASM_COMP_CORE_SORT_GLOBAL:
+                    expected_core_type = WASM_COMP_CORE_RUNTIME_REF_GLOBAL;
+                    break;
                 default:
                     return set_component_runtime_error_fmt(
                         error_buf, error_buf_size,
@@ -19381,7 +19476,17 @@ resolve_nested_component_alias_section(
             if (!lookup_core_instance_export(core_instance, name, expected_core_type,
                                              &core_ref, error_buf, error_buf_size))
                 return false;
-            if (expected_core_type == WASM_COMP_CORE_RUNTIME_REF_MEMORY) {
+            if (expected_core_type == WASM_COMP_CORE_RUNTIME_REF_TABLE) {
+                if (!append_nested_component_local_core_table(
+                        bindings, core_ref, error_buf, error_buf_size))
+                    return false;
+            }
+            else if (expected_core_type == WASM_COMP_CORE_RUNTIME_REF_GLOBAL) {
+                if (!append_nested_component_local_core_global(
+                        bindings, core_ref, error_buf, error_buf_size))
+                    return false;
+            }
+            else if (expected_core_type == WASM_COMP_CORE_RUNTIME_REF_MEMORY) {
                 if (!append_nested_component_local_core_memory(
                         bindings, core_ref, error_buf, error_buf_size))
                     return false;
@@ -19528,6 +19633,7 @@ build_component_runtime_instance_from_component(
     if (!count_nested_component_local_bindings(
             component, &import_count, &bindings.core_module_capacity,
             &bindings.core_instance_capacity, &bindings.core_memory_capacity,
+            &bindings.core_table_capacity, &bindings.core_global_capacity,
             &bindings.core_func_capacity,
             &bindings.func_capacity, &bindings.value_capacity,
             &bindings.instance_capacity, &bindings.component_capacity,
@@ -19546,6 +19652,7 @@ build_component_runtime_instance_from_component(
     if (!alloc_nested_component_local_bindings(
             &bindings, bindings.core_module_capacity,
             bindings.core_instance_capacity, bindings.core_memory_capacity,
+            bindings.core_table_capacity, bindings.core_global_capacity,
             bindings.core_func_capacity,
             bindings.func_capacity, bindings.value_capacity,
             bindings.instance_capacity, bindings.component_capacity,

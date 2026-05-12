@@ -716,6 +716,10 @@ Nested components now support:
 - nested `alias core export` for `func`
 - nested `alias core export` for `memory`, including re-export through a nested
   inline core instance
+- nested `alias core export` for `table`, including re-export through a nested
+  inline core instance
+- nested `alias core export` for `global`, including re-export through a nested
+  inline core instance
 - nested `core type` sections as tolerated structural metadata around those
   flows
 - typed nested `core module` imports that use those `core type` entries for
@@ -723,16 +727,14 @@ Nested components now support:
 
 Nested components still reject:
 
-- nested `alias core export` for broader still-unwired core sorts such as
-  `table` / `global`
 - nested `alias outer` for core runtime refs
 - broader operational use of nested `core type` entries beyond the current
   typed core-module import matching subset
 
 The runtime can now thread nested local core-module handles and construct nested
-local/synthetic core instances, including the current nested core-function and
-core-memory alias/re-export subset, but it still does **not** construct a full
-nested core runtime.
+local/synthetic core instances, including the current nested core-function,
+core-memory, core-table, and core-global alias/re-export subset, but it still
+does **not** construct a full nested core runtime.
 
 ## 9. Remaining spec limitations still apply
 

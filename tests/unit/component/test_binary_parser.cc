@@ -16818,6 +16818,332 @@ append_nested_invalid_core_module_alias_sections(
            && export_section->parsed.export_section->exports[0].sort_idx;
 }
 
+static bool
+append_nested_inline_core_table_and_global_alias_instance_sections(
+    WASMComponentModule *component_module)
+{
+    WASMComponent *component = &component_module->component;
+    char error_buf[128] = { 0 };
+    const uint32_t old_count = component->section_count;
+    const uint32_t new_count = old_count + 3;
+    auto *new_sections = (WASMComponentSection *)wasm_runtime_malloc(
+        sizeof(WASMComponentSection) * new_count);
+    if (!new_sections) {
+        return false;
+    }
+
+    memset(new_sections, 0, sizeof(WASMComponentSection) * new_count);
+    memcpy(new_sections, component->sections,
+           sizeof(WASMComponentSection) * old_count);
+    wasm_runtime_free(component->sections);
+    component->sections = new_sections;
+    component->section_count = new_count;
+
+    auto *component_section = &component->sections[old_count];
+    auto *instance_section = &component->sections[old_count + 1];
+    auto *export_section = &component->sections[old_count + 2];
+
+    component_section->id = WASM_COMP_SECTION_COMPONENT;
+    component_section->parsed.component = create_empty_component();
+    if (!component_section->parsed.component) {
+        return false;
+    }
+    component_section->parsed.component->section_count = 4;
+    component_section->parsed.component->sections =
+        (WASMComponentSection *)wasm_runtime_malloc(sizeof(WASMComponentSection) * 5);
+    if (!component_section->parsed.component->sections) {
+        return false;
+    }
+    memset(component_section->parsed.component->sections, 0,
+           sizeof(WASMComponentSection) * 5);
+
+    /* Nested component section 0: core module */
+    component_section->parsed.component->sections[0].id =
+        WASM_COMP_SECTION_CORE_MODULE;
+    component_section->parsed.component->sections[0].parsed.core_module =
+        create_core_module_wrapper_from_file(
+            "nested_core_table_global_module.wasm",
+            "nested-table-global-module", error_buf,
+            (uint32_t)sizeof(error_buf));
+    if (!component_section->parsed.component->sections[0].parsed.core_module) {
+        return false;
+    }
+
+    /* Nested component section 1: core instance (WITH_ARGS) */
+    component_section->parsed.component->sections[1].id =
+        WASM_COMP_SECTION_CORE_INSTANCE;
+    component_section->parsed.component->sections[1].parsed.core_instance_section =
+        (WASMComponentCoreInstSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentCoreInstSection));
+    if (!component_section->parsed.component->sections[1]
+             .parsed.core_instance_section) {
+        return false;
+    }
+    memset(component_section->parsed.component->sections[1]
+               .parsed.core_instance_section,
+           0, sizeof(WASMComponentCoreInstSection));
+    component_section->parsed.component->sections[1]
+        .parsed.core_instance_section->count = 1;
+    component_section->parsed.component->sections[1]
+        .parsed.core_instance_section->instances =
+        (WASMComponentCoreInst *)wasm_runtime_malloc(sizeof(WASMComponentCoreInst));
+    if (!component_section->parsed.component->sections[1]
+             .parsed.core_instance_section->instances) {
+        return false;
+    }
+    memset(component_section->parsed.component->sections[1]
+               .parsed.core_instance_section->instances,
+           0, sizeof(WASMComponentCoreInst));
+    component_section->parsed.component->sections[1]
+        .parsed.core_instance_section->instances[0]
+        .instance_expression_tag = WASM_COMP_INSTANCE_EXPRESSION_WITH_ARGS;
+    component_section->parsed.component->sections[1]
+        .parsed.core_instance_section->instances[0]
+        .expression.with_args.idx = 0;
+
+    /* Nested component section 2: aliases (table + global) */
+    component_section->parsed.component->sections[2].id = WASM_COMP_SECTION_ALIASES;
+    component_section->parsed.component->sections[2].parsed.alias_section =
+        (WASMComponentAliasSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentAliasSection));
+    if (!component_section->parsed.component->sections[2].parsed.alias_section) {
+        return false;
+    }
+    memset(component_section->parsed.component->sections[2].parsed.alias_section, 0,
+           sizeof(WASMComponentAliasSection));
+    component_section->parsed.component->sections[2].parsed.alias_section->count = 2;
+    component_section->parsed.component->sections[2].parsed.alias_section->aliases =
+        (WASMComponentAliasDefinition *)wasm_runtime_malloc(
+            sizeof(WASMComponentAliasDefinition) * 2);
+    if (!component_section->parsed.component->sections[2]
+             .parsed.alias_section->aliases) {
+        return false;
+    }
+    memset(component_section->parsed.component->sections[2]
+               .parsed.alias_section->aliases,
+           0, sizeof(WASMComponentAliasDefinition) * 2);
+
+    /* Alias 0: core table aliasing "table" export from core instance 0 */
+    component_section->parsed.component->sections[2]
+        .parsed.alias_section->aliases[0].sort =
+        create_sort(WASM_COMP_SORT_CORE_SORT);
+    if (!component_section->parsed.component->sections[2]
+             .parsed.alias_section->aliases[0].sort) {
+        return false;
+    }
+    component_section->parsed.component->sections[2]
+        .parsed.alias_section->aliases[0].sort->core_sort =
+        WASM_COMP_CORE_SORT_TABLE;
+    component_section->parsed.component->sections[2]
+        .parsed.alias_section->aliases[0].alias_target_type =
+        WASM_COMP_ALIAS_TARGET_CORE_EXPORT;
+    component_section->parsed.component->sections[2]
+        .parsed.alias_section->aliases[0]
+        .target.core_exported.instance_idx = 0;
+    component_section->parsed.component->sections[2]
+        .parsed.alias_section->aliases[0]
+        .target.core_exported.name = clone_core_name("table");
+    if (!component_section->parsed.component->sections[2]
+             .parsed.alias_section->aliases[0]
+             .target.core_exported.name) {
+        return false;
+    }
+
+    /* Alias 1: core global aliasing "global" export from core instance 0 */
+    component_section->parsed.component->sections[2]
+        .parsed.alias_section->aliases[1].sort =
+        create_sort(WASM_COMP_SORT_CORE_SORT);
+    if (!component_section->parsed.component->sections[2]
+             .parsed.alias_section->aliases[1].sort) {
+        return false;
+    }
+    component_section->parsed.component->sections[2]
+        .parsed.alias_section->aliases[1].sort->core_sort =
+        WASM_COMP_CORE_SORT_GLOBAL;
+    component_section->parsed.component->sections[2]
+        .parsed.alias_section->aliases[1].alias_target_type =
+        WASM_COMP_ALIAS_TARGET_CORE_EXPORT;
+    component_section->parsed.component->sections[2]
+        .parsed.alias_section->aliases[1]
+        .target.core_exported.instance_idx = 0;
+    component_section->parsed.component->sections[2]
+        .parsed.alias_section->aliases[1]
+        .target.core_exported.name = clone_core_name("global");
+    if (!component_section->parsed.component->sections[2]
+             .parsed.alias_section->aliases[1]
+             .target.core_exported.name) {
+        return false;
+    }
+
+    /* Nested component section 3: core instance (WITHOUT_ARGS) re-exporting aliased table and global */
+    component_section->parsed.component->sections[3].id =
+        WASM_COMP_SECTION_CORE_INSTANCE;
+    component_section->parsed.component->sections[3].parsed.core_instance_section =
+        (WASMComponentCoreInstSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentCoreInstSection));
+    if (!component_section->parsed.component->sections[3]
+             .parsed.core_instance_section) {
+        return false;
+    }
+    memset(component_section->parsed.component->sections[3]
+               .parsed.core_instance_section,
+           0, sizeof(WASMComponentCoreInstSection));
+    component_section->parsed.component->sections[3]
+        .parsed.core_instance_section->count = 1;
+    component_section->parsed.component->sections[3]
+        .parsed.core_instance_section->instances =
+        (WASMComponentCoreInst *)wasm_runtime_malloc(sizeof(WASMComponentCoreInst));
+    if (!component_section->parsed.component->sections[3]
+             .parsed.core_instance_section->instances) {
+        return false;
+    }
+    memset(component_section->parsed.component->sections[3]
+               .parsed.core_instance_section->instances,
+           0, sizeof(WASMComponentCoreInst));
+    component_section->parsed.component->sections[3]
+        .parsed.core_instance_section->instances[0]
+        .instance_expression_tag = WASM_COMP_INSTANCE_EXPRESSION_WITHOUT_ARGS;
+    component_section->parsed.component->sections[3]
+        .parsed.core_instance_section->instances[0]
+        .expression.without_args.inline_expr_len = 2;
+    component_section->parsed.component->sections[3]
+        .parsed.core_instance_section->instances[0]
+        .expression.without_args.inline_expr =
+        (WASMComponentInlineExport *)wasm_runtime_malloc(
+            sizeof(WASMComponentInlineExport) * 2);
+    if (!component_section->parsed.component->sections[3]
+             .parsed.core_instance_section->instances[0]
+             .expression.without_args.inline_expr) {
+        return false;
+    }
+    memset(component_section->parsed.component->sections[3]
+               .parsed.core_instance_section->instances[0]
+               .expression.without_args.inline_expr,
+           0, sizeof(WASMComponentInlineExport) * 2);
+
+    /* Inline export 0: re-export aliased table as "wrapped-nested-core-table" */
+    component_section->parsed.component->sections[3]
+        .parsed.core_instance_section->instances[0]
+        .expression.without_args.inline_expr[0]
+        .name = clone_core_name("wrapped-nested-core-table");
+    component_section->parsed.component->sections[3]
+        .parsed.core_instance_section->instances[0]
+        .expression.without_args.inline_expr[0]
+        .sort_idx = create_core_sort_idx(WASM_COMP_CORE_SORT_TABLE, 0);
+    if (!component_section->parsed.component->sections[3]
+             .parsed.core_instance_section->instances[0]
+             .expression.without_args.inline_expr[0]
+             .name
+        || !component_section->parsed.component->sections[3]
+                 .parsed.core_instance_section->instances[0]
+                 .expression.without_args.inline_expr[0]
+                 .sort_idx) {
+        return false;
+    }
+
+    /* Inline export 1: re-export aliased global as "wrapped-nested-core-global" */
+    component_section->parsed.component->sections[3]
+        .parsed.core_instance_section->instances[0]
+        .expression.without_args.inline_expr[1]
+        .name = clone_core_name("wrapped-nested-core-global");
+    component_section->parsed.component->sections[3]
+        .parsed.core_instance_section->instances[0]
+        .expression.without_args.inline_expr[1]
+        .sort_idx = create_core_sort_idx(WASM_COMP_CORE_SORT_GLOBAL, 0);
+    if (!component_section->parsed.component->sections[3]
+             .parsed.core_instance_section->instances[0]
+             .expression.without_args.inline_expr[1]
+             .name
+        || !component_section->parsed.component->sections[3]
+                 .parsed.core_instance_section->instances[0]
+                 .expression.without_args.inline_expr[1]
+                 .sort_idx) {
+        return false;
+    }
+
+    /* Nested component section 4: export the within-args core instance as "forwarded-nested-table-global-instance" */
+    component_section->parsed.component->sections[4].id = WASM_COMP_SECTION_EXPORTS;
+    component_section->parsed.component->sections[4].parsed.export_section =
+        (WASMComponentExportSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentExportSection));
+    if (!component_section->parsed.component->sections[4].parsed.export_section) {
+        return false;
+    }
+    memset(component_section->parsed.component->sections[4].parsed.export_section, 0,
+           sizeof(WASMComponentExportSection));
+    component_section->parsed.component->sections[4].parsed.export_section->count = 1;
+    component_section->parsed.component->sections[4].parsed.export_section->exports =
+        (WASMComponentExport *)wasm_runtime_malloc(sizeof(WASMComponentExport));
+    if (!component_section->parsed.component->sections[4]
+             .parsed.export_section->exports) {
+        return false;
+    }
+    memset(component_section->parsed.component->sections[4]
+               .parsed.export_section->exports,
+           0, sizeof(WASMComponentExport));
+    component_section->parsed.component->sections[4]
+        .parsed.export_section->exports[0].export_name =
+        create_export_name("forwarded-nested-table-global-instance");
+    component_section->parsed.component->sections[4]
+        .parsed.export_section->exports[0].sort_idx =
+        create_sort_idx(WASM_COMP_SORT_INSTANCE, 0);
+    if (!component_section->parsed.component->sections[4]
+             .parsed.export_section->exports[0].export_name
+        || !component_section->parsed.component->sections[4]
+                 .parsed.export_section->exports[0]
+                 .sort_idx) {
+        return false;
+    }
+
+    /* Top-level instance section: instantiate the nested component */
+    instance_section->id = WASM_COMP_SECTION_INSTANCES;
+    instance_section->parsed.instance_section =
+        (WASMComponentInstSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentInstSection));
+    if (!instance_section->parsed.instance_section) {
+        return false;
+    }
+    memset(instance_section->parsed.instance_section, 0,
+           sizeof(WASMComponentInstSection));
+    instance_section->parsed.instance_section->count = 1;
+    instance_section->parsed.instance_section->instances =
+        (WASMComponentInst *)wasm_runtime_malloc(sizeof(WASMComponentInst));
+    if (!instance_section->parsed.instance_section->instances) {
+        return false;
+    }
+    memset(instance_section->parsed.instance_section->instances, 0,
+           sizeof(WASMComponentInst));
+    instance_section->parsed.instance_section->instances[0]
+        .instance_expression_tag = WASM_COMP_INSTANCE_EXPRESSION_WITH_ARGS;
+    instance_section->parsed.instance_section->instances[0].expression.with_args.idx =
+        1;
+
+    /* Top-level export section: export the top-level component instance */
+    export_section->id = WASM_COMP_SECTION_EXPORTS;
+    export_section->parsed.export_section =
+        (WASMComponentExportSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentExportSection));
+    if (!export_section->parsed.export_section) {
+        return false;
+    }
+    memset(export_section->parsed.export_section, 0,
+           sizeof(WASMComponentExportSection));
+    export_section->parsed.export_section->count = 1;
+    export_section->parsed.export_section->exports =
+        (WASMComponentExport *)wasm_runtime_malloc(sizeof(WASMComponentExport));
+    if (!export_section->parsed.export_section->exports) {
+        return false;
+    }
+    memset(export_section->parsed.export_section->exports, 0,
+           sizeof(WASMComponentExport));
+    export_section->parsed.export_section->exports[0].export_name =
+        create_export_name("nested-inline-core-table-global-instance");
+    export_section->parsed.export_section->exports[0].sort_idx =
+        create_sort_idx(WASM_COMP_SORT_INSTANCE, 1);
+    return export_section->parsed.export_section->exports[0].export_name
+           && export_section->parsed.export_section->exports[0].sort_idx;
+}
+
 class BinaryParserTest : public testing::Test
 {
   public:
@@ -62377,6 +62703,74 @@ TEST_F(BinaryParserTest, TestRuntimeRejectsNestedCoreModuleExportAliases)
     ASSERT_NE(strstr(helper->error_buf, "nested core alias sort"), nullptr)
         << helper->error_buf;
 
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest, TestRuntimeSupportsNestedCoreTableAndGlobalAliases)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "runtime-nested-core-table-global-alias";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(append_nested_inline_core_table_and_global_alias_instance_sections(
+        (WASMComponentModule *)module));
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    auto *nested_instance = (WASMComponentRuntimeInstance *)
+        wasm_runtime_lookup_component_instance(
+            module_inst, "nested-inline-core-table-global-instance");
+    ASSERT_NE(nested_instance, nullptr);
+    ASSERT_EQ(nested_instance->owned_core_instance_count, 2u);
+    ASSERT_NE(nested_instance->owned_core_instances[0].module_inst, nullptr);
+    ASSERT_EQ(nested_instance->owned_core_instances[1].export_count, 2u);
+
+    ASSERT_EQ(
+        std::string(nested_instance->owned_core_instances[1].exports[0].name),
+        "wrapped-nested-core-table");
+    ASSERT_EQ(nested_instance->owned_core_instances[1].exports[0].ref.type,
+              WASM_COMP_CORE_RUNTIME_REF_TABLE);
+    {
+        wasm_table_inst_t expected_table;
+        memset(&expected_table, 0, sizeof(expected_table));
+        ASSERT_TRUE(wasm_runtime_get_export_table_inst(
+            nested_instance->owned_core_instances[0].module_inst, "table",
+            &expected_table));
+        ASSERT_EQ(
+            memcmp(&nested_instance->owned_core_instances[1].exports[0].ref.of.table,
+                   &expected_table, sizeof(wasm_table_inst_t)),
+            0);
+    }
+
+    ASSERT_EQ(
+        std::string(nested_instance->owned_core_instances[1].exports[1].name),
+        "wrapped-nested-core-global");
+    ASSERT_EQ(nested_instance->owned_core_instances[1].exports[1].ref.type,
+              WASM_COMP_CORE_RUNTIME_REF_GLOBAL);
+    {
+        wasm_global_inst_t expected_global;
+        memset(&expected_global, 0, sizeof(expected_global));
+        ASSERT_TRUE(wasm_runtime_get_export_global_inst(
+            nested_instance->owned_core_instances[0].module_inst, "global",
+            &expected_global));
+        ASSERT_EQ(
+            memcmp(&nested_instance->owned_core_instances[1].exports[1].ref.of.global,
+                   &expected_global, sizeof(wasm_global_inst_t)),
+            0);
+    }
+
+    wasm_runtime_deinstantiate(module_inst);
     wasm_runtime_unload(module);
 }
 
