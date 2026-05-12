@@ -184,7 +184,7 @@ What works today:
 Current supported execution envelope is intentionally narrow:
 
 - `canon lift` is executable for the currently supported scalar / UTF-8 string /
-  `list<scalar>` / tuple-record subset
+  `list<scalar>` / tuple-record / option<scalar> subset
 - `canon lower` is executable only for the currently tested direct core-call
   subset above
 - calls may target supported top-level or nested canon-lift / host-import function
@@ -302,6 +302,8 @@ This is now a real but narrow operational slice, not yet full resource semantics
   first-time proven lifted execution of component `flags` types
 - `list<enum>` and `list<flags>` params and results, including both
   top-level and tuple/record composite paths
+- `option<scalar>` type params through the canon lift path, including both
+  the `none` and `some` discriminants with dummy payload emission
 
 ## 2. What is still missing for full component-model support
 
@@ -432,8 +434,8 @@ Major Canonical ABI gaps remain:
   direct tuple/record `list<string>`-leaf plus nested `list<scalar>` /
   `list<enum>` / `list<flags>` leaves in exported tuple/record values and
   host-import tuple/record parameter/result values
-- no variant / option / result marshalling
-  (enum and flags are now supported)
+- no variant / result marshalling
+  (enum, flags, and option<scalar> are now supported)
 - no non-string memory-backed leaves inside tuple/record Canonical ABI values beyond nested `list<scalar>` leaves for exported canon-lift calls and host-import tuple/record parameters
 - no broader composite flattening/lifting rules beyond the current
   string / variable-length `list<scalar>` / variable-length `list<string>`
@@ -503,12 +505,13 @@ What is still missing:
 - first-class typed runtime semantics for records
 - first-class typed runtime semantics for tuples
 - variants
-- options
 - results
 - richer defined-type introspection/manipulation
 
-(Enum, flags, and list<enum>/list<flags> are now supported in the
-Canonical ABI, including inside tuple/record composites.)
+(Enum, flags, list<enum>, list<flags>, and option<scalar> are now
+supported in the Canonical ABI. Option is treated as a composite type
+with a discriminant and inner payload; the current implementation covers
+scalar payloads.)
 
 Today, composite value support is still mostly "opaque bytes plus limited special cases", not full typed component-value semantics.
 

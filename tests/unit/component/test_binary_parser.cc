@@ -17539,6 +17539,65 @@ TEST_F(BinaryParserTest, TestRuntimeSupportsListEnumParam)
     wasm_runtime_unload(module);
 }
 
+TEST_F(BinaryParserTest, TestRuntimeSupportsOptionScalarParam)
+{
+    bool ret = helper->read_wasm_file("option_scalar.component.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "runtime-option-scalar-param-test";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    WASMComponentRuntimeFunc *func =
+        wasm_runtime_lookup_component_function(module_inst, "g");
+    ASSERT_NE(func, nullptr);
+    ASSERT_EQ(func->kind, WASM_COMP_RUNTIME_FUNC_LIFT);
+
+    /* Call with option::none (discriminant 0, no payload) */
+    uint8_t opt_none[1] = { 0 };
+    wasm_component_value_t arg = make_component_defined_value(opt_none, sizeof(opt_none));
+    wasm_component_value_t result = {};
+    bool call_ret = wasm_runtime_call_component_values(
+        module_inst, func, 1, &result, 1, &arg);
+    ASSERT_TRUE(call_ret) << wasm_runtime_get_exception(module_inst);
+    wasm_component_value_destroy(&arg);
+    wasm_runtime_drop_component_owned_result(module_inst, func, 0, &result);
+
+    /* Call with option::some(42) (discriminant 1, payload 42 as LEB128) */
+    uint8_t opt_some[2] = { 1, 42 };
+    arg = make_component_defined_value(opt_some, sizeof(opt_some));
+    result = {};
+    call_ret = wasm_runtime_call_component_values(
+        module_inst, func, 1, &result, 1, &arg);
+    ASSERT_TRUE(call_ret) << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(result.type.kind, WASM_COMPONENT_VALUE_TYPE_PRIMITIVE);
+    ASSERT_EQ(result.type.type.primitive_type,
+              WASM_COMPONENT_PRIMITIVE_VALUE_S32);
+    {
+        auto *data = (const uint8 *)wasm_component_value_get_data(&result);
+        ASSERT_NE(data, nullptr);
+        ASSERT_GE(result.byte_size, 1u);
+        /* Discriminant 1 was returned */
+        ASSERT_EQ(data[0] & 0x7f, 1u);
+    }
+    wasm_component_value_destroy(&arg);
+    wasm_runtime_drop_component_owned_result(module_inst, func, 0, &result);
+
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
 TEST_F(BinaryParserTest, TestGenericRuntimeApisSupportScalarComponentFunction)
 {
     bool ret = helper->read_wasm_file("add.wasm");

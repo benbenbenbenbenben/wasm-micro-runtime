@@ -6043,6 +6043,17 @@ classify_component_runtime_composite_param(const WASMComponent *component,
         case WASM_COMP_DEF_VAL_ENUM:
         case WASM_COMP_DEF_VAL_FLAGS:
             return true;
+        case WASM_COMP_DEF_VAL_OPTION:
+            if (def_type->def_val.option
+                && def_type->def_val.option->element_type) {
+                if (!classify_component_runtime_composite_param(
+                        component, def_type->def_val.option->element_type,
+                        param_index, has_string_leaf_out,
+                        has_list_scalar_leaf_out, has_list_string_leaf_out,
+                        error_buf, error_buf_size))
+                    return false;
+            }
+            return true;
         default:
             return set_component_runtime_error_fmt(
                 error_buf, error_buf_size,
@@ -6225,6 +6236,16 @@ classify_component_runtime_composite_result(const WASMComponent *component,
                 "borrow<resource> leaves inside tuple/record results");
         case WASM_COMP_DEF_VAL_ENUM:
         case WASM_COMP_DEF_VAL_FLAGS:
+            return true;
+        case WASM_COMP_DEF_VAL_OPTION:
+            if (def_type->def_val.option
+                && def_type->def_val.option->element_type) {
+                if (!classify_component_runtime_composite_result(
+                        component, def_type->def_val.option->element_type,
+                        has_string_leaf_out, has_list_scalar_leaf_out,
+                        has_list_string_leaf_out, error_buf, error_buf_size))
+                    return false;
+            }
             return true;
         default:
             return set_component_runtime_error_fmt(
@@ -7759,7 +7780,9 @@ resolve_component_canon_lift_abi(WASMComponentInstance *inst,
                     param_type_entry->type.def_val_type->tag
                         == WASM_COMP_DEF_VAL_RECORD
                     || param_type_entry->type.def_val_type->tag
-                           == WASM_COMP_DEF_VAL_TUPLE;
+                           == WASM_COMP_DEF_VAL_TUPLE
+                    || param_type_entry->type.def_val_type->tag
+                           == WASM_COMP_DEF_VAL_OPTION;
             }
             if (!resolve_component_lift_string_usage(
                     component, func_type->params->params[i].value_type,
@@ -7854,7 +7877,9 @@ resolve_component_canon_lift_abi(WASMComponentInstance *inst,
                         result_type_entry->type.def_val_type->tag
                             == WASM_COMP_DEF_VAL_RECORD
                         || result_type_entry->type.def_val_type->tag
-                               == WASM_COMP_DEF_VAL_TUPLE;
+                               == WASM_COMP_DEF_VAL_TUPLE
+                        || result_type_entry->type.def_val_type->tag
+                               == WASM_COMP_DEF_VAL_OPTION;
                 }
 
                 if (is_composite_result) {
@@ -7958,7 +7983,9 @@ resolve_component_canon_lift_abi(WASMComponentInstance *inst,
 
             if (result_type_entry->type.def_val_type->tag == WASM_COMP_DEF_VAL_RECORD
                 || result_type_entry->type.def_val_type->tag
-                       == WASM_COMP_DEF_VAL_TUPLE) {
+                       == WASM_COMP_DEF_VAL_TUPLE
+                || result_type_entry->type.def_val_type->tag
+                       == WASM_COMP_DEF_VAL_OPTION) {
                 bool composite_has_string = false;
                 bool composite_has_list_scalar = false;
                 bool composite_has_list_string = false;
@@ -8963,6 +8990,29 @@ validate_component_public_composite_bytes(
             (*offset_io) += consumed;
             return true;
         }
+        case WASM_COMP_DEF_VAL_OPTION:
+            if (!shape.def_type->def_val.option)
+                return set_component_composite_param_leaf_error(inst, param_index);
+            {
+                wasm_val_t ignored_discriminant;
+                uint32 consumed = 0;
+                if (!decode_component_public_scalar_prefix(
+                        inst, data ? data + *offset_io : NULL,
+                        byte_size - *offset_io, WASM_COMP_PRIMVAL_U32, WASM_I32,
+                        "parameter", param_index, &ignored_discriminant,
+                        &consumed))
+                    return false;
+                (*offset_io) += consumed;
+                if (ignored_discriminant.of.i32 == 1
+                    && shape.def_type->def_val.option->element_type) {
+                    if (!validate_component_public_composite_bytes(
+                            inst, component,
+                            shape.def_type->def_val.option->element_type, data,
+                            byte_size, offset_io, param_index))
+                        return false;
+                }
+            }
+            return true;
         case WASM_COMP_DEF_VAL_LIST_LEN:
             return set_component_composite_param_list_scalar_leaf_error(inst,
                                                                     param_index);
@@ -9322,6 +9372,54 @@ flatten_component_public_composite_bytes(
             (*core_arg_index_io) += 2;
             return true;
         }
+        case WASM_COMP_DEF_VAL_OPTION:
+            if (!shape.def_type->def_val.option)
+                return set_component_composite_param_leaf_error(inst, param_index);
+            {
+                wasm_val_t discriminant_value;
+                uint32 consumed = 0;
+                if (*core_arg_index_io >= core_type->param_count)
+                    return set_component_param_flattening_error(inst);
+                if (core_type->types[*core_arg_index_io] != VALUE_TYPE_I32)
+                    return set_component_call_error_fmt(
+                        inst,
+                        "component canon lift function parameter %u does not "
+                        "match the core function signature",
+                        param_index);
+                if (!decode_component_public_scalar_prefix(
+                        inst, data ? data + *offset_io : NULL,
+                        byte_size - *offset_io, WASM_COMP_PRIMVAL_U32, WASM_I32,
+                        "parameter", param_index, &discriminant_value, &consumed))
+                    return false;
+                core_args[*core_arg_index_io] = discriminant_value;
+                (*core_arg_index_io)++;
+                (*offset_io) += consumed;
+                if (discriminant_value.of.i32 == 1
+                    && shape.def_type->def_val.option->element_type) {
+                    if (!flatten_component_public_composite_bytes(
+                            inst, component, function,
+                            shape.def_type->def_val.option->element_type, data,
+                            byte_size, offset_io, param_index, core_type,
+                            core_args, core_arg_index_io, allocation_tracker))
+                        return false;
+                }
+                else {
+                    /* Emit a dummy i32 payload for the "none" case so the
+                       flat arg count always matches the core signature. */
+                    if (*core_arg_index_io >= core_type->param_count)
+                        return set_component_param_flattening_error(inst);
+                    if (core_type->types[*core_arg_index_io] != VALUE_TYPE_I32)
+                        return set_component_call_error_fmt(
+                            inst,
+                            "component canon lift function parameter %u does "
+                            "not match the core function signature",
+                            param_index);
+                    core_args[*core_arg_index_io].kind = WASM_I32;
+                    core_args[*core_arg_index_io].of.i32 = 0;
+                    (*core_arg_index_io)++;
+                }
+            }
+            return true;
         case WASM_COMP_DEF_VAL_LIST_LEN:
             return set_component_composite_param_list_scalar_leaf_error(inst,
                                                                     param_index);
@@ -9578,7 +9676,8 @@ flatten_component_public_param_value(
 
     if (!shape.is_primitive && shape.def_type
         && (shape.def_type->tag == WASM_COMP_DEF_VAL_RECORD
-            || shape.def_type->tag == WASM_COMP_DEF_VAL_TUPLE)) {
+            || shape.def_type->tag == WASM_COMP_DEF_VAL_TUPLE
+            || shape.def_type->tag == WASM_COMP_DEF_VAL_OPTION)) {
         const uint8 *data;
         uint32 offset = 0;
 
