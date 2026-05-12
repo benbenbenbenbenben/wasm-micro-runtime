@@ -334,7 +334,8 @@ The executable Canonical ABI surface is currently limited to:
     nested variable-length `list<scalar>` / `list<string>` leaf subset with
     scalar results
   - top-level tuple/record results over that same supported leaf subset through
-    the tested `(param i32) -> ()` return-area path
+    the tested `(param i32) -> ()` return-area path, including pure-scalar
+    tuple/record results
   - UTF-8 string parameters/results through the tested `(param i32 i32 i32) -> ()`
     direct return-area path
   - top-level `list<string>` parameters with scalar results through the tested
@@ -349,7 +350,8 @@ The executable Canonical ABI surface is currently limited to:
     `list<s32>`-parameter, `list<scalar>`-result, mixed composite-param, and
     mixed composite-result paths, including tuple/record mixed composite-param
     and mixed composite-result witnesses with nested `list<scalar>` /
-    `list<string>` leaves
+    `list<string>` leaves, plus pure-scalar tuple/record results through the
+    return-area path
   - nested child-core lowered calls into host-imported component functions whose
     multi-result vectors stay within the tested scalar + UTF-8 string, scalar +
     `list<scalar>`, or
@@ -405,8 +407,9 @@ Major Canonical ABI gaps remain:
   `list<scalar>`-result / tuple/record-parameter / record-result /
   tuple/mixed-composite-result synthetic re-lifts above
 - no executable lower path yet for direct tuple/record results beyond the tested
-  top-level memory-backed return-area path over the current scalar / UTF-8
-  string / nested variable-length `list<scalar>` / `list<string>` leaf subset
+  top-level and nested return-area path over the current scalar / UTF-8 string /
+  nested variable-length `list<scalar>` / `list<string>` leaf subset, including
+  the newer pure-scalar tuple/record result path
 - no executable lower path yet for broader nested lowered-consumer coverage beyond
   the tested nested child-core UTF-8 string / `list<string>`-parameter /
   `list<string>`-result / `list<u8>`- and `list<s32>`-parameter /

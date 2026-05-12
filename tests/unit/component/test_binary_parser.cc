@@ -1892,6 +1892,11 @@ struct HostListStringResultCallState {
     std::vector<uint8_t> next_result;
 };
 
+struct HostDefinedResultCallState {
+    int call_count;
+    std::vector<uint8_t> next_result;
+};
+
 struct HostListStringScalarResultCallState {
     int call_count;
     std::vector<std::string> last_arg;
@@ -2194,6 +2199,27 @@ host_string_scalar_pair_result_only_callback(
     state->call_count++;
     results[0] = make_component_string_value(state->next_string);
     results[1] = make_component_s32_value(state->next_scalar);
+    return true;
+}
+
+static bool
+host_defined_result_only_callback(
+    wasm_module_inst_t caller_component_inst, void *user_data, uint32_t num_results,
+    wasm_component_value_t results[], uint32_t num_args,
+    const wasm_component_value_t args[], char *error_buf, uint32_t error_buf_size)
+{
+    auto *state = (HostDefinedResultCallState *)user_data;
+
+    (void)args;
+    if (!caller_component_inst || !state || num_args != 0 || num_results != 1) {
+        snprintf(error_buf, error_buf_size,
+                 "unexpected defined-result-only host callback ABI");
+        return false;
+    }
+
+    state->call_count++;
+    results[0] = make_component_defined_value(state->next_result.data(),
+                                              (uint32_t)state->next_result.size());
     return true;
 }
 
@@ -3172,6 +3198,35 @@ append_top_level_scalar_multi_result_lift(WASMComponentModule *component_module,
         *lifted_func_idx_out = lifted_func_idx;
     }
     return true;
+}
+
+static const uint8_t lowered_scalar_record_result_caller_core_module[] = {
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x09, 0x02, 0x60,
+    0x01, 0x7f, 0x00, 0x60, 0x00, 0x01, 0x7f, 0x02, 0x0d, 0x01, 0x02, 0x63,
+    0x6d, 0x06, 0x73, 0x6f, 0x75, 0x72, 0x63, 0x65, 0x00, 0x00, 0x03, 0x02,
+    0x01, 0x01, 0x05, 0x03, 0x01, 0x00, 0x01, 0x07, 0x1c, 0x02, 0x06, 0x6d,
+    0x65, 0x6d, 0x6f, 0x72, 0x79, 0x02, 0x00, 0x0f, 0x63, 0x61, 0x6c, 0x6c,
+    0x2d, 0x73, 0x6f, 0x75, 0x72, 0x63, 0x65, 0x2d, 0x73, 0x75, 0x6d, 0x00,
+    0x01, 0x0a, 0x13, 0x01, 0x11, 0x00, 0x41, 0x00, 0x10, 0x00, 0x41, 0x00,
+    0x28, 0x02, 0x00, 0x41, 0x04, 0x28, 0x02, 0x00, 0x6a, 0x0b
+};
+
+static bool
+write_test_wasm_file(const char *path, const uint8_t *bytes, uint32_t byte_count)
+{
+    FILE *file = fopen(path, "wb");
+
+    if (!file) {
+        return false;
+    }
+
+    if (byte_count > 0 && fwrite(bytes, 1, byte_count, file) != byte_count) {
+        fclose(file);
+        remove(path);
+        return false;
+    }
+
+    return fclose(file) == 0;
 }
 
 static bool
@@ -44521,6 +44576,465 @@ TEST_F(BinaryParserTest,
     ASSERT_NE(strstr(helper->error_buf, "require memory"), nullptr);
 
     wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestCoreWasmCanCallLoweredHostScalarRecordResultDirectly)
+{
+    static constexpr char generated_core_module_path[] =
+        "lowered_core_scalar_record_result_caller.wasm";
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+    ASSERT_TRUE(write_test_wasm_file(
+        generated_core_module_path, lowered_scalar_record_result_caller_core_module,
+        (uint32_t)sizeof(lowered_scalar_record_result_caller_core_module)));
+
+    LoadArgs load_args = {};
+    char module_name[] = "core-wasm-calls-lowered-host-scalar-record-result";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(append_top_level_host_function_import_sections(
+        (WASMComponentModule *)module, "host-record", "host-instance",
+        "forwarded"));
+    ASSERT_TRUE(append_top_level_function_export_alias((WASMComponentModule *)module,
+                                                       "host-instance", "forwarded",
+                                                       "aliased-host-record"));
+
+    const int32_t host_type_idx = append_component_scalar_func_type(
+        (WASMComponentModule *)module, {}, WASM_COMP_PRIMVAL_S32);
+    const int32_t record_type_idx = append_component_record_type(
+        (WASMComponentModule *)module,
+        { { "lhs", make_component_primitive_value_type(WASM_COMP_PRIMVAL_S32) },
+          { "rhs", make_component_primitive_value_type(WASM_COMP_PRIMVAL_S32) } });
+    ASSERT_GE(host_type_idx, 0);
+    ASSERT_GE(record_type_idx, 0);
+    auto *source_func_type = lookup_local_component_func_type(
+        (WASMComponentModule *)module, (uint32_t)host_type_idx);
+    ASSERT_NE(source_func_type, nullptr);
+    ASSERT_TRUE(replace_func_type_results(
+        source_func_type,
+        { make_component_type_index_value_type((uint32_t)record_type_idx) }));
+
+    auto *import_section = find_component_section((WASMComponentModule *)module,
+                                                  WASM_COMP_SECTION_IMPORTS);
+    ASSERT_NE(import_section, nullptr);
+    ASSERT_NE(import_section->parsed.import_section, nullptr);
+    ASSERT_EQ(import_section->parsed.import_section->count, 1u);
+    import_section->parsed.import_section->imports[0]
+        .extern_desc->extern_desc.func.type_idx = (uint32_t)host_type_idx;
+
+    const int32_t source_func_idx = find_top_level_export_sort_index(
+        (WASMComponentModule *)module, "aliased-host-record", WASM_COMP_SORT_FUNC);
+    ASSERT_GE(source_func_idx, 0);
+    ASSERT_TRUE(append_top_level_lowered_core_caller_sections_for_func(
+        (WASMComponentModule *)module, (uint32_t)source_func_idx,
+        generated_core_module_path, "source"));
+    WASMComponentCanon *lower_canon =
+        find_first_canon_lower((WASMComponentModule *)module);
+    ASSERT_NE(lower_canon, nullptr);
+    ASSERT_TRUE(ensure_canon_lower_memory_opt(lower_canon, 0));
+
+    const int32_t wrapper_type_idx = append_component_scalar_func_type(
+        (WASMComponentModule *)module, {}, WASM_COMP_PRIMVAL_S32);
+    auto *wrapper_type = lookup_local_component_func_type(
+        (WASMComponentModule *)module, (uint32_t)wrapper_type_idx);
+    ASSERT_GE(wrapper_type_idx, 0);
+    ASSERT_NE(wrapper_type, nullptr);
+    if (!wrapper_type->params) {
+        wrapper_type->params = (WASMComponentParamList *)wasm_runtime_malloc(
+            sizeof(WASMComponentParamList));
+        ASSERT_NE(wrapper_type->params, nullptr);
+        memset(wrapper_type->params, 0, sizeof(WASMComponentParamList));
+    }
+    ASSERT_TRUE(append_top_level_core_export_lift_sections(
+        (WASMComponentModule *)module,
+        count_top_level_core_instance_entries(&((WASMComponentModule *)module)
+                                                   ->component)
+            - 1,
+        "call-source-sum", (uint32_t)wrapper_type_idx,
+        "core-caller-host-record-sum"));
+
+    HostDefinedResultCallState call_state = {};
+    append_component_s32_payload(&call_state.next_result, 7);
+    append_component_s32_payload(&call_state.next_result, 5);
+    wasm_component_func_import_binding_t func_import = {};
+    func_import.name = "host-record";
+    func_import.callback = host_defined_result_only_callback;
+    func_import.user_data = &call_state;
+
+    struct InstantiationArgs2 *inst_args = nullptr;
+    ASSERT_TRUE(wasm_runtime_instantiation_args_create(&inst_args));
+    wasm_runtime_instantiation_args_set_default_stack_size(inst_args,
+                                                           helper->stack_size);
+    wasm_runtime_instantiation_args_set_host_managed_heap_size(inst_args,
+                                                               helper->heap_size);
+    wasm_runtime_instantiation_args_set_wasi_stdio(inst_args, 0, 1, 2);
+    wasm_runtime_instantiation_args_set_wasi_dir(inst_args, nullptr, 0, nullptr,
+                                                 0);
+    wasm_runtime_instantiation_args_set_component_func_imports(inst_args,
+                                                               &func_import, 1);
+
+    wasm_module_inst_t module_inst = wasm_runtime_instantiate_ex2(
+        module, inst_args, helper->error_buf,
+        (uint32_t)sizeof(helper->error_buf));
+    wasm_runtime_instantiation_args_destroy(inst_args);
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func = wasm_runtime_lookup_component_function(
+        module_inst, "core-caller-host-record-sum");
+    ASSERT_NE(func, nullptr);
+
+    wasm_val_t results[1] = {};
+    ASSERT_TRUE(wasm_runtime_call_component(module_inst, func, 1, results, 0,
+                                            nullptr))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(call_state.call_count, 1);
+    ASSERT_EQ(results[0].kind, WASM_I32);
+    ASSERT_EQ(results[0].of.i32, 12);
+
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+    remove(generated_core_module_path);
+}
+
+TEST_F(BinaryParserTest,
+       TestNestedCoreWasmCanCallLoweredHostScalarRecordResultDirectly)
+{
+    static constexpr char generated_core_module_path[] =
+        "lowered_core_scalar_record_result_caller.wasm";
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+    ASSERT_TRUE(write_test_wasm_file(
+        generated_core_module_path, lowered_scalar_record_result_caller_core_module,
+        (uint32_t)sizeof(lowered_scalar_record_result_caller_core_module)));
+
+    LoadArgs load_args = {};
+    char module_name[] =
+        "nested-core-wasm-calls-lowered-host-scalar-record-result";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(append_top_level_host_function_import_sections(
+        (WASMComponentModule *)module, "host-record", "host-instance",
+        "forwarded"));
+    ASSERT_TRUE(append_top_level_function_export_alias((WASMComponentModule *)module,
+                                                       "host-instance", "forwarded",
+                                                       "aliased-host-record"));
+
+    const int32_t host_type_idx = append_component_scalar_func_type(
+        (WASMComponentModule *)module, {}, WASM_COMP_PRIMVAL_S32);
+    const int32_t record_type_idx = append_component_record_type(
+        (WASMComponentModule *)module,
+        { { "lhs", make_component_primitive_value_type(WASM_COMP_PRIMVAL_S32) },
+          { "rhs", make_component_primitive_value_type(WASM_COMP_PRIMVAL_S32) } });
+    ASSERT_GE(host_type_idx, 0);
+    ASSERT_GE(record_type_idx, 0);
+    auto *source_func_type = lookup_local_component_func_type(
+        (WASMComponentModule *)module, (uint32_t)host_type_idx);
+    ASSERT_NE(source_func_type, nullptr);
+    ASSERT_TRUE(replace_func_type_results(
+        source_func_type,
+        { make_component_type_index_value_type((uint32_t)record_type_idx) }));
+
+    auto *import_section = find_component_section((WASMComponentModule *)module,
+                                                  WASM_COMP_SECTION_IMPORTS);
+    ASSERT_NE(import_section, nullptr);
+    ASSERT_NE(import_section->parsed.import_section, nullptr);
+    ASSERT_EQ(import_section->parsed.import_section->count, 1u);
+    import_section->parsed.import_section->imports[0]
+        .extern_desc->extern_desc.func.type_idx = (uint32_t)host_type_idx;
+
+    const int32_t source_func_idx = find_top_level_export_sort_index(
+        (WASMComponentModule *)module, "aliased-host-record", WASM_COMP_SORT_FUNC);
+    const int32_t wrapper_type_idx = append_component_scalar_func_type(
+        (WASMComponentModule *)module, {}, WASM_COMP_PRIMVAL_S32);
+    auto *wrapper_type = lookup_local_component_func_type(
+        (WASMComponentModule *)module, (uint32_t)wrapper_type_idx);
+    ASSERT_GE(source_func_idx, 0);
+    ASSERT_GE(wrapper_type_idx, 0);
+    ASSERT_NE(wrapper_type, nullptr);
+    if (!wrapper_type->params) {
+        wrapper_type->params = (WASMComponentParamList *)wasm_runtime_malloc(
+            sizeof(WASMComponentParamList));
+        ASSERT_NE(wrapper_type->params, nullptr);
+        memset(wrapper_type->params, 0, sizeof(WASMComponentParamList));
+    }
+
+    WASMComponentCanon *nested_lower_canon = nullptr;
+    ASSERT_TRUE(append_nested_component_lowered_core_caller_sections_for_func(
+        (WASMComponentModule *)module, (uint32_t)source_func_idx, source_func_type,
+        wrapper_type, generated_core_module_path, "source", "call-source-sum",
+        &nested_lower_canon));
+    ASSERT_NE(nested_lower_canon, nullptr);
+    ASSERT_TRUE(ensure_canon_lower_memory_opt(nested_lower_canon, 0));
+
+    HostDefinedResultCallState call_state = {};
+    append_component_s32_payload(&call_state.next_result, 17);
+    append_component_s32_payload(&call_state.next_result, 25);
+    wasm_component_func_import_binding_t func_import = {};
+    func_import.name = "host-record";
+    func_import.callback = host_defined_result_only_callback;
+    func_import.user_data = &call_state;
+
+    struct InstantiationArgs2 *inst_args = nullptr;
+    ASSERT_TRUE(wasm_runtime_instantiation_args_create(&inst_args));
+    wasm_runtime_instantiation_args_set_default_stack_size(inst_args,
+                                                           helper->stack_size);
+    wasm_runtime_instantiation_args_set_host_managed_heap_size(inst_args,
+                                                               helper->heap_size);
+    wasm_runtime_instantiation_args_set_wasi_stdio(inst_args, 0, 1, 2);
+    wasm_runtime_instantiation_args_set_wasi_dir(inst_args, nullptr, 0, nullptr,
+                                                 0);
+    wasm_runtime_instantiation_args_set_component_func_imports(inst_args,
+                                                               &func_import, 1);
+
+    wasm_module_inst_t module_inst = wasm_runtime_instantiate_ex2(
+        module, inst_args, helper->error_buf,
+        (uint32_t)sizeof(helper->error_buf));
+    wasm_runtime_instantiation_args_destroy(inst_args);
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_instance_t nested_instance =
+        wasm_runtime_lookup_component_instance(module_inst, "nested-lowered-instance");
+    ASSERT_NE(nested_instance, nullptr);
+
+    wasm_component_func_t func =
+        wasm_component_instance_lookup_function(nested_instance, "wrapped");
+    ASSERT_NE(func, nullptr);
+
+    wasm_val_t results[1] = {};
+    ASSERT_TRUE(wasm_runtime_call_component(module_inst, func, 1, results, 0,
+                                            nullptr))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(call_state.call_count, 1);
+    ASSERT_EQ(results[0].kind, WASM_I32);
+    ASSERT_EQ(results[0].of.i32, 42);
+
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+    remove(generated_core_module_path);
+}
+
+TEST_F(BinaryParserTest,
+       TestRuntimeExecutesStartSectionThroughLoweredScalarRecordResult)
+{
+    static constexpr char generated_core_module_path[] =
+        "lowered_core_scalar_record_result_caller.wasm";
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+    ASSERT_TRUE(write_test_wasm_file(
+        generated_core_module_path, lowered_scalar_record_result_caller_core_module,
+        (uint32_t)sizeof(lowered_scalar_record_result_caller_core_module)));
+
+    LoadArgs load_args = {};
+    char module_name[] = "runtime-start-lowered-scalar-record-result";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    auto *component_module = (WASMComponentModule *)module;
+    ASSERT_TRUE(append_top_level_host_function_import_sections(
+        component_module, "host-record", "host-instance", "forwarded"));
+    ASSERT_TRUE(append_top_level_function_export_alias(component_module,
+                                                       "host-instance", "forwarded",
+                                                       "aliased-host-record"));
+
+    const int32_t host_type_idx = append_component_scalar_func_type(
+        component_module, {}, WASM_COMP_PRIMVAL_S32);
+    const int32_t record_type_idx = append_component_record_type(
+        component_module,
+        { { "lhs", make_component_primitive_value_type(WASM_COMP_PRIMVAL_S32) },
+          { "rhs", make_component_primitive_value_type(WASM_COMP_PRIMVAL_S32) } });
+    ASSERT_GE(host_type_idx, 0);
+    ASSERT_GE(record_type_idx, 0);
+    auto *source_func_type =
+        lookup_local_component_func_type(component_module, (uint32_t)host_type_idx);
+    ASSERT_NE(source_func_type, nullptr);
+    ASSERT_TRUE(replace_func_type_results(
+        source_func_type,
+        { make_component_type_index_value_type((uint32_t)record_type_idx) }));
+
+    auto *import_section =
+        find_component_section(component_module, WASM_COMP_SECTION_IMPORTS);
+    ASSERT_NE(import_section, nullptr);
+    ASSERT_NE(import_section->parsed.import_section, nullptr);
+    ASSERT_EQ(import_section->parsed.import_section->count, 1u);
+    import_section->parsed.import_section->imports[0]
+        .extern_desc->extern_desc.func.type_idx = (uint32_t)host_type_idx;
+
+    const int32_t source_func_idx = find_top_level_export_sort_index(
+        component_module, "aliased-host-record", WASM_COMP_SORT_FUNC);
+    ASSERT_GE(source_func_idx, 0);
+    ASSERT_TRUE(append_top_level_lowered_core_caller_sections_for_func(
+        component_module, (uint32_t)source_func_idx, generated_core_module_path,
+        "source"));
+    WASMComponentCanon *lower_canon = find_first_canon_lower(component_module);
+    ASSERT_NE(lower_canon, nullptr);
+    ASSERT_TRUE(ensure_canon_lower_memory_opt(lower_canon, 0));
+
+    const int32_t wrapper_type_idx = append_component_scalar_func_type(
+        component_module, {}, WASM_COMP_PRIMVAL_S32);
+    auto *wrapper_type = lookup_local_component_func_type(
+        component_module, (uint32_t)wrapper_type_idx);
+    ASSERT_GE(wrapper_type_idx, 0);
+    ASSERT_NE(wrapper_type, nullptr);
+    if (!wrapper_type->params) {
+        wrapper_type->params = (WASMComponentParamList *)wasm_runtime_malloc(
+            sizeof(WASMComponentParamList));
+        ASSERT_NE(wrapper_type->params, nullptr);
+        memset(wrapper_type->params, 0, sizeof(WASMComponentParamList));
+    }
+    ASSERT_TRUE(append_top_level_core_export_lift_sections(
+        component_module,
+        count_top_level_core_instance_entries(&component_module->component) - 1,
+        "call-source-sum", (uint32_t)wrapper_type_idx,
+        "core-caller-host-record-sum"));
+
+    const int32_t start_func_idx = find_top_level_export_sort_index(
+        component_module, "core-caller-host-record-sum", WASM_COMP_SORT_FUNC);
+    ASSERT_GE(start_func_idx, 0);
+    const uint32_t start_value_idx = count_top_level_sort_entries(
+        &component_module->component, WASM_COMP_SORT_VALUE);
+    ASSERT_TRUE(
+        append_top_level_start_section(component_module, (uint32_t)start_func_idx,
+                                       nullptr, 0, 1));
+    ASSERT_TRUE(append_top_level_value_export_section(component_module,
+                                                      "start-result",
+                                                      start_value_idx));
+
+    HostDefinedResultCallState call_state = {};
+    append_component_s32_payload(&call_state.next_result, 20);
+    append_component_s32_payload(&call_state.next_result, 22);
+    wasm_component_func_import_binding_t func_import = {};
+    func_import.name = "host-record";
+    func_import.callback = host_defined_result_only_callback;
+    func_import.user_data = &call_state;
+
+    struct InstantiationArgs2 *inst_args = nullptr;
+    ASSERT_TRUE(wasm_runtime_instantiation_args_create(&inst_args));
+    wasm_runtime_instantiation_args_set_default_stack_size(inst_args,
+                                                           helper->stack_size);
+    wasm_runtime_instantiation_args_set_host_managed_heap_size(inst_args,
+                                                               helper->heap_size);
+    wasm_runtime_instantiation_args_set_wasi_stdio(inst_args, 0, 1, 2);
+    wasm_runtime_instantiation_args_set_wasi_dir(inst_args, nullptr, 0, nullptr,
+                                                 0);
+    wasm_runtime_instantiation_args_set_component_func_imports(inst_args,
+                                                               &func_import, 1);
+
+    wasm_module_inst_t module_inst = wasm_runtime_instantiate_ex2(
+        module, inst_args, helper->error_buf,
+        (uint32_t)sizeof(helper->error_buf));
+    wasm_runtime_instantiation_args_destroy(inst_args);
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+    ASSERT_EQ(call_state.call_count, 1);
+
+    wasm_component_value_t value = {};
+    int32_t decoded_result = 0;
+    ASSERT_TRUE(
+        wasm_runtime_lookup_component_value(module_inst, "start-result", &value));
+    ASSERT_TRUE(decode_component_s32_arg(&value, &decoded_result));
+    ASSERT_EQ(decoded_result, 42);
+
+    wasm_component_value_destroy(&value);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+    remove(generated_core_module_path);
+}
+
+TEST_F(BinaryParserTest,
+       TestCoreWasmLoweredHostScalarRecordResultRequiresLowerMemory)
+{
+    static constexpr char generated_core_module_path[] =
+        "lowered_core_scalar_record_result_caller.wasm";
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+    ASSERT_TRUE(write_test_wasm_file(
+        generated_core_module_path, lowered_scalar_record_result_caller_core_module,
+        (uint32_t)sizeof(lowered_scalar_record_result_caller_core_module)));
+
+    LoadArgs load_args = {};
+    char module_name[] =
+        "core-wasm-calls-lowered-host-scalar-record-result-no-memory";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(append_top_level_host_function_import_sections(
+        (WASMComponentModule *)module, "host-record", "host-instance",
+        "forwarded"));
+    ASSERT_TRUE(append_top_level_function_export_alias((WASMComponentModule *)module,
+                                                       "host-instance", "forwarded",
+                                                       "aliased-host-record"));
+
+    const int32_t host_type_idx = append_component_scalar_func_type(
+        (WASMComponentModule *)module, {}, WASM_COMP_PRIMVAL_S32);
+    const int32_t record_type_idx = append_component_record_type(
+        (WASMComponentModule *)module,
+        { { "lhs", make_component_primitive_value_type(WASM_COMP_PRIMVAL_S32) },
+          { "rhs", make_component_primitive_value_type(WASM_COMP_PRIMVAL_S32) } });
+    ASSERT_GE(host_type_idx, 0);
+    ASSERT_GE(record_type_idx, 0);
+    auto *source_func_type = lookup_local_component_func_type(
+        (WASMComponentModule *)module, (uint32_t)host_type_idx);
+    ASSERT_NE(source_func_type, nullptr);
+    ASSERT_TRUE(replace_func_type_results(
+        source_func_type,
+        { make_component_type_index_value_type((uint32_t)record_type_idx) }));
+
+    auto *import_section = find_component_section((WASMComponentModule *)module,
+                                                  WASM_COMP_SECTION_IMPORTS);
+    ASSERT_NE(import_section, nullptr);
+    ASSERT_NE(import_section->parsed.import_section, nullptr);
+    ASSERT_EQ(import_section->parsed.import_section->count, 1u);
+    import_section->parsed.import_section->imports[0]
+        .extern_desc->extern_desc.func.type_idx = (uint32_t)host_type_idx;
+
+    const int32_t source_func_idx = find_top_level_export_sort_index(
+        (WASMComponentModule *)module, "aliased-host-record", WASM_COMP_SORT_FUNC);
+    ASSERT_GE(source_func_idx, 0);
+    ASSERT_TRUE(append_top_level_lowered_core_caller_sections_for_func(
+        (WASMComponentModule *)module, (uint32_t)source_func_idx,
+        generated_core_module_path, "source"));
+
+    HostDefinedResultCallState call_state = {};
+    wasm_component_func_import_binding_t func_import = {};
+    func_import.name = "host-record";
+    func_import.callback = host_defined_result_only_callback;
+    func_import.user_data = &call_state;
+
+    struct InstantiationArgs2 *inst_args = nullptr;
+    ASSERT_TRUE(wasm_runtime_instantiation_args_create(&inst_args));
+    wasm_runtime_instantiation_args_set_default_stack_size(inst_args,
+                                                           helper->stack_size);
+    wasm_runtime_instantiation_args_set_host_managed_heap_size(inst_args,
+                                                               helper->heap_size);
+    wasm_runtime_instantiation_args_set_wasi_stdio(inst_args, 0, 1, 2);
+    wasm_runtime_instantiation_args_set_wasi_dir(inst_args, nullptr, 0, nullptr,
+                                                 0);
+    wasm_runtime_instantiation_args_set_component_func_imports(inst_args,
+                                                               &func_import, 1);
+
+    wasm_module_inst_t module_inst = wasm_runtime_instantiate_ex2(
+        module, inst_args, helper->error_buf,
+        (uint32_t)sizeof(helper->error_buf));
+    wasm_runtime_instantiation_args_destroy(inst_args);
+    ASSERT_EQ(module_inst, nullptr);
+    ASSERT_NE(strstr(helper->error_buf, "require memory"), nullptr);
+
+    wasm_runtime_unload(module);
+    remove(generated_core_module_path);
 }
 
 TEST_F(BinaryParserTest,

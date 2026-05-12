@@ -106,6 +106,10 @@ typedef struct WASMComponentCanonLiftValueShape {
     const WASMComponentDefValType *def_type;
 } WASMComponentCanonLiftValueShape;
 
+typedef struct WASMComponentCompositeFlatLeaf {
+    WASMComponentCanonLiftValueInfo type_info;
+} WASMComponentCompositeFlatLeaf;
+
 static uint32
 encode_component_unsigned_leb(uint64 value, uint8 *out_buf);
 
@@ -140,6 +144,21 @@ resolve_component_canon_lift_value_shape(
     const WASMComponent *component, const WASMComponentValueType *value_type,
     const char *position, uint32 index,
     WASMComponentCanonLiftValueShape *out_shape, WASMComponentInstance *inst);
+
+static bool
+collect_component_composite_result_leaves(
+    WASMComponentInstance *inst, const WASMComponent *component,
+    const WASMComponentValueType *value_type, uint32 result_index,
+    WASMComponentCompositeFlatLeaf *flat_leaves, uint32 leaf_capacity,
+    uint32 *leaf_count_io);
+
+static bool
+validate_component_composite_result_signature(
+    WASMComponentInstance *inst, const WASMComponent *component,
+    const WASMComponentValueType *value_type, uint32 result_index,
+    const WASMFuncType *core_type,
+    WASMComponentCompositeFlatLeaf *flat_leaves, uint32 flat_leaf_capacity,
+    uint32 *flat_leaf_count_out);
 
 static uint32
 component_scalar_prim_byte_size(uint8 prim_type);
@@ -2801,15 +2820,6 @@ validate_lowered_import_signature(
                     component_inst, error_buf, error_buf_size,
                     "component canon lower result type resolution failed");
 
-            if (!composite_has_string && !composite_has_list_scalar
-                && !composite_has_list_string)
-                return set_component_runtime_error_fmt(
-                    error_buf, error_buf_size,
-                    "component canon lower direct core-call bindings currently "
-                    "support only memory-backed tuple/record results and scalar, "
-                    "string, list<scalar>, list<string>, or supported "
-                    "tuple/record parameters");
-
             if (core_param_index + 1 != expected_type->param_count
                 || expected_type->result_count != 0
                 || expected_type->types[core_param_index] != VALUE_TYPE_I32)
@@ -3973,13 +3983,6 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
     }
 
     expected_result_count = get_component_func_result_count(component_type);
-    if (func_type->result_count > 1) {
-        wasm_runtime_set_exception(
-            caller_module_inst,
-            "component lowered core-call trampoline currently supports at most "
-            "one result");
-        return;
-    }
 
     if (!component_type) {
         wasm_runtime_set_exception(
@@ -4106,7 +4109,8 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
             has_composite_memory_result =
                 composite_has_string || composite_has_list_scalar
                 || composite_has_list_string;
-            expects_memory_result_ptr = has_composite_memory_result;
+            has_composite_memory_result = true;
+            expects_memory_result_ptr = true;
         }
         else {
             bool has_owned_resource_result = false;
@@ -9533,10 +9537,6 @@ init_component_public_scalar_result(
     WASMComponentInstance *inst, const WASMComponentCanonLiftValueInfo *type_info,
     const wasm_val_t *result, wasm_component_value_t *value);
 
-typedef struct WASMComponentCompositeFlatLeaf {
-    WASMComponentCanonLiftValueInfo type_info;
-} WASMComponentCompositeFlatLeaf;
-
 static bool
 set_component_composite_result_leaf_error(WASMComponentInstance *inst,
                                           uint32 index)
@@ -11721,11 +11721,6 @@ materialize_component_public_composite_result_to_memory(
                                             &has_list_scalar_leaf,
                                             &has_list_string_leaf))
         return false;
-
-    if (!has_string_leaf && !has_list_scalar_leaf && !has_list_string_leaf)
-        return set_component_call_error(
-            inst, "component lowered core-call trampoline composite result does "
-                  "not require memory-backed lowering");
 
     if ((result_area_ptr & (ret_area_align - 1)) != 0
         || !wasm_runtime_validate_app_addr(caller_module_inst, result_area_ptr,
