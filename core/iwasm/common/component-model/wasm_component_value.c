@@ -283,6 +283,13 @@ get_component_public_value_data(const wasm_component_value_t *value)
                 (const WASMComponentPublicResourceValue *)value->storage.owned_data;
             return resource_value ? resource_value->data : NULL;
         }
+        case WASM_COMPONENT_VALUE_STORAGE_COMPOSITE_RESOURCE:
+        {
+            const WASMComponentPublicCompositeResourceValue *composite_value =
+                (const WASMComponentPublicCompositeResourceValue *)
+                    value->storage.owned_data;
+            return composite_value ? composite_value->data : NULL;
+        }
         default:
             return NULL;
     }
@@ -375,32 +382,107 @@ wasm_component_value_destroy(wasm_component_value_t *value)
         && value->storage.owned_data) {
         WASMComponentPublicResourceValue *resource_value =
             (WASMComponentPublicResourceValue *)value->storage.owned_data;
-        if (resource_value->magic == WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_MAGIC
-            && resource_value->kind
-                   == WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_PENDING_IMPORTED_RESULT
-            && resource_value->data && resource_value->finalizer)
-            resource_value->finalizer(resource_value->data,
-                                      resource_value->finalizer_ctx);
-        else if (resource_value->magic == WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_MAGIC
-                 && resource_value->kind
-                        == WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_BORROWED
-                 && resource_value->resource_state
-                 && resource_value->handle > 0) {
-            char error_buf[128];
+        wasm_component_resource_release_public_value(resource_value);
+    }
+    else if (value->storage_kind == WASM_COMPONENT_VALUE_STORAGE_COMPOSITE_RESOURCE
+             && value->storage.owned_data) {
+        WASMComponentPublicCompositeResourceValue *composite_value =
+            (WASMComponentPublicCompositeResourceValue *)value->storage.owned_data;
 
-            error_buf[0] = '\0';
-            (void)wasm_component_resource_release_borrowed_handle(
-                resource_value->resource_state, resource_value->resource_type_idx,
-                resource_value->handle, error_buf, (uint32)sizeof(error_buf));
+            if (composite_value->magic
+                == WASM_COMPONENT_PUBLIC_COMPOSITE_RESOURCE_VALUE_MAGIC) {
+                if (composite_value->resource_values) {
+                    for (uint32 i = 0; i < composite_value->resource_count; i++) {
+                        WASMComponentPublicResourceValue *resource_value =
+                            &composite_value->resource_values[i];
+
+                        if (resource_value->kind
+                            == WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_TRANSFERRED)
+                            wasm_component_drop_transferred_public_resource_value(
+                                resource_value);
+                        else
+                            wasm_component_resource_release_public_value(
+                                resource_value);
+                    }
+                    wasm_runtime_free(composite_value->resource_values);
+                }
+            if (composite_value->data)
+                wasm_runtime_free(composite_value->data);
         }
     }
 
     if ((value->storage_kind == WASM_COMPONENT_VALUE_STORAGE_OWNED
-         || value->storage_kind == WASM_COMPONENT_VALUE_STORAGE_RESOURCE)
+         || value->storage_kind == WASM_COMPONENT_VALUE_STORAGE_RESOURCE
+         || value->storage_kind == WASM_COMPONENT_VALUE_STORAGE_COMPOSITE_RESOURCE)
         && value->storage.owned_data)
         wasm_runtime_free(value->storage.owned_data);
 
     memset(value, 0, sizeof(*value));
+}
+
+static bool
+restore_component_public_composite_resources(
+    const wasm_component_value_t *public_value, char *error_buf,
+    uint32 error_buf_size)
+{
+    WASMComponentPublicCompositeResourceValue *composite_value;
+
+    if (!public_value
+        || public_value->storage_kind
+               != WASM_COMPONENT_VALUE_STORAGE_COMPOSITE_RESOURCE
+        || !public_value->storage.owned_data)
+        return set_component_value_error(
+            error_buf, error_buf_size,
+            "component runtime composite resource value is invalid");
+
+    composite_value = (WASMComponentPublicCompositeResourceValue *)
+        public_value->storage.owned_data;
+    if (composite_value->magic
+        != WASM_COMPONENT_PUBLIC_COMPOSITE_RESOURCE_VALUE_MAGIC)
+        return set_component_value_error(
+            error_buf, error_buf_size,
+            "component runtime composite resource value is malformed");
+
+    for (uint32 i = 0; i < composite_value->resource_count; i++) {
+        WASMComponentPublicResourceValue *resource_value =
+            &composite_value->resource_values[i];
+
+        if (resource_value->magic != WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_MAGIC)
+            return set_component_value_error(
+                error_buf, error_buf_size,
+                "component runtime composite resource leaf is invalid");
+        if (resource_value->kind == WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_TRANSFERRED) {
+            if (!resource_value->handle
+                || !wasm_component_resource_restore_owned_handle(
+                    resource_value, error_buf, error_buf_size))
+                return false;
+            resource_value->resource_state = NULL;
+            resource_value->resource_type_idx =
+                WASM_COMPONENT_RESOURCE_INVALID_TYPE_IDX;
+            resource_value->canonical_type_idx =
+                WASM_COMPONENT_RESOURCE_INVALID_TYPE_IDX;
+            resource_value->handle = 0;
+            resource_value->data = NULL;
+            resource_value->finalizer = NULL;
+            resource_value->finalizer_ctx = NULL;
+        }
+        else if (resource_value->kind
+                 == WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_BORROWED) {
+            return set_component_value_error(
+                error_buf, error_buf_size,
+                "component runtime values do not support composite borrowed "
+                "resource results");
+        }
+        else if (resource_value->kind
+                 == WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_PENDING_IMPORTED_RESULT) {
+            return set_component_value_error(
+                error_buf, error_buf_size,
+                "component runtime values do not support pending imported "
+                "resource results inside composite values");
+        }
+    }
+
+    return true;
 }
 
 static bool
@@ -505,6 +587,11 @@ wasm_component_runtime_value_init_public(
         return init_component_runtime_resource_handle_value(
             runtime_value, component, value_type, public_value, error_buf,
             error_buf_size);
+
+    if (public_value->storage_kind == WASM_COMPONENT_VALUE_STORAGE_COMPOSITE_RESOURCE
+        && !restore_component_public_composite_resources(
+            public_value, error_buf, error_buf_size))
+        return false;
 
     if (public_value->byte_size > 0) {
         data = get_component_public_value_data(public_value);

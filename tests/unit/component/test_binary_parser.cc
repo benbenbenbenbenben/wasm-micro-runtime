@@ -2674,6 +2674,54 @@ host_owned_resource_invalid_string_pair_callback(
 }
 
 static bool
+host_owned_resource_string_pair_callback(
+    wasm_module_inst_t caller_component_inst, void *user_data,
+    uint32_t num_results, wasm_component_value_t results[], uint32_t num_args,
+    const wasm_component_value_t args[], char *error_buf,
+    uint32_t error_buf_size)
+{
+    (void)caller_component_inst;
+
+    auto *state = (HostOwnedResourceScalarPairCallState *)user_data;
+    const uint32_t expected_args =
+        state && state->create_fresh_imported_result ? 0 : 1;
+    if (!state || num_args != expected_args || num_results != 2) {
+        snprintf(error_buf, error_buf_size,
+                 "unexpected host owned resource string pair callback arity");
+        return false;
+    }
+
+    state->call_count++;
+    if (num_args > 0) {
+        state->last_storage_kind = args[0].storage_kind;
+        state->last_data = (uintptr_t)wasm_component_value_get_data(&args[0]);
+        results[0] = args[0];
+    }
+    else {
+        auto *value = (uint32_t *)wasm_runtime_malloc(sizeof(uint32_t));
+        if (!value) {
+            snprintf(error_buf, error_buf_size,
+                     "host owned resource string pair callback allocation failed");
+            return false;
+        }
+        *value = (uint32_t)state->fresh_result_data;
+        state->last_storage_kind = WASM_COMPONENT_VALUE_STORAGE_NONE;
+        state->last_data = 0;
+        if (!wasm_component_value_init_owned_imported_resource_result(
+                &results[0], value, resource_handle_test_finalizer,
+                state->result_finalizer_state)) {
+            resource_handle_test_finalizer(value, state->result_finalizer_state);
+            snprintf(error_buf, error_buf_size,
+                     "host owned resource string pair callback allocation failed");
+            return false;
+        }
+    }
+
+    results[1] = make_component_string_value("hello");
+    return true;
+}
+
+static bool
 host_owned_resource_roundtrip_invalid_string_pair_callback(
     wasm_module_inst_t caller_component_inst, void *user_data,
     uint32_t num_results, wasm_component_value_t results[], uint32_t num_args,
@@ -5140,6 +5188,58 @@ append_def_val_type_to_type_section(WASMComponentTypeSection *type_section,
     return type_idx;
 }
 
+static bool
+ensure_component_resource_type_index(WASMComponent *component,
+                                     uint32_t resource_type_idx)
+{
+    WASMComponentTypeSection *type_section = nullptr;
+
+    if (!component) {
+        return false;
+    }
+
+    for (uint32_t i = 0; i < component->section_count; i++) {
+        if (component->sections[i].id == WASM_COMP_SECTION_TYPE
+            && component->sections[i].parsed.type_section) {
+            type_section = component->sections[i].parsed.type_section;
+            break;
+        }
+    }
+    if (!type_section) {
+        return false;
+    }
+
+    while (type_section->count <= resource_type_idx) {
+        auto *resource_type = (WASMComponentResourceType *)wasm_runtime_malloc(
+            sizeof(WASMComponentResourceType));
+        auto *sync_type = (WASMComponentResourceTypeSync *)wasm_runtime_malloc(
+            sizeof(WASMComponentResourceTypeSync));
+        auto *new_types = (WASMComponentTypes *)wasm_runtime_malloc(
+            sizeof(WASMComponentTypes) * (type_section->count + 1));
+
+        if (!resource_type || !sync_type || !new_types) {
+            return false;
+        }
+
+        memset(resource_type, 0, sizeof(WASMComponentResourceType));
+        memset(sync_type, 0, sizeof(WASMComponentResourceTypeSync));
+        memset(new_types, 0, sizeof(WASMComponentTypes) * (type_section->count + 1));
+        memcpy(new_types, type_section->types,
+               sizeof(WASMComponentTypes) * type_section->count);
+        resource_type->tag = WASM_COMP_RESOURCE_TYPE_SYNC;
+        resource_type->resource.sync = sync_type;
+        new_types[type_section->count].tag = WASM_COMP_RESOURCE_TYPE_SYNC;
+        new_types[type_section->count].type.resource_type = resource_type;
+        if (type_section->types) {
+            wasm_runtime_free(type_section->types);
+        }
+        type_section->types = new_types;
+        type_section->count++;
+    }
+
+    return true;
+}
+
 static WASMComponentFuncType *
 clone_component_func_type(const WASMComponent *source_component,
                           WASMComponent *target_component,
@@ -6490,6 +6590,50 @@ clone_supported_value_type_into_component(
                 return false;
             }
 
+            *target_component = target_module.component;
+            *out_value_type = make_component_type_index_value_type((uint32_t)type_idx);
+            return true;
+        }
+        case WASM_COMP_DEF_VAL_OWN:
+        {
+            WASMComponentModule target_module = {};
+            int32_t type_idx;
+            const uint32_t cloned_resource_type_idx = 0;
+            if (!def_type->def_val.owned) {
+                return false;
+            }
+            if (!ensure_component_resource_type_index(target_component,
+                                                      cloned_resource_type_idx)) {
+                return false;
+            }
+            target_module.component = *target_component;
+            type_idx = append_component_own_type(&target_module,
+                                                 cloned_resource_type_idx);
+            if (type_idx < 0) {
+                return false;
+            }
+            *target_component = target_module.component;
+            *out_value_type = make_component_type_index_value_type((uint32_t)type_idx);
+            return true;
+        }
+        case WASM_COMP_DEF_VAL_BORROW:
+        {
+            WASMComponentModule target_module = {};
+            int32_t type_idx;
+            const uint32_t cloned_resource_type_idx = 0;
+            if (!def_type->def_val.borrow) {
+                return false;
+            }
+            if (!ensure_component_resource_type_index(target_component,
+                                                      cloned_resource_type_idx)) {
+                return false;
+            }
+            target_module.component = *target_component;
+            type_idx = append_component_borrow_type(&target_module,
+                                                    cloned_resource_type_idx);
+            if (type_idx < 0) {
+                return false;
+            }
             *target_component = target_module.component;
             *out_value_type = make_component_type_index_value_type((uint32_t)type_idx);
             return true;
@@ -18494,6 +18638,7 @@ TEST_F(BinaryParserTest,
         find_first_canon_lower((WASMComponentModule *)module);
     ASSERT_NE(lower_canon, nullptr);
     ASSERT_TRUE(ensure_canon_lower_memory_opt(lower_canon, 0));
+    ASSERT_TRUE(ensure_canon_lower_string_utf8_opt(lower_canon));
     ASSERT_TRUE(ensure_canon_lower_string_utf8_opt(lower_canon));
 
     const int32_t wrapper_type_idx = append_component_scalar_func_type(
@@ -43475,6 +43620,58 @@ TEST_F(BinaryParserTest,
 }
 
 TEST_F(BinaryParserTest,
+       TestRuntimeRejectsCompositeBorrowResourceRetptrMultiResultCanonLift)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "runtime-top-level-borrow-tuple-retptr-multi-result-call";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    ASSERT_TRUE(
+        append_top_level_resource_type_section((WASMComponentModule *)module));
+    uint32_t resource_type_idx = 0;
+    ASSERT_TRUE(find_resource_type_index_by_kind((WASMComponentModule *)module,
+                                                 WASM_COMP_RUNTIME_RESOURCE_TYPE_LOCAL,
+                                                 &resource_type_idx));
+
+    const int32_t borrow_type_idx =
+        append_component_borrow_type((WASMComponentModule *)module,
+                                     resource_type_idx);
+    ASSERT_GE(borrow_type_idx, 0);
+    const int32_t tuple_type_idx = append_component_tuple_type(
+        (WASMComponentModule *)module,
+        { make_component_type_index_value_type((uint32_t)borrow_type_idx),
+          make_component_primitive_value_type(WASM_COMP_PRIMVAL_S32) });
+    ASSERT_GE(tuple_type_idx, 0);
+    ASSERT_TRUE(append_top_level_retptr_multi_result_lift_from_file(
+        (WASMComponentModule *)module, "pair-retptr-results",
+        "retptr_multi_result_tuple_s32_pair.wasm",
+        std::vector<WASMComponentValueType>{
+            make_component_type_index_value_type((uint32_t)tuple_type_idx),
+            make_component_primitive_value_type(WASM_COMP_PRIMVAL_S32) },
+        "tuple-borrow-resource-retptr-core", nullptr));
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_EQ(module_inst, nullptr);
+    ASSERT_NE(strstr(helper->error_buf,
+                     "does not support borrow<resource> leaves inside tuple"),
+              nullptr)
+        << helper->error_buf;
+
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
        TestRuntimeExecutesTopLevelTupleScalarScalarRetptrMultiResultStartSections)
 {
     bool ret = helper->read_wasm_file("add.wasm");
@@ -43532,6 +43729,95 @@ TEST_F(BinaryParserTest,
     wasm_component_value_destroy(&first);
     wasm_component_value_destroy(&second);
     wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestRuntimeExecutesCompositeOwnResourceStartSections)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    static NativeSymbol native_symbols[] = {
+        { "record_dtor", (void *)record_resource_dtor_native, "(i)", NULL }
+    };
+    NativeRegistrationGuard native_guard = { "env", native_symbols, 1, false };
+    ASSERT_TRUE(wasm_runtime_register_natives(
+        native_guard.module_name, native_guard.symbols, native_guard.count));
+    native_guard.registered = true;
+
+    LoadArgs load_args = {};
+    char module_name[] = "runtime-composite-own-resource-start";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    uint32_t dtor_core_instance_idx = 0;
+    uint32_t dtor_core_func_idx = 0;
+    ASSERT_TRUE(append_top_level_core_module_instance_sections(
+        (WASMComponentModule *)module, "resource_dtor_host_recorder.wasm",
+        "resource-dtor-host-recorder", &dtor_core_instance_idx));
+    ASSERT_TRUE(append_top_level_core_export_alias_section(
+        (WASMComponentModule *)module, dtor_core_instance_idx, "resource-dtor",
+        &dtor_core_func_idx));
+    ASSERT_TRUE(append_top_level_resource_type_section_with_dtor(
+        (WASMComponentModule *)module, true, dtor_core_func_idx));
+    WASMComponentRuntimeResourceState *resource_state =
+        wasm_component_resource_state_create(
+            &((WASMComponentModule *)module)->component, helper->error_buf,
+            (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(resource_state, nullptr) << helper->error_buf;
+    const uint32_t resource_type_idx = resource_state->type_count - 1;
+    wasm_component_resource_state_destroy(resource_state);
+    ASSERT_TRUE(append_top_level_resource_core_caller_sections(
+        (WASMComponentModule *)module, resource_type_idx,
+        "resource_core_caller.wasm"));
+
+    const int32_t own_type_idx =
+        append_component_own_type((WASMComponentModule *)module, resource_type_idx);
+    ASSERT_GE(own_type_idx, 0);
+    const int32_t tuple_type_idx = append_component_tuple_type(
+        (WASMComponentModule *)module,
+        { make_component_type_index_value_type((uint32_t)own_type_idx) });
+    ASSERT_GE(tuple_type_idx, 0);
+    const int32_t start_type_idx = append_component_func_type(
+        (WASMComponentModule *)module, {},
+        make_component_type_index_value_type((uint32_t)tuple_type_idx));
+    ASSERT_GE(start_type_idx, 0);
+    WASMComponentFuncType *start_type = lookup_local_component_func_type(
+        (WASMComponentModule *)module, (uint32_t)start_type_idx);
+    ASSERT_NE(start_type, nullptr);
+    if (!start_type->params) {
+        start_type->params = (WASMComponentParamList *)wasm_runtime_malloc(
+            sizeof(WASMComponentParamList));
+        ASSERT_NE(start_type->params, nullptr);
+        memset(start_type->params, 0, sizeof(WASMComponentParamList));
+    }
+
+    uint32_t start_func_idx = UINT32_MAX;
+    ASSERT_TRUE(append_top_level_core_export_lift_sections(
+        (WASMComponentModule *)module,
+        count_top_level_core_instance_entries(&((WASMComponentModule *)module)
+                                                   ->component)
+            - 1,
+        "create-handle-const", (uint32_t)start_type_idx,
+        "resource-create-owned-handle-start"));
+    start_func_idx = count_top_level_sort_entries(
+        &((WASMComponentModule *)module)->component, WASM_COMP_SORT_FUNC)
+        - 1;
+    ASSERT_TRUE(append_top_level_start_section((WASMComponentModule *)module,
+                                               start_func_idx, nullptr, 0, 1));
+
+    g_recorded_resource_dtor_sum = 0;
+    wasm_module_inst_t module_inst =
+        instantiate_component_with_default_wasi(module, helper.get());
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+    ASSERT_EQ(g_recorded_resource_dtor_sum, 0u);
+
+    wasm_runtime_deinstantiate(module_inst);
+    ASSERT_EQ(g_recorded_resource_dtor_sum, 42u);
     wasm_runtime_unload(module);
 }
 
@@ -54647,6 +54933,105 @@ TEST_F(BinaryParserTest,
 }
 
 TEST_F(BinaryParserTest,
+       TestCallComponentValuesCanLiftCompositeOwnResourceResults)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    static NativeSymbol native_symbols[] = {
+        { "record_dtor", (void *)record_resource_dtor_native, "(i)", NULL }
+    };
+    NativeRegistrationGuard native_guard = { "env", native_symbols, 1, false };
+    ASSERT_TRUE(wasm_runtime_register_natives(
+        native_guard.module_name, native_guard.symbols, native_guard.count));
+    native_guard.registered = true;
+
+    LoadArgs load_args = {};
+    char module_name[] = "component-composite-own-resource-result";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    uint32_t dtor_core_instance_idx = 0;
+    uint32_t dtor_core_func_idx = 0;
+    ASSERT_TRUE(append_top_level_core_module_instance_sections(
+        (WASMComponentModule *)module, "resource_dtor_host_recorder.wasm",
+        "resource-dtor-host-recorder", &dtor_core_instance_idx));
+    ASSERT_TRUE(append_top_level_core_export_alias_section(
+        (WASMComponentModule *)module, dtor_core_instance_idx, "resource-dtor",
+        &dtor_core_func_idx));
+    ASSERT_TRUE(append_top_level_resource_type_section_with_dtor(
+        (WASMComponentModule *)module, true, dtor_core_func_idx));
+    WASMComponentRuntimeResourceState *resource_state =
+        wasm_component_resource_state_create(
+            &((WASMComponentModule *)module)->component, helper->error_buf,
+            (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(resource_state, nullptr) << helper->error_buf;
+    const uint32_t resource_type_idx = resource_state->type_count - 1;
+    wasm_component_resource_state_destroy(resource_state);
+    ASSERT_TRUE(append_top_level_resource_core_caller_sections(
+        (WASMComponentModule *)module, resource_type_idx,
+        "resource_core_caller.wasm"));
+
+    const int32_t own_type_idx =
+        append_component_own_type((WASMComponentModule *)module, resource_type_idx);
+    ASSERT_GE(own_type_idx, 0);
+    const int32_t tuple_type_idx = append_component_tuple_type(
+        (WASMComponentModule *)module,
+        { make_component_type_index_value_type((uint32_t)own_type_idx) });
+    ASSERT_GE(tuple_type_idx, 0);
+    const int32_t wrapper_type_idx = append_component_func_type(
+        (WASMComponentModule *)module, {},
+        make_component_type_index_value_type((uint32_t)tuple_type_idx));
+    ASSERT_GE(wrapper_type_idx, 0);
+    WASMComponentFuncType *wrapper_type = lookup_local_component_func_type(
+        (WASMComponentModule *)module, (uint32_t)wrapper_type_idx);
+    ASSERT_NE(wrapper_type, nullptr);
+    if (!wrapper_type->params) {
+        wrapper_type->params = (WASMComponentParamList *)wasm_runtime_malloc(
+            sizeof(WASMComponentParamList));
+        ASSERT_NE(wrapper_type->params, nullptr);
+        memset(wrapper_type->params, 0, sizeof(WASMComponentParamList));
+    }
+    ASSERT_TRUE(append_top_level_core_export_lift_sections(
+        (WASMComponentModule *)module,
+        count_top_level_core_instance_entries(&((WASMComponentModule *)module)
+                                                   ->component)
+            - 1,
+        "create-handle-const", (uint32_t)wrapper_type_idx,
+        "resource-create-owned-handle-tuple"));
+
+    g_recorded_resource_dtor_sum = 0;
+    wasm_module_inst_t module_inst =
+        instantiate_component_with_default_wasi(module, helper.get());
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t create_func = wasm_runtime_lookup_component_function(
+        module_inst, "resource-create-owned-handle-tuple");
+    ASSERT_NE(create_func, nullptr);
+
+    wasm_component_value_t result = {};
+    uint32_t handle = 0;
+    ASSERT_TRUE(
+        wasm_runtime_call_component_values(module_inst, create_func, 1, &result, 0,
+                                           nullptr))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(result.type.kind, WASM_COMPONENT_VALUE_TYPE_DEFINED);
+    ASSERT_EQ(result.storage_kind, WASM_COMPONENT_VALUE_STORAGE_COMPOSITE_RESOURCE);
+    ASSERT_TRUE(decode_component_u32_arg(&result, &handle));
+    ASSERT_EQ(handle, 1u);
+    ASSERT_EQ(g_recorded_resource_dtor_sum, 0u);
+
+    wasm_component_value_destroy(&result);
+    ASSERT_EQ(g_recorded_resource_dtor_sum, 42u);
+
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
        TestHostRejectsDoubleDropOfLiftedOwnResourceResult)
 {
     bool ret = helper->read_wasm_file("add.wasm");
@@ -57440,7 +57825,8 @@ TEST_F(BinaryParserTest, TestRuntimeSupportsHostFuncImportBorrowedImportedResour
     wasm_component_import_binding_t resource_import = {};
     resource_import.name = "imported-resource";
     resource_import.kind = WASM_COMPONENT_EXTERN_KIND_RESOURCE_TYPE;
-    resource_import.value.resource_type.drop_callback = record_imported_resource_drop;
+    resource_import.value.resource_type.drop_callback =
+        record_imported_resource_drop;
 
     struct InstantiationArgs2 *inst_args = nullptr;
     ASSERT_TRUE(wasm_runtime_instantiation_args_create(&inst_args));
@@ -57792,6 +58178,145 @@ TEST_F(BinaryParserTest,
     ASSERT_TRUE(wasm_runtime_drop_component_owned_result(
         module_inst, lifted_func, 0, &results[0]))
         << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(g_recorded_resource_dtor_sum, 42u);
+
+    wasm_component_value_destroy(&created);
+    wasm_component_value_destroy(&results[1]);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestCallComponentValuesCanLiftCompositeOwnRetptrMultiResults)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    static NativeSymbol native_symbols[] = {
+        { "record_dtor", (void *)record_resource_dtor_native, "(i)", NULL }
+    };
+    NativeRegistrationGuard native_guard = { "env", native_symbols, 1, false };
+    g_recorded_resource_dtor_sum = 0;
+    ASSERT_TRUE(wasm_runtime_register_natives(
+        native_guard.module_name, native_guard.symbols, native_guard.count));
+    native_guard.registered = true;
+
+    LoadArgs load_args = {};
+    char module_name[] = "component-composite-own-retptr-multi-results";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    uint32_t dtor_core_instance_idx = 0;
+    uint32_t dtor_core_func_idx = 0;
+    ASSERT_TRUE(append_top_level_core_module_instance_sections(
+        (WASMComponentModule *)module, "resource_dtor_host_recorder.wasm",
+        "resource-dtor-host-recorder", &dtor_core_instance_idx));
+    ASSERT_TRUE(append_top_level_core_export_alias_section(
+        (WASMComponentModule *)module, dtor_core_instance_idx, "resource-dtor",
+        &dtor_core_func_idx));
+    ASSERT_TRUE(append_top_level_resource_type_section_with_dtor(
+        (WASMComponentModule *)module, true, dtor_core_func_idx));
+
+    WASMComponentRuntimeResourceState *resource_state =
+        wasm_component_resource_state_create(
+            &((WASMComponentModule *)module)->component, helper->error_buf,
+            (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(resource_state, nullptr) << helper->error_buf;
+    const uint32_t resource_type_idx = resource_state->type_count - 1;
+    wasm_component_resource_state_destroy(resource_state);
+
+    ASSERT_TRUE(append_top_level_resource_core_caller_sections(
+        (WASMComponentModule *)module, resource_type_idx,
+        "resource_core_caller.wasm"));
+
+    const int32_t own_type_idx =
+        append_component_own_type((WASMComponentModule *)module, resource_type_idx);
+    ASSERT_GE(own_type_idx, 0);
+    const int32_t tuple_type_idx = append_component_tuple_type(
+        (WASMComponentModule *)module,
+        { make_component_type_index_value_type((uint32_t)own_type_idx) });
+    ASSERT_GE(tuple_type_idx, 0);
+    const int32_t create_type_idx = append_component_func_type(
+        (WASMComponentModule *)module, {},
+        make_component_type_index_value_type((uint32_t)own_type_idx));
+    ASSERT_GE(create_type_idx, 0);
+    auto *create_type = lookup_local_component_func_type(
+        (WASMComponentModule *)module, (uint32_t)create_type_idx);
+    ASSERT_NE(create_type, nullptr);
+    if (!create_type->params) {
+        create_type->params = (WASMComponentParamList *)wasm_runtime_malloc(
+            sizeof(WASMComponentParamList));
+        ASSERT_NE(create_type->params, nullptr);
+        memset(create_type->params, 0, sizeof(WASMComponentParamList));
+    }
+
+    const uint32_t core_instance_idx =
+        count_top_level_core_instance_entries(&((WASMComponentModule *)module)
+                                                   ->component)
+        - 1;
+    ASSERT_TRUE(append_top_level_core_export_lift_sections(
+        (WASMComponentModule *)module, core_instance_idx, "create-handle-const",
+        (uint32_t)create_type_idx, "resource-create-owned-handle"));
+    ASSERT_TRUE(append_top_level_param_scalar_retptr_multi_result_lift(
+        (WASMComponentModule *)module, "resource-owned-tuple-retptr-pair",
+        (uint32_t)own_type_idx,
+        { make_component_type_index_value_type((uint32_t)tuple_type_idx),
+          make_component_primitive_value_type(WASM_COMP_PRIMVAL_S32) },
+        nullptr));
+
+    struct InstantiationArgs2 *inst_args = nullptr;
+    ASSERT_TRUE(wasm_runtime_instantiation_args_create(&inst_args));
+    wasm_runtime_instantiation_args_set_default_stack_size(inst_args,
+                                                           helper->stack_size);
+    wasm_runtime_instantiation_args_set_host_managed_heap_size(inst_args,
+                                                               helper->heap_size);
+    wasm_runtime_instantiation_args_set_wasi_stdio(inst_args, 0, 1, 2);
+    wasm_runtime_instantiation_args_set_wasi_dir(inst_args, nullptr, 0, nullptr, 0);
+
+    wasm_module_inst_t module_inst = wasm_runtime_instantiate_ex2(
+        module, inst_args, helper->error_buf,
+        (uint32_t)sizeof(helper->error_buf));
+    wasm_runtime_instantiation_args_destroy(inst_args);
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    auto *component_inst = (WASMComponentInstance *)module_inst;
+    wasm_component_func_t create_func = wasm_runtime_lookup_component_function(
+        module_inst, "resource-create-owned-handle");
+    wasm_component_func_t lifted_func = wasm_runtime_lookup_component_function(
+        module_inst, "resource-owned-tuple-retptr-pair");
+    ASSERT_NE(create_func, nullptr);
+    ASSERT_NE(lifted_func, nullptr);
+    ASSERT_EQ(lifted_func->kind, WASM_COMP_RUNTIME_FUNC_LIFT);
+
+    wasm_component_value_t created = {};
+    wasm_component_value_t results[2] = {};
+    uint32_t handle = 0;
+    int32_t second_result = 0;
+
+    ASSERT_TRUE(wasm_runtime_call_component_values(module_inst, create_func, 1,
+                                                   &created, 0, nullptr))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_TRUE(wasm_runtime_call_component_values(module_inst, lifted_func, 2,
+                                                   results, 1, &created))
+        << wasm_runtime_get_exception(module_inst);
+
+    ASSERT_EQ(results[0].storage_kind, WASM_COMPONENT_VALUE_STORAGE_COMPOSITE_RESOURCE);
+    ASSERT_TRUE(decode_component_u32_arg(&results[0], &handle));
+    ASSERT_EQ(handle, 1u);
+    ASSERT_TRUE(decode_component_s32_arg(&results[1], &second_result));
+    ASSERT_EQ(second_result, 5);
+
+    const auto *resource_type = wasm_component_resource_lookup_runtime_type_const(
+        component_inst->resource_state, resource_type_idx);
+    ASSERT_NE(resource_type, nullptr);
+    ASSERT_EQ(resource_type->handle_table.live_handle_count, 0u);
+    ASSERT_EQ(resource_type->handle_table.owned_handle_count, 0u);
+
+    wasm_component_value_destroy(&results[0]);
     ASSERT_EQ(g_recorded_resource_dtor_sum, 42u);
 
     wasm_component_value_destroy(&created);
@@ -58405,6 +58930,328 @@ TEST_F(BinaryParserTest,
 }
 
 TEST_F(BinaryParserTest,
+       TestCoreWasmCanCallLoweredHostFreshImportedOwnResourceStringMultiResultDirectly)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] =
+        "core-wasm-calls-lowered-host-fresh-imported-own-resource-string-multi";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(append_top_level_imported_resource_type_import(
+        (WASMComponentModule *)module, "imported-resource"));
+    ASSERT_TRUE(append_top_level_host_function_import_sections(
+        (WASMComponentModule *)module, "host-add", "host-instance", "forwarded"));
+    ASSERT_TRUE(append_top_level_function_export_alias((WASMComponentModule *)module,
+                                                       "host-instance", "forwarded",
+                                                       "aliased-host-add"));
+
+    uint32_t resource_type_idx = 0;
+    ASSERT_TRUE(find_resource_type_index_by_kind((WASMComponentModule *)module,
+                                                 WASM_COMP_RUNTIME_RESOURCE_TYPE_IMPORTED,
+                                                 &resource_type_idx));
+    const int32_t own_type_idx =
+        append_component_own_type((WASMComponentModule *)module, resource_type_idx);
+    ASSERT_GE(own_type_idx, 0);
+    auto *own_type_entry = (WASMComponentTypes *)wasm_component_lookup_type(
+        &((WASMComponentModule *)module)->component, (uint32_t)own_type_idx);
+    ASSERT_NE(own_type_entry, nullptr);
+    own_type_entry->type.def_val_type->def_val.owned->type_idx = resource_type_idx;
+    const int32_t host_type_idx = append_component_func_type(
+        (WASMComponentModule *)module, {},
+        make_component_type_index_value_type((uint32_t)own_type_idx));
+    ASSERT_GE(host_type_idx, 0);
+    auto *host_type = lookup_local_component_func_type((WASMComponentModule *)module,
+                                                       (uint32_t)host_type_idx);
+    ASSERT_NE(host_type, nullptr);
+    ASSERT_TRUE(replace_func_type_results(
+        host_type,
+        { make_component_type_index_value_type((uint32_t)own_type_idx),
+          make_component_primitive_value_type(WASM_COMP_PRIMVAL_STRING) }));
+    WASMComponentImport *host_import = find_component_import_by_name_and_kind(
+        (WASMComponentModule *)module, "host-add", WASM_COMP_EXTERN_FUNC);
+    ASSERT_NE(host_import, nullptr);
+    host_import->extern_desc->extern_desc.func.type_idx = (uint32_t)host_type_idx;
+    ASSERT_TRUE(find_resource_type_index_by_kind((WASMComponentModule *)module,
+                                                 WASM_COMP_RUNTIME_RESOURCE_TYPE_IMPORTED,
+                                                 &resource_type_idx));
+    own_type_entry = (WASMComponentTypes *)wasm_component_lookup_type(
+        &((WASMComponentModule *)module)->component, (uint32_t)own_type_idx);
+    ASSERT_NE(own_type_entry, nullptr);
+    ASSERT_NE(own_type_entry->type.def_val_type, nullptr);
+    ASSERT_NE(own_type_entry->type.def_val_type->def_val.owned, nullptr);
+    own_type_entry->type.def_val_type->def_val.owned->type_idx = resource_type_idx;
+
+    const int32_t source_func_idx = find_top_level_export_sort_index(
+        (WASMComponentModule *)module, "aliased-host-add", WASM_COMP_SORT_FUNC);
+    ASSERT_GE(source_func_idx, 0);
+    WASMComponentCanon *lower_canon = nullptr;
+    ASSERT_TRUE(append_top_level_lowered_resource_drop_core_caller_sections(
+        (WASMComponentModule *)module, (uint32_t)source_func_idx,
+        resource_type_idx, "lowered_core_imported_owned_string_multi_result_caller.wasm",
+        "source", &lower_canon));
+    ASSERT_NE(lower_canon, nullptr);
+    ASSERT_TRUE(ensure_canon_lower_memory_opt(lower_canon, 0));
+    ASSERT_TRUE(ensure_canon_lower_string_utf8_opt(lower_canon));
+
+    const int32_t wrapper_type_idx = append_component_scalar_func_type(
+        (WASMComponentModule *)module, {}, WASM_COMP_PRIMVAL_S32);
+    ASSERT_GE(wrapper_type_idx, 0);
+    auto *wrapper_type = lookup_local_component_func_type((WASMComponentModule *)module,
+                                                          (uint32_t)wrapper_type_idx);
+    ASSERT_NE(wrapper_type, nullptr);
+    if (!wrapper_type->params) {
+        wrapper_type->params = (WASMComponentParamList *)wasm_runtime_malloc(
+            sizeof(WASMComponentParamList));
+        ASSERT_NE(wrapper_type->params, nullptr);
+        memset(wrapper_type->params, 0, sizeof(WASMComponentParamList));
+    }
+    ASSERT_TRUE(find_resource_type_index_by_kind((WASMComponentModule *)module,
+                                                 WASM_COMP_RUNTIME_RESOURCE_TYPE_IMPORTED,
+                                                 &resource_type_idx));
+    own_type_entry = (WASMComponentTypes *)wasm_component_lookup_type(
+        &((WASMComponentModule *)module)->component, (uint32_t)own_type_idx);
+    ASSERT_NE(own_type_entry, nullptr);
+    ASSERT_NE(own_type_entry->type.def_val_type, nullptr);
+    ASSERT_NE(own_type_entry->type.def_val_type->def_val.owned, nullptr);
+    own_type_entry->type.def_val_type->def_val.owned->type_idx = resource_type_idx;
+    lower_canon[1].canon_data.resource_drop.resource_type_idx = resource_type_idx;
+    ASSERT_TRUE(append_top_level_core_export_lift_sections(
+        (WASMComponentModule *)module,
+        count_top_level_core_instance_entries(&((WASMComponentModule *)module)
+                                                   ->component)
+            - 1,
+        "call-source-string-len-drop", (uint32_t)wrapper_type_idx,
+        "lowered-host-fresh-imported-own-string"));
+
+    RuntimeValueFinalizerState finalizer_state = {};
+    HostOwnedResourceScalarPairCallState call_state = {};
+    call_state.create_fresh_imported_result = true;
+    call_state.fresh_result_data = 77;
+    call_state.result_finalizer_state = &finalizer_state;
+    wasm_component_func_import_binding_t func_import = {};
+    func_import.name = "host-add";
+    func_import.callback = host_owned_resource_string_pair_callback;
+    func_import.user_data = &call_state;
+
+    wasm_component_import_binding_t resource_import = {};
+    resource_import.name = "imported-resource";
+    resource_import.kind = WASM_COMPONENT_EXTERN_KIND_RESOURCE_TYPE;
+    resource_import.value.resource_type.drop_callback =
+        record_imported_resource_drop_and_free;
+
+    struct InstantiationArgs2 *inst_args = nullptr;
+    ASSERT_TRUE(wasm_runtime_instantiation_args_create(&inst_args));
+    wasm_runtime_instantiation_args_set_default_stack_size(inst_args,
+                                                           helper->stack_size);
+    wasm_runtime_instantiation_args_set_host_managed_heap_size(inst_args,
+                                                               helper->heap_size);
+    wasm_runtime_instantiation_args_set_wasi_stdio(inst_args, 0, 1, 2);
+    wasm_runtime_instantiation_args_set_wasi_dir(inst_args, nullptr, 0, nullptr, 0);
+    wasm_runtime_instantiation_args_set_component_func_imports(inst_args,
+                                                               &func_import, 1);
+    wasm_runtime_instantiation_args_set_component_imports(inst_args,
+                                                          &resource_import, 1);
+
+    g_recorded_imported_resource_drop_sum = 0;
+    g_recorded_imported_resource_drop_count = 0;
+    wasm_module_inst_t module_inst = wasm_runtime_instantiate_ex2(
+        module, inst_args, helper->error_buf,
+        (uint32_t)sizeof(helper->error_buf));
+    wasm_runtime_instantiation_args_destroy(inst_args);
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func = wasm_runtime_lookup_component_function(
+        module_inst, "lowered-host-fresh-imported-own-string");
+    ASSERT_NE(func, nullptr);
+
+    wasm_val_t results[1] = {};
+    ASSERT_TRUE(wasm_runtime_call_component(module_inst, func, 1, results, 0,
+                                            nullptr))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(results[0].kind, WASM_I32);
+    ASSERT_EQ(results[0].of.i32, 5);
+    ASSERT_EQ(call_state.call_count, 1u);
+    ASSERT_EQ(finalizer_state.call_count, 0u);
+    ASSERT_EQ(g_recorded_imported_resource_drop_count, 1u);
+    ASSERT_EQ(g_recorded_imported_resource_drop_sum, 77u);
+
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestCoreWasmRollsBackLoweredHostFreshImportedOwnResourceInvalidStringMultiResult)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] =
+        "core-wasm-rolls-back-lowered-host-fresh-imported-own-resource-string-multi";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(append_top_level_imported_resource_type_import(
+        (WASMComponentModule *)module, "imported-resource"));
+    ASSERT_TRUE(append_top_level_host_function_import_sections(
+        (WASMComponentModule *)module, "host-add", "host-instance", "forwarded"));
+    ASSERT_TRUE(append_top_level_function_export_alias((WASMComponentModule *)module,
+                                                       "host-instance", "forwarded",
+                                                       "aliased-host-add"));
+
+    uint32_t resource_type_idx = 0;
+    ASSERT_TRUE(find_resource_type_index_by_kind((WASMComponentModule *)module,
+                                                 WASM_COMP_RUNTIME_RESOURCE_TYPE_IMPORTED,
+                                                 &resource_type_idx));
+    const int32_t own_type_idx =
+        append_component_own_type((WASMComponentModule *)module, resource_type_idx);
+    ASSERT_GE(own_type_idx, 0);
+    auto *own_type_entry = (WASMComponentTypes *)wasm_component_lookup_type(
+        &((WASMComponentModule *)module)->component, (uint32_t)own_type_idx);
+    ASSERT_NE(own_type_entry, nullptr);
+    own_type_entry->type.def_val_type->def_val.owned->type_idx = resource_type_idx;
+    const int32_t host_type_idx = append_component_func_type(
+        (WASMComponentModule *)module, {},
+        make_component_type_index_value_type((uint32_t)own_type_idx));
+    ASSERT_GE(host_type_idx, 0);
+    auto *host_type = lookup_local_component_func_type((WASMComponentModule *)module,
+                                                       (uint32_t)host_type_idx);
+    ASSERT_NE(host_type, nullptr);
+    ASSERT_TRUE(replace_func_type_results(
+        host_type,
+        { make_component_type_index_value_type((uint32_t)own_type_idx),
+          make_component_primitive_value_type(WASM_COMP_PRIMVAL_STRING) }));
+    WASMComponentImport *host_import = find_component_import_by_name_and_kind(
+        (WASMComponentModule *)module, "host-add", WASM_COMP_EXTERN_FUNC);
+    ASSERT_NE(host_import, nullptr);
+    host_import->extern_desc->extern_desc.func.type_idx = (uint32_t)host_type_idx;
+    ASSERT_TRUE(find_resource_type_index_by_kind((WASMComponentModule *)module,
+                                                 WASM_COMP_RUNTIME_RESOURCE_TYPE_IMPORTED,
+                                                 &resource_type_idx));
+    own_type_entry = (WASMComponentTypes *)wasm_component_lookup_type(
+        &((WASMComponentModule *)module)->component, (uint32_t)own_type_idx);
+    ASSERT_NE(own_type_entry, nullptr);
+    ASSERT_NE(own_type_entry->type.def_val_type, nullptr);
+    ASSERT_NE(own_type_entry->type.def_val_type->def_val.owned, nullptr);
+    own_type_entry->type.def_val_type->def_val.owned->type_idx = resource_type_idx;
+
+    const int32_t source_func_idx = find_top_level_export_sort_index(
+        (WASMComponentModule *)module, "aliased-host-add", WASM_COMP_SORT_FUNC);
+    ASSERT_GE(source_func_idx, 0);
+    WASMComponentCanon *lower_canon = nullptr;
+    ASSERT_TRUE(append_top_level_lowered_resource_drop_core_caller_sections(
+        (WASMComponentModule *)module, (uint32_t)source_func_idx,
+        resource_type_idx, "lowered_core_imported_owned_string_multi_result_caller.wasm",
+        "source", &lower_canon));
+    ASSERT_NE(lower_canon, nullptr);
+    ASSERT_TRUE(ensure_canon_lower_memory_opt(lower_canon, 0));
+    ASSERT_TRUE(ensure_canon_lower_string_utf8_opt(lower_canon));
+
+    const int32_t wrapper_type_idx = append_component_scalar_func_type(
+        (WASMComponentModule *)module, {}, WASM_COMP_PRIMVAL_S32);
+    ASSERT_GE(wrapper_type_idx, 0);
+    auto *wrapper_type = lookup_local_component_func_type((WASMComponentModule *)module,
+                                                          (uint32_t)wrapper_type_idx);
+    ASSERT_NE(wrapper_type, nullptr);
+    if (!wrapper_type->params) {
+        wrapper_type->params = (WASMComponentParamList *)wasm_runtime_malloc(
+            sizeof(WASMComponentParamList));
+        ASSERT_NE(wrapper_type->params, nullptr);
+        memset(wrapper_type->params, 0, sizeof(WASMComponentParamList));
+    }
+    ASSERT_TRUE(find_resource_type_index_by_kind((WASMComponentModule *)module,
+                                                 WASM_COMP_RUNTIME_RESOURCE_TYPE_IMPORTED,
+                                                 &resource_type_idx));
+    own_type_entry = (WASMComponentTypes *)wasm_component_lookup_type(
+        &((WASMComponentModule *)module)->component, (uint32_t)own_type_idx);
+    ASSERT_NE(own_type_entry, nullptr);
+    ASSERT_NE(own_type_entry->type.def_val_type, nullptr);
+    ASSERT_NE(own_type_entry->type.def_val_type->def_val.owned, nullptr);
+    own_type_entry->type.def_val_type->def_val.owned->type_idx = resource_type_idx;
+    lower_canon[1].canon_data.resource_drop.resource_type_idx = resource_type_idx;
+    ASSERT_TRUE(append_top_level_core_export_lift_sections(
+        (WASMComponentModule *)module,
+        count_top_level_core_instance_entries(&((WASMComponentModule *)module)
+                                                   ->component)
+            - 1,
+        "call-source-string-len-drop", (uint32_t)wrapper_type_idx,
+        "lowered-host-fresh-imported-own-invalid-string"));
+
+    RuntimeValueFinalizerState finalizer_state = {};
+    HostOwnedResourceScalarPairCallState call_state = {};
+    call_state.create_fresh_imported_result = true;
+    call_state.fresh_result_data = 77;
+    call_state.result_finalizer_state = &finalizer_state;
+    wasm_component_func_import_binding_t func_import = {};
+    func_import.name = "host-add";
+    func_import.callback = host_owned_resource_invalid_string_pair_callback;
+    func_import.user_data = &call_state;
+
+    wasm_component_import_binding_t resource_import = {};
+    resource_import.name = "imported-resource";
+    resource_import.kind = WASM_COMPONENT_EXTERN_KIND_RESOURCE_TYPE;
+    resource_import.value.resource_type.drop_callback =
+        record_imported_resource_drop_and_free;
+
+    struct InstantiationArgs2 *inst_args = nullptr;
+    ASSERT_TRUE(wasm_runtime_instantiation_args_create(&inst_args));
+    wasm_runtime_instantiation_args_set_default_stack_size(inst_args,
+                                                           helper->stack_size);
+    wasm_runtime_instantiation_args_set_host_managed_heap_size(inst_args,
+                                                               helper->heap_size);
+    wasm_runtime_instantiation_args_set_wasi_stdio(inst_args, 0, 1, 2);
+    wasm_runtime_instantiation_args_set_wasi_dir(inst_args, nullptr, 0, nullptr, 0);
+    wasm_runtime_instantiation_args_set_component_func_imports(inst_args,
+                                                               &func_import, 1);
+    wasm_runtime_instantiation_args_set_component_imports(inst_args,
+                                                          &resource_import, 1);
+
+    g_recorded_imported_resource_drop_sum = 0;
+    g_recorded_imported_resource_drop_count = 0;
+    wasm_module_inst_t module_inst = wasm_runtime_instantiate_ex2(
+        module, inst_args, helper->error_buf,
+        (uint32_t)sizeof(helper->error_buf));
+    wasm_runtime_instantiation_args_destroy(inst_args);
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func = wasm_runtime_lookup_component_function(
+        module_inst, "lowered-host-fresh-imported-own-invalid-string");
+    ASSERT_NE(func, nullptr);
+
+    wasm_val_t results[1] = {};
+    ASSERT_FALSE(wasm_runtime_call_component(module_inst, func, 1, results, 0,
+                                             nullptr));
+    ASSERT_NE(wasm_runtime_get_exception(module_inst), nullptr);
+    ASSERT_NE(strstr(wasm_runtime_get_exception(module_inst), "valid UTF-8"),
+              nullptr)
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(call_state.call_count, 1u);
+    ASSERT_EQ(finalizer_state.call_count, 0u);
+    ASSERT_EQ(g_recorded_imported_resource_drop_count, 1u);
+    ASSERT_EQ(g_recorded_imported_resource_drop_sum, 77u);
+
+    auto *component_inst = (WASMComponentInstance *)module_inst;
+    const auto *resource_type = wasm_component_resource_lookup_runtime_type_const(
+        component_inst->resource_state, resource_type_idx);
+    ASSERT_NE(resource_type, nullptr);
+    ASSERT_EQ(resource_type->handle_table.live_handle_count, 0u);
+    ASSERT_EQ(resource_type->handle_table.owned_handle_count, 0u);
+
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
        TestCallComponentValuesCanLiftBorrowedRetptrScalarMultiResults)
 {
     bool ret = helper->read_wasm_file("add.wasm");
@@ -58711,7 +59558,8 @@ TEST_F(BinaryParserTest,
     wasm_component_import_binding_t resource_import = {};
     resource_import.name = "imported-resource";
     resource_import.kind = WASM_COMPONENT_EXTERN_KIND_RESOURCE_TYPE;
-    resource_import.value.resource_type.drop_callback = record_imported_resource_drop;
+    resource_import.value.resource_type.drop_callback =
+        record_imported_resource_drop;
 
     wasm_module_inst_t module_inst =
         instantiate_component_with_default_wasi_and_component_imports(
@@ -58747,6 +59595,109 @@ TEST_F(BinaryParserTest,
     ASSERT_TRUE(wasm_runtime_drop_component_owned_result(module_inst, func, 0,
                                                          &results[0]))
         << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(g_recorded_imported_resource_drop_count, 1u);
+    ASSERT_EQ(g_recorded_imported_resource_drop_sum, 91u);
+
+    wasm_component_value_destroy(&arg);
+    wasm_component_value_destroy(&results[1]);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestCallComponentValuesCanLiftImportedCompositeOwnRetptrMultiResults)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] =
+        "runtime-top-level-imported-composite-own-retptr-multi-result-call";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(append_top_level_imported_resource_type_import(
+        (WASMComponentModule *)module, "imported-resource"));
+
+    uint32_t resource_type_idx = 0;
+    ASSERT_TRUE(find_resource_type_index_by_kind((WASMComponentModule *)module,
+                                                 WASM_COMP_RUNTIME_RESOURCE_TYPE_IMPORTED,
+                                                 &resource_type_idx));
+    const int32_t own_type_idx =
+        append_component_own_type((WASMComponentModule *)module, resource_type_idx);
+    ASSERT_GE(own_type_idx, 0);
+    const int32_t tuple_type_idx = append_component_tuple_type(
+        (WASMComponentModule *)module,
+        { make_component_type_index_value_type((uint32_t)own_type_idx) });
+    ASSERT_GE(tuple_type_idx, 0);
+    auto *own_type_entry = (WASMComponentTypes *)wasm_component_lookup_type(
+        &((WASMComponentModule *)module)->component, (uint32_t)own_type_idx);
+    ASSERT_NE(own_type_entry, nullptr);
+    own_type_entry->type.def_val_type->def_val.owned->type_idx = resource_type_idx;
+
+    ASSERT_TRUE(append_top_level_param_scalar_retptr_multi_result_lift(
+        (WASMComponentModule *)module, "resource-imported-owned-tuple-retptr-pair",
+        (uint32_t)own_type_idx,
+        { make_component_type_index_value_type((uint32_t)tuple_type_idx),
+          make_component_primitive_value_type(WASM_COMP_PRIMVAL_S32) },
+        nullptr));
+
+    ASSERT_TRUE(find_resource_type_index_by_kind((WASMComponentModule *)module,
+                                                 WASM_COMP_RUNTIME_RESOURCE_TYPE_IMPORTED,
+                                                 &resource_type_idx));
+    own_type_entry = (WASMComponentTypes *)wasm_component_lookup_type(
+        &((WASMComponentModule *)module)->component, (uint32_t)own_type_idx);
+    ASSERT_NE(own_type_entry, nullptr);
+    own_type_entry->type.def_val_type->def_val.owned->type_idx = resource_type_idx;
+
+    wasm_component_import_binding_t resource_import = {};
+    resource_import.name = "imported-resource";
+    resource_import.kind = WASM_COMPONENT_EXTERN_KIND_RESOURCE_TYPE;
+    resource_import.value.resource_type.drop_callback =
+        record_imported_resource_drop;
+
+    wasm_module_inst_t module_inst =
+        instantiate_component_with_default_wasi_and_component_imports(
+            module, helper.get(), &resource_import, 1);
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    auto *component_inst = (WASMComponentInstance *)module_inst;
+    g_recorded_imported_resource_drop_sum = 0;
+    g_recorded_imported_resource_drop_count = 0;
+
+    uint32_t input_handle = 0;
+    ASSERT_TRUE(wasm_component_resource_create_imported_handle(
+        component_inst->resource_state, resource_type_idx, (void *)(uintptr_t)91,
+        true, &input_handle, helper->error_buf,
+        (uint32_t)sizeof(helper->error_buf)));
+
+    wasm_component_func_t func = wasm_runtime_lookup_component_function(
+        module_inst, "resource-imported-owned-tuple-retptr-pair");
+    ASSERT_NE(func, nullptr);
+
+    wasm_component_value_t arg = make_component_u32_defined_value(input_handle);
+    wasm_component_value_t results[2] = {};
+    uint32_t handle = 0;
+    int32_t scalar = 0;
+    ASSERT_TRUE(wasm_runtime_call_component_values(module_inst, func, 2, results, 1,
+                                                   &arg))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(results[0].storage_kind, WASM_COMPONENT_VALUE_STORAGE_COMPOSITE_RESOURCE);
+    ASSERT_TRUE(decode_component_u32_arg(&results[0], &handle));
+    ASSERT_EQ(handle, input_handle);
+    ASSERT_TRUE(decode_component_s32_arg(&results[1], &scalar));
+    ASSERT_EQ(scalar, 5);
+
+    const auto *imported_type = wasm_component_resource_lookup_runtime_type_const(
+        component_inst->resource_state, resource_type_idx);
+    ASSERT_NE(imported_type, nullptr);
+    ASSERT_EQ(imported_type->handle_table.live_handle_count, 0u);
+    ASSERT_EQ(imported_type->handle_table.owned_handle_count, 0u);
+
+    wasm_component_value_destroy(&results[0]);
     ASSERT_EQ(g_recorded_imported_resource_drop_count, 1u);
     ASSERT_EQ(g_recorded_imported_resource_drop_sum, 91u);
 
@@ -58805,7 +59756,8 @@ TEST_F(BinaryParserTest,
     wasm_component_import_binding_t resource_import = {};
     resource_import.name = "imported-resource";
     resource_import.kind = WASM_COMPONENT_EXTERN_KIND_RESOURCE_TYPE;
-    resource_import.value.resource_type.drop_callback = record_imported_resource_drop;
+    resource_import.value.resource_type.drop_callback =
+        record_imported_resource_drop;
 
     wasm_module_inst_t module_inst =
         instantiate_component_with_default_wasi_and_component_imports(
@@ -58843,6 +59795,100 @@ TEST_F(BinaryParserTest,
     wasm_runtime_deinstantiate(module_inst);
     ASSERT_EQ(g_recorded_imported_resource_drop_count, 1u);
     ASSERT_EQ(g_recorded_imported_resource_drop_sum, 93u);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestCallComponentValuesCanLiftImportedOwnStringRetptrMultiResults)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "runtime-top-level-imported-own-string-retptr-multi-result-call";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(append_top_level_imported_resource_type_import(
+        (WASMComponentModule *)module, "imported-resource"));
+
+    uint32_t resource_type_idx = 0;
+    ASSERT_TRUE(find_resource_type_index_by_kind((WASMComponentModule *)module,
+                                                 WASM_COMP_RUNTIME_RESOURCE_TYPE_IMPORTED,
+                                                 &resource_type_idx));
+    const int32_t own_type_idx =
+        append_component_own_type((WASMComponentModule *)module, resource_type_idx);
+    ASSERT_GE(own_type_idx, 0);
+    auto *own_type_entry = (WASMComponentTypes *)wasm_component_lookup_type(
+        &((WASMComponentModule *)module)->component, (uint32_t)own_type_idx);
+    ASSERT_NE(own_type_entry, nullptr);
+    own_type_entry->type.def_val_type->def_val.owned->type_idx = resource_type_idx;
+
+    ASSERT_TRUE(append_top_level_param_string_retptr_multi_result_lift(
+        (WASMComponentModule *)module, "resource-imported-owned-string-retptr-pair",
+        (uint32_t)own_type_idx,
+        { make_component_type_index_value_type((uint32_t)own_type_idx),
+          make_component_primitive_value_type(WASM_COMP_PRIMVAL_STRING) },
+        nullptr));
+    ASSERT_TRUE(find_resource_type_index_by_kind((WASMComponentModule *)module,
+                                                 WASM_COMP_RUNTIME_RESOURCE_TYPE_IMPORTED,
+                                                 &resource_type_idx));
+    own_type_entry = (WASMComponentTypes *)wasm_component_lookup_type(
+        &((WASMComponentModule *)module)->component, (uint32_t)own_type_idx);
+    ASSERT_NE(own_type_entry, nullptr);
+    ASSERT_NE(own_type_entry->type.def_val_type, nullptr);
+    ASSERT_NE(own_type_entry->type.def_val_type->def_val.owned, nullptr);
+    own_type_entry->type.def_val_type->def_val.owned->type_idx = resource_type_idx;
+
+    wasm_component_import_binding_t resource_import = {};
+    resource_import.name = "imported-resource";
+    resource_import.kind = WASM_COMPONENT_EXTERN_KIND_RESOURCE_TYPE;
+    resource_import.value.resource_type.drop_callback =
+        record_imported_resource_drop;
+
+    wasm_module_inst_t module_inst =
+        instantiate_component_with_default_wasi_and_component_imports(
+            module, helper.get(), &resource_import, 1);
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    auto *component_inst = (WASMComponentInstance *)module_inst;
+    g_recorded_imported_resource_drop_sum = 0;
+    g_recorded_imported_resource_drop_count = 0;
+
+    uint32_t input_handle = 0;
+    ASSERT_TRUE(wasm_component_resource_create_imported_handle(
+        component_inst->resource_state, resource_type_idx, (void *)(uintptr_t)91,
+        true, &input_handle, helper->error_buf,
+        (uint32_t)sizeof(helper->error_buf)));
+
+    wasm_component_func_t func = wasm_runtime_lookup_component_function(
+        module_inst, "resource-imported-owned-string-retptr-pair");
+    ASSERT_NE(func, nullptr);
+
+    wasm_component_value_t arg = make_component_u32_defined_value(input_handle);
+    wasm_component_value_t results[2] = {};
+    uint32_t handle = 0;
+    std::string payload;
+    ASSERT_TRUE(wasm_runtime_call_component_values(module_inst, func, 2, results, 1,
+                                                   &arg))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_TRUE(decode_component_u32_arg(&results[0], &handle));
+    ASSERT_EQ(handle, input_handle);
+    ASSERT_TRUE(decode_component_string_arg(&results[1], &payload));
+    ASSERT_EQ(payload, "hello");
+
+    ASSERT_TRUE(wasm_runtime_drop_component_owned_result(module_inst, func, 0,
+                                                         &results[0]))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(g_recorded_imported_resource_drop_count, 1u);
+    ASSERT_EQ(g_recorded_imported_resource_drop_sum, 91u);
+
+    wasm_component_value_destroy(&arg);
+    wasm_component_value_destroy(&results[1]);
+    wasm_runtime_deinstantiate(module_inst);
     wasm_runtime_unload(module);
 }
 
@@ -58957,6 +60003,133 @@ TEST_F(BinaryParserTest,
     ASSERT_TRUE(wasm_runtime_lookup_component_value(module_inst,
                                                     "second-resource-result",
                                                     &second));
+    ASSERT_TRUE(decode_component_u32_arg(&first, &handle));
+    ASSERT_EQ(handle, 1u);
+    ASSERT_TRUE(decode_component_s32_arg(&second, &scalar));
+    ASSERT_EQ(scalar, 5);
+
+    wasm_component_value_destroy(&first);
+    wasm_component_value_destroy(&second);
+    wasm_runtime_deinstantiate(module_inst);
+    ASSERT_EQ(g_recorded_resource_dtor_sum, 42u);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestRuntimeExecutesTopLevelCompositeOwnResourceScalarRetptrMultiResultStartSections)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    static NativeSymbol native_symbols[] = {
+        { "record_dtor", (void *)record_resource_dtor_native, "(i)", NULL }
+    };
+    NativeRegistrationGuard native_guard = { "env", native_symbols, 1, false };
+    g_recorded_resource_dtor_sum = 0;
+    ASSERT_TRUE(wasm_runtime_register_natives(
+        native_guard.module_name, native_guard.symbols, native_guard.count));
+    native_guard.registered = true;
+
+    LoadArgs load_args = {};
+    char module_name[] =
+        "runtime-top-level-composite-own-retptr-multi-result-start";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    uint32_t dtor_core_instance_idx = 0;
+    uint32_t dtor_core_func_idx = 0;
+    ASSERT_TRUE(append_top_level_core_module_instance_sections(
+        (WASMComponentModule *)module, "resource_dtor_host_recorder.wasm",
+        "resource-dtor-host-recorder", &dtor_core_instance_idx));
+    ASSERT_TRUE(append_top_level_core_export_alias_section(
+        (WASMComponentModule *)module, dtor_core_instance_idx, "resource-dtor",
+        &dtor_core_func_idx));
+    ASSERT_TRUE(append_top_level_resource_type_section_with_dtor(
+        (WASMComponentModule *)module, true, dtor_core_func_idx));
+
+    WASMComponentRuntimeResourceState *resource_state =
+        wasm_component_resource_state_create(
+            &((WASMComponentModule *)module)->component, helper->error_buf,
+            (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(resource_state, nullptr) << helper->error_buf;
+    const uint32_t resource_type_idx = resource_state->type_count - 1;
+    wasm_component_resource_state_destroy(resource_state);
+
+    ASSERT_TRUE(append_top_level_resource_core_caller_sections(
+        (WASMComponentModule *)module, resource_type_idx,
+        "resource_core_caller.wasm"));
+
+    const int32_t own_type_idx =
+        append_component_own_type((WASMComponentModule *)module, resource_type_idx);
+    ASSERT_GE(own_type_idx, 0);
+    const int32_t tuple_type_idx = append_component_tuple_type(
+        (WASMComponentModule *)module,
+        { make_component_type_index_value_type((uint32_t)own_type_idx) });
+    ASSERT_GE(tuple_type_idx, 0);
+    const int32_t create_type_idx = append_component_func_type(
+        (WASMComponentModule *)module, {},
+        make_component_type_index_value_type((uint32_t)own_type_idx));
+    ASSERT_GE(create_type_idx, 0);
+    auto *create_type = lookup_local_component_func_type(
+        (WASMComponentModule *)module, (uint32_t)create_type_idx);
+    ASSERT_NE(create_type, nullptr);
+    if (!create_type->params) {
+        create_type->params = (WASMComponentParamList *)wasm_runtime_malloc(
+            sizeof(WASMComponentParamList));
+        ASSERT_NE(create_type->params, nullptr);
+        memset(create_type->params, 0, sizeof(WASMComponentParamList));
+    }
+
+    const uint32_t create_func_idx = count_top_level_sort_entries(
+        &((WASMComponentModule *)module)->component, WASM_COMP_SORT_FUNC);
+    ASSERT_TRUE(append_top_level_core_export_lift_sections(
+        (WASMComponentModule *)module,
+        count_top_level_core_instance_entries(&((WASMComponentModule *)module)
+                                                   ->component)
+            - 1,
+        "create-handle-const", (uint32_t)create_type_idx,
+        "resource-create-owned-handle"));
+
+    uint32_t retptr_func_idx = UINT32_MAX;
+    ASSERT_TRUE(append_top_level_param_scalar_retptr_multi_result_lift(
+        (WASMComponentModule *)module, "resource-owned-composite-retptr-pair",
+        (uint32_t)own_type_idx,
+        { make_component_type_index_value_type((uint32_t)tuple_type_idx),
+          make_component_primitive_value_type(WASM_COMP_PRIMVAL_S32) },
+        &retptr_func_idx));
+
+    const uint32_t base_value_idx = count_top_level_sort_entries(
+        &((WASMComponentModule *)module)->component, WASM_COMP_SORT_VALUE);
+    const uint32_t start_args[] = { base_value_idx };
+    ASSERT_TRUE(append_top_level_start_section((WASMComponentModule *)module,
+                                               create_func_idx, nullptr, 0, 1));
+    ASSERT_TRUE(append_top_level_start_section((WASMComponentModule *)module,
+                                               retptr_func_idx, start_args, 1, 2));
+    ASSERT_TRUE(append_top_level_value_export_section(
+        (WASMComponentModule *)module, "first-composite-resource-result",
+        base_value_idx + 1));
+    ASSERT_TRUE(append_top_level_value_export_section(
+        (WASMComponentModule *)module, "second-composite-resource-result",
+        base_value_idx + 2));
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_value_t first = {};
+    wasm_component_value_t second = {};
+    uint32_t handle = 0;
+    int32_t scalar = 0;
+    ASSERT_TRUE(wasm_runtime_lookup_component_value(
+        module_inst, "first-composite-resource-result", &first));
+    ASSERT_TRUE(wasm_runtime_lookup_component_value(
+        module_inst, "second-composite-resource-result", &second));
     ASSERT_TRUE(decode_component_u32_arg(&first, &handle));
     ASSERT_EQ(handle, 1u);
     ASSERT_TRUE(decode_component_s32_arg(&second, &scalar));
@@ -59092,6 +60265,140 @@ TEST_F(BinaryParserTest,
     wasm_component_value_destroy(&second);
     wasm_runtime_deinstantiate(module_inst);
     ASSERT_EQ(g_recorded_resource_dtor_sum, 42u);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestRuntimeExecutesImportedOwnResourceStringRetptrMultiResultStartSections)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "runtime-imported-own-string-retptr-multi-result-start";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(append_top_level_imported_resource_type_import(
+        (WASMComponentModule *)module, "imported-resource"));
+    ASSERT_TRUE(append_top_level_host_function_import_sections(
+        (WASMComponentModule *)module, "host-add", "host-instance", "forwarded"));
+    ASSERT_TRUE(append_top_level_function_export_alias((WASMComponentModule *)module,
+                                                       "host-instance", "forwarded",
+                                                       "aliased-host-add"));
+
+    uint32_t resource_type_idx = 0;
+    ASSERT_TRUE(find_resource_type_index_by_kind((WASMComponentModule *)module,
+                                                 WASM_COMP_RUNTIME_RESOURCE_TYPE_IMPORTED,
+                                                 &resource_type_idx));
+    const int32_t own_type_idx =
+        append_component_own_type((WASMComponentModule *)module, resource_type_idx);
+    ASSERT_GE(own_type_idx, 0);
+    auto *own_type_entry = (WASMComponentTypes *)wasm_component_lookup_type(
+        &((WASMComponentModule *)module)->component, (uint32_t)own_type_idx);
+    ASSERT_NE(own_type_entry, nullptr);
+    own_type_entry->type.def_val_type->def_val.owned->type_idx = resource_type_idx;
+    const int32_t host_type_idx = append_component_func_type(
+        (WASMComponentModule *)module, {},
+        make_component_type_index_value_type((uint32_t)own_type_idx));
+    ASSERT_GE(host_type_idx, 0);
+    auto *host_type = lookup_local_component_func_type((WASMComponentModule *)module,
+                                                       (uint32_t)host_type_idx);
+    ASSERT_NE(host_type, nullptr);
+    ASSERT_TRUE(replace_func_type_results(
+        host_type,
+        { make_component_type_index_value_type((uint32_t)own_type_idx),
+          make_component_primitive_value_type(WASM_COMP_PRIMVAL_STRING) }));
+    WASMComponentImport *host_import = find_component_import_by_name_and_kind(
+        (WASMComponentModule *)module, "host-add", WASM_COMP_EXTERN_FUNC);
+    ASSERT_NE(host_import, nullptr);
+    host_import->extern_desc->extern_desc.func.type_idx = (uint32_t)host_type_idx;
+    ASSERT_TRUE(find_resource_type_index_by_kind((WASMComponentModule *)module,
+                                                 WASM_COMP_RUNTIME_RESOURCE_TYPE_IMPORTED,
+                                                 &resource_type_idx));
+    own_type_entry = (WASMComponentTypes *)wasm_component_lookup_type(
+        &((WASMComponentModule *)module)->component, (uint32_t)own_type_idx);
+    ASSERT_NE(own_type_entry, nullptr);
+    ASSERT_NE(own_type_entry->type.def_val_type, nullptr);
+    ASSERT_NE(own_type_entry->type.def_val_type->def_val.owned, nullptr);
+    own_type_entry->type.def_val_type->def_val.owned->type_idx = resource_type_idx;
+
+    const uint32_t start_func_idx = find_top_level_export_sort_index(
+        (WASMComponentModule *)module, "aliased-host-add", WASM_COMP_SORT_FUNC);
+    ASSERT_NE(start_func_idx, UINT32_MAX);
+
+    const uint32_t base_value_idx = count_top_level_sort_entries(
+        &((WASMComponentModule *)module)->component, WASM_COMP_SORT_VALUE);
+    ASSERT_TRUE(append_top_level_start_section((WASMComponentModule *)module,
+                                               start_func_idx, nullptr, 0, 2));
+    ASSERT_TRUE(append_top_level_value_export_section(
+        (WASMComponentModule *)module, "first-imported-resource-result",
+        base_value_idx));
+    ASSERT_TRUE(append_top_level_value_export_section(
+        (WASMComponentModule *)module, "second-imported-resource-result",
+        base_value_idx + 1));
+
+    RuntimeValueFinalizerState finalizer_state = {};
+    HostOwnedResourceScalarPairCallState call_state = {};
+    call_state.create_fresh_imported_result = true;
+    call_state.fresh_result_data = 101;
+    call_state.result_finalizer_state = &finalizer_state;
+    wasm_component_func_import_binding_t func_import = {};
+    func_import.name = "host-add";
+    func_import.callback = host_owned_resource_string_pair_callback;
+    func_import.user_data = &call_state;
+
+    wasm_component_import_binding_t resource_import = {};
+    resource_import.name = "imported-resource";
+    resource_import.kind = WASM_COMPONENT_EXTERN_KIND_RESOURCE_TYPE;
+    resource_import.value.resource_type.drop_callback =
+        record_imported_resource_drop_and_free;
+
+    g_recorded_imported_resource_drop_sum = 0;
+    g_recorded_imported_resource_drop_count = 0;
+    struct InstantiationArgs2 *inst_args = nullptr;
+    ASSERT_TRUE(wasm_runtime_instantiation_args_create(&inst_args));
+    wasm_runtime_instantiation_args_set_default_stack_size(inst_args,
+                                                           helper->stack_size);
+    wasm_runtime_instantiation_args_set_host_managed_heap_size(inst_args,
+                                                               helper->heap_size);
+    wasm_runtime_instantiation_args_set_wasi_stdio(inst_args, 0, 1, 2);
+    wasm_runtime_instantiation_args_set_wasi_dir(inst_args, nullptr, 0, nullptr, 0);
+    wasm_runtime_instantiation_args_set_component_imports(inst_args,
+                                                          &resource_import, 1);
+    wasm_runtime_instantiation_args_set_component_func_imports(inst_args,
+                                                               &func_import, 1);
+    wasm_module_inst_t module_inst = wasm_runtime_instantiate_ex2(
+        module, inst_args, helper->error_buf,
+        (uint32_t)sizeof(helper->error_buf));
+    wasm_runtime_instantiation_args_destroy(inst_args);
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_value_t first = {};
+    wasm_component_value_t second = {};
+    uint32_t handle = 0;
+    std::string payload;
+    ASSERT_TRUE(wasm_runtime_lookup_component_value(module_inst,
+                                                    "first-imported-resource-result",
+                                                    &first));
+    ASSERT_TRUE(wasm_runtime_lookup_component_value(module_inst,
+                                                    "second-imported-resource-result",
+                                                    &second));
+    ASSERT_TRUE(decode_component_u32_arg(&first, &handle));
+    ASSERT_EQ(handle, 1u);
+    ASSERT_TRUE(decode_component_string_arg(&second, &payload));
+    ASSERT_EQ(payload, "hello");
+    ASSERT_EQ(call_state.call_count, 1u);
+    ASSERT_EQ(finalizer_state.call_count, 0u);
+
+    wasm_component_value_destroy(&first);
+    wasm_component_value_destroy(&second);
+    wasm_runtime_deinstantiate(module_inst);
+    ASSERT_EQ(g_recorded_imported_resource_drop_count, 1u);
+    ASSERT_EQ(g_recorded_imported_resource_drop_sum, 101u);
     wasm_runtime_unload(module);
 }
 

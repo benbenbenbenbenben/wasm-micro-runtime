@@ -68,6 +68,7 @@ typedef struct WASMComponentOwnedResourceHandle {
 } WASMComponentOwnedResourceHandle;
 
 #define WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_MAGIC UINT32_C(0x43524d56)
+#define WASM_COMPONENT_PUBLIC_COMPOSITE_RESOURCE_VALUE_MAGIC UINT32_C(0x43524d43)
 
 typedef enum WASMComponentPublicResourceValueKind {
     WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_TRANSFERRED = 0,
@@ -86,6 +87,14 @@ typedef struct WASMComponentPublicResourceValue {
     WASMComponentResourceHandleFinalizer finalizer;
     void *finalizer_ctx;
 } WASMComponentPublicResourceValue;
+
+typedef struct WASMComponentPublicCompositeResourceValue {
+    uint32 magic;
+    uint32 byte_size;
+    uint32 resource_count;
+    uint8 *data;
+    WASMComponentPublicResourceValue *resource_values;
+} WASMComponentPublicCompositeResourceValue;
 
 typedef struct WASMComponentRuntimeResourceState {
     const WASMComponent *component;
@@ -179,6 +188,14 @@ bool
 wasm_component_resource_release_borrowed_handle(
     WASMComponentRuntimeResourceState *resource_state, uint32 type_idx,
     uint32 handle, char *error_buf, uint32 error_buf_size);
+
+void
+wasm_component_resource_release_public_value(
+    WASMComponentPublicResourceValue *resource_value);
+
+void
+wasm_component_drop_transferred_public_resource_value(
+    WASMComponentPublicResourceValue *resource_value);
 
 #ifdef __cplusplus
 }

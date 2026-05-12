@@ -108,6 +108,9 @@ typedef struct WASMComponentCanonLiftValueShape {
 
 typedef struct WASMComponentCompositeFlatLeaf {
     WASMComponentCanonLiftValueInfo type_info;
+    bool is_owned_resource;
+    bool is_borrowed_resource;
+    uint32 resource_type_idx;
 } WASMComponentCompositeFlatLeaf;
 
 static uint32
@@ -148,6 +151,7 @@ resolve_component_canon_lift_value_shape(
 static bool
 collect_component_composite_result_leaves(
     WASMComponentInstance *inst, const WASMComponent *component,
+    const WASMComponentRuntimeResourceState *resource_state,
     const WASMComponentValueType *value_type, uint32 result_index,
     WASMComponentCompositeFlatLeaf *flat_leaves, uint32 leaf_capacity,
     uint32 *leaf_count_io);
@@ -155,6 +159,7 @@ collect_component_composite_result_leaves(
 static bool
 validate_component_composite_result_signature(
     WASMComponentInstance *inst, const WASMComponent *component,
+    const WASMComponentRuntimeResourceState *resource_state,
     const WASMComponentValueType *value_type, uint32 result_index,
     const WASMFuncType *core_type,
     WASMComponentCompositeFlatLeaf *flat_leaves, uint32 flat_leaf_capacity,
@@ -245,6 +250,10 @@ drop_component_owned_resource_handle_internal(
     const WASMComponentRuntimeResourceState *resource_state,
     uint32 resource_type_idx, uint32 handle, bool *consumed_out);
 
+void
+wasm_component_drop_transferred_public_resource_value(
+    WASMComponentPublicResourceValue *resource_value);
+
 static bool
 find_lowered_import_borrowed_result_caller_handle(
     WASMComponentInstance *inst, wasm_component_value_t *call_args,
@@ -258,12 +267,13 @@ lowered_import_owned_result_matches_current_arg(
 
 static bool
 compute_component_canon_abi_layout(WASMComponentInstance *inst,
+                                   const WASMComponentRuntimeResourceState *resource_state,
                                    const WASMComponent *component,
                                    const WASMComponentValueType *value_type,
                                    uint32 result_index, uint32 *size_out,
-                                    uint32 *align_out, bool *has_string_leaf_out,
-                                    bool *has_list_scalar_leaf_out,
-                                    bool *has_list_string_leaf_out);
+                                   uint32 *align_out, bool *has_string_leaf_out,
+                                   bool *has_list_scalar_leaf_out,
+                                   bool *has_list_string_leaf_out);
 
 static bool
 encode_component_public_scalar_value(
@@ -346,6 +356,10 @@ struct WASMComponentResultPayloadBuilder {
     uint8 *storage;
     uint32 size;
     uint32 capacity;
+    WASMComponentPublicResourceValue inline_resource_values[4];
+    WASMComponentPublicResourceValue *resource_values;
+    uint32 resource_count;
+    uint32 resource_capacity;
 };
 
 static bool
@@ -419,6 +433,12 @@ static bool
 append_component_result_list_string_leaf(
     WASMComponentInstance *inst, WASMComponentResultPayloadBuilder *builder,
     const uint8 *payload, uint32 payload_len);
+
+static bool
+append_component_result_owned_resource_leaf(
+    WASMComponentInstance *inst, WASMComponentResultPayloadBuilder *builder,
+    const WASMComponentRuntimeResourceState *resource_state, uint32 resource_type_idx,
+    uint32 handle);
 
 static bool
 resolve_core_sort_idx(const WASMComponentInstance *inst,
@@ -2468,7 +2488,9 @@ resolve_lowered_import_component_type(
 
 static bool
 compute_component_canon_abi_result_vector_layout(
-    WASMComponentInstance *inst, const WASMComponent *component,
+    WASMComponentInstance *inst,
+    const WASMComponentRuntimeResourceState *resource_state,
+    const WASMComponent *component,
     const WASMComponentValueType *result_types, uint32 result_count,
     uint32 *size_out, uint32 *align_out, uint32 *offsets_out,
     uint32 *result_sizes_out, bool *has_string_leaf_out,
@@ -2768,7 +2790,8 @@ validate_lowered_import_signature(
 
         wasm_runtime_clear_exception((WASMModuleInstanceCommon *)component_inst);
         if (!compute_component_canon_abi_result_vector_layout(
-                component_inst, component, component_type->results->results,
+                component_inst, lowered_function->resource_state, component,
+                component_type->results->results,
                 expected_result_count, &result_vector_size, &result_vector_align,
                 NULL, NULL, &has_string_leaf, &has_list_scalar_leaf,
                 &has_list_string_leaf))
@@ -2813,8 +2836,9 @@ validate_lowered_import_signature(
 
             wasm_runtime_clear_exception((WASMModuleInstanceCommon *)component_inst);
             if (!compute_component_canon_abi_layout(
-                    component_inst, component, component_type->results->results, 0,
-                    &ret_area_size, &ret_area_align, &composite_has_string,
+                    component_inst, lowered_function->resource_state, component,
+                    component_type->results->results, 0, &ret_area_size,
+                    &ret_area_align, &composite_has_string,
                     &composite_has_list_scalar, &composite_has_list_string))
                 return set_component_runtime_error_from_exception(
                     component_inst, error_buf, error_buf_size,
@@ -3371,9 +3395,10 @@ materialize_lowered_import_multi_results(
 
     wasm_runtime_clear_exception((WASMModuleInstanceCommon *)component_inst);
     if (!compute_component_canon_abi_result_vector_layout(
-            component_inst, component, component_type->results->results, result_count,
-            &result_vector_size, &result_vector_align, result_offsets, result_sizes,
-            &has_string_leaf, &has_list_scalar_leaf, &has_list_string_leaf)) {
+            component_inst, resource_state, component,
+            component_type->results->results, result_count, &result_vector_size,
+            &result_vector_align, result_offsets, result_sizes, &has_string_leaf,
+            &has_list_scalar_leaf, &has_list_string_leaf)) {
         const char *component_exception =
             wasm_runtime_get_exception((WASMModuleInstanceCommon *)component_inst);
         wasm_runtime_set_exception(
@@ -3468,6 +3493,16 @@ materialize_lowered_import_multi_results(
                     wasm_runtime_clear_exception(
                         (WASMModuleInstanceCommon *)component_inst);
                     goto cleanup;
+                }
+                if (owned_resource
+                    && !lowered_import_owned_result_matches_current_arg(
+                        (uint32)decoded[i].scalar.of.i32, resource_type_idxs[i],
+                        owned_arg_caller_handles, owned_arg_resource_type_idxs,
+                        param_count)) {
+                    rollback_handles[rollback_count] =
+                        (uint32)decoded[i].scalar.of.i32;
+                    rollback_type_idxs[rollback_count] = resource_type_idxs[i];
+                    rollback_count++;
                 }
                 break;
 
@@ -3718,16 +3753,6 @@ materialize_lowered_import_multi_results(
 
         switch (type_infos[i].kind) {
             case WASM_COMP_CANON_LIFT_VALUE_SCALAR:
-                if (is_owned_resource[i]
-                    && !lowered_import_owned_result_matches_current_arg(
-                        (uint32)decoded[i].scalar.of.i32, resource_type_idxs[i],
-                        owned_arg_caller_handles, owned_arg_resource_type_idxs,
-                        param_count)) {
-                    rollback_handles[rollback_count] =
-                        (uint32)decoded[i].scalar.of.i32;
-                    rollback_type_idxs[rollback_count] = resource_type_idxs[i];
-                    rollback_count++;
-                }
                 if (!store_component_canon_memory_scalar_value(
                         component_inst, type_infos[i].prim_type, &decoded[i].scalar,
                         result_slot, result_sizes[i])) {
@@ -4088,8 +4113,9 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
             bool composite_has_list_string = false;
 
             if (!compute_component_canon_abi_layout(
-                    component_inst, component, component_type->results->results, 0,
-                    &ret_area_size, &ret_area_align, &composite_has_string,
+                    component_inst, lowered_function->resource_state, component,
+                    component_type->results->results, 0, &ret_area_size,
+                    &ret_area_align, &composite_has_string,
                     &composite_has_list_scalar,
                     &composite_has_list_string)) {
                 const char *component_exception = wasm_runtime_get_exception(
@@ -5839,6 +5865,13 @@ classify_component_runtime_composite_result(const WASMComponent *component,
                 "component canon lift function result 0 only supports "
                 "variable-length list<scalar>/list<string> leaves inside "
                 "tuple/record results");
+        case WASM_COMP_DEF_VAL_OWN:
+            return true;
+        case WASM_COMP_DEF_VAL_BORROW:
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                "component canon lift function result 0 does not support "
+                "borrow<resource> leaves inside tuple/record results");
         default:
             return set_component_runtime_error_fmt(
                 error_buf, error_buf_size,
@@ -6505,6 +6538,45 @@ drop_component_owned_resource_handle_internal(
 
     *consumed_out = true;
     return true;
+}
+
+void
+wasm_component_drop_transferred_public_resource_value(
+    WASMComponentPublicResourceValue *resource_value)
+{
+    WASMComponentRuntimeResourceState *resource_state;
+    WASMComponentInstance *inst;
+    uint32 handle;
+    uint32 resource_type_idx;
+    char error_buf[128] = { 0 };
+    bool consumed = false;
+
+    if (!resource_value
+        || resource_value->magic != WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_MAGIC
+        || resource_value->kind != WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_TRANSFERRED
+        || !resource_value->resource_state || resource_value->handle == 0)
+        return;
+
+    resource_state = resource_value->resource_state;
+    inst = resource_state->owner_instance;
+    handle = resource_value->handle;
+    resource_type_idx = resource_value->resource_type_idx;
+
+    if (!wasm_component_resource_restore_owned_handle(
+            resource_value, error_buf, (uint32)sizeof(error_buf)))
+        return;
+
+    if (!inst) {
+        (void)wasm_component_resource_drop_owned_handle(
+            resource_state, resource_type_idx, handle, error_buf,
+            (uint32)sizeof(error_buf));
+        return;
+    }
+
+    wasm_runtime_clear_exception((WASMModuleInstanceCommon *)inst);
+    if (!drop_component_owned_resource_handle_internal(
+            inst, resource_state, resource_type_idx, handle, &consumed))
+        wasm_runtime_clear_exception((WASMModuleInstanceCommon *)inst);
 }
 
 static bool
@@ -9634,6 +9706,7 @@ compute_list_scalar_byte_count(uint32 element_count, uint32 element_size,
 
 static bool
 compute_component_canon_abi_layout(WASMComponentInstance *inst,
+                                   const WASMComponentRuntimeResourceState *resource_state,
                                    const WASMComponent *component,
                                    const WASMComponentValueType *value_type,
                                    uint32 result_index, uint32 *size_out,
@@ -9642,6 +9715,10 @@ compute_component_canon_abi_layout(WASMComponentInstance *inst,
                                     bool *has_list_string_leaf_out)
 {
     WASMComponentCanonLiftValueShape shape;
+    WASMComponentCanonLiftValueInfo resource_type_info = { 0 };
+    bool is_owned_resource = false;
+    bool is_borrowed_resource = false;
+    uint32 resource_type_idx = (uint32)-1;
 
     *size_out = 0;
     *align_out = 1;
@@ -9670,6 +9747,24 @@ compute_component_canon_abi_layout(WASMComponentInstance *inst,
     if (!shape.def_type)
         return set_component_composite_result_leaf_error(inst, result_index);
 
+    if (!try_lookup_component_owned_resource_transfer_type(
+            inst, resource_state, component, value_type, "result", result_index,
+            &is_owned_resource, &resource_type_info, &resource_type_idx))
+        return false;
+
+    if (!is_owned_resource
+        && !try_lookup_component_borrowed_resource_param_type(
+               inst, resource_state, component, value_type, "result",
+               result_index, &is_borrowed_resource, &resource_type_info,
+               &resource_type_idx))
+        return false;
+
+    if (is_owned_resource || is_borrowed_resource) {
+        *size_out = 4;
+        *align_out = 4;
+        return true;
+    }
+
     switch (shape.def_type->tag) {
         case WASM_COMP_DEF_VAL_RECORD:
         {
@@ -9686,7 +9781,7 @@ compute_component_canon_abi_layout(WASMComponentInstance *inst,
                 uint64 next_size;
 
                 if (!compute_component_canon_abi_layout(
-                        inst, component,
+                        inst, resource_state, component,
                         shape.def_type->def_val.record->fields[i].value_type,
                         result_index, &field_size, &field_align,
                         &field_has_string, &field_has_list_scalar,
@@ -9737,7 +9832,7 @@ compute_component_canon_abi_layout(WASMComponentInstance *inst,
                 uint64 next_size;
 
                 if (!compute_component_canon_abi_layout(
-                        inst, component,
+                        inst, resource_state, component,
                         &shape.def_type->def_val.tuple->element_types[i],
                         result_index, &field_size, &field_align,
                         &field_has_string, &field_has_list_scalar,
@@ -9815,11 +9910,6 @@ compute_component_canon_abi_layout(WASMComponentInstance *inst,
                       "variable-length list<scalar>/list<string> leaves inside "
                       "tuple/record results",
                 result_index);
-        case WASM_COMP_DEF_VAL_OWN:
-        case WASM_COMP_DEF_VAL_BORROW:
-            *size_out = 4;
-            *align_out = 4;
-            return true;
         default:
             return set_component_composite_result_leaf_error(inst, result_index);
     }
@@ -9827,7 +9917,9 @@ compute_component_canon_abi_layout(WASMComponentInstance *inst,
 
 static bool
 compute_component_canon_abi_result_vector_layout(
-    WASMComponentInstance *inst, const WASMComponent *component,
+    WASMComponentInstance *inst,
+    const WASMComponentRuntimeResourceState *resource_state,
+    const WASMComponent *component,
     const WASMComponentValueType *result_types, uint32 result_count,
     uint32 *size_out, uint32 *align_out, uint32 *offsets_out,
     uint32 *result_sizes_out, bool *has_string_leaf_out,
@@ -9853,8 +9945,8 @@ compute_component_canon_abi_result_vector_layout(
         uint64 next_size;
 
         if (!compute_component_canon_abi_layout(
-                inst, component, &result_types[i], i, &result_size, &result_align,
-                &result_has_string, &result_has_list_scalar,
+                inst, resource_state, component, &result_types[i], i, &result_size,
+                &result_align, &result_has_string, &result_has_list_scalar,
                 &result_has_list_string))
             return false;
 
@@ -9897,12 +9989,31 @@ init_component_result_payload_builder(
     memset(builder, 0, sizeof(*builder));
     builder->storage = builder->inline_storage;
     builder->capacity = sizeof(builder->inline_storage);
+    builder->resource_values = builder->inline_resource_values;
+    builder->resource_capacity =
+        (uint32)(sizeof(builder->inline_resource_values)
+                 / sizeof(builder->inline_resource_values[0]));
 }
 
 static void
 destroy_component_result_payload_builder(
     WASMComponentResultPayloadBuilder *builder)
 {
+    if (builder->resource_values) {
+        for (uint32 i = 0; i < builder->resource_count; i++) {
+            WASMComponentPublicResourceValue *resource_value =
+                &builder->resource_values[i];
+            if (resource_value->kind
+                == WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_TRANSFERRED)
+                wasm_component_drop_transferred_public_resource_value(
+                    resource_value);
+            else
+                wasm_component_resource_release_public_value(resource_value);
+        }
+    }
+    if (builder->resource_values != builder->inline_resource_values
+        && builder->resource_values)
+        wasm_runtime_free(builder->resource_values);
     if (builder->storage != builder->inline_storage && builder->storage)
         wasm_runtime_free(builder->storage);
 }
@@ -9957,12 +10068,114 @@ append_component_result_payload_bytes(
 }
 
 static bool
+append_component_result_payload_resource_value(
+    WASMComponentInstance *inst, WASMComponentResultPayloadBuilder *builder,
+    const WASMComponentPublicResourceValue *resource_value)
+{
+    uint32 required_capacity;
+    uint32 new_capacity;
+    WASMComponentPublicResourceValue *new_values;
+
+    if (!resource_value
+        || resource_value->magic != WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_MAGIC)
+        return set_component_call_error(
+            inst, "component canon lift function result resource leaf is invalid");
+
+    required_capacity = builder->resource_count + 1;
+    if (required_capacity < builder->resource_count)
+        return set_component_call_error(
+            inst, "component canon lift function result resource metadata is too "
+                  "large");
+
+    if (required_capacity > builder->resource_capacity) {
+        new_capacity = builder->resource_capacity;
+        while (new_capacity < required_capacity) {
+            if (new_capacity > UINT32_MAX / 2)
+                new_capacity = required_capacity;
+            else
+                new_capacity *= 2;
+        }
+
+        new_values = wasm_runtime_malloc(sizeof(*new_values) * new_capacity);
+        if (!new_values)
+            return set_component_call_error(
+                inst, "component canon lift function could not allocate result "
+                      "resource metadata");
+
+        if (builder->resource_count > 0)
+            memcpy(new_values, builder->resource_values,
+                   sizeof(*new_values) * builder->resource_count);
+        if (builder->resource_values != builder->inline_resource_values)
+            wasm_runtime_free(builder->resource_values);
+        builder->resource_values = new_values;
+        builder->resource_capacity = new_capacity;
+    }
+
+    builder->resource_values[builder->resource_count++] = *resource_value;
+    return true;
+}
+
+static bool
 finish_component_result_payload(
     wasm_component_value_t *value, WASMComponentResultPayloadBuilder *builder)
 {
     wasm_component_value_destroy(value);
     value->type.kind = WASM_COMPONENT_VALUE_TYPE_DEFINED;
     value->byte_size = builder->size;
+
+    if (builder->resource_count > 0) {
+        WASMComponentPublicCompositeResourceValue *composite_value =
+            wasm_runtime_malloc(sizeof(*composite_value));
+        WASMComponentPublicResourceValue *resource_values =
+            builder->resource_values;
+
+        if (!composite_value)
+            return false;
+
+        if (resource_values == builder->inline_resource_values) {
+            resource_values = wasm_runtime_malloc(sizeof(*resource_values)
+                                                 * builder->resource_count);
+            if (!resource_values) {
+                wasm_runtime_free(composite_value);
+                return false;
+            }
+            memcpy(resource_values, builder->inline_resource_values,
+                   sizeof(*resource_values) * builder->resource_count);
+        }
+
+        memset(composite_value, 0, sizeof(*composite_value));
+        composite_value->magic =
+            WASM_COMPONENT_PUBLIC_COMPOSITE_RESOURCE_VALUE_MAGIC;
+        composite_value->byte_size = builder->size;
+        composite_value->resource_count = builder->resource_count;
+        composite_value->resource_values = resource_values;
+        builder->resource_values = builder->inline_resource_values;
+        builder->resource_capacity =
+            (uint32)(sizeof(builder->inline_resource_values)
+                     / sizeof(builder->inline_resource_values[0]));
+        builder->resource_count = 0;
+
+        if (builder->size > 0) {
+            composite_value->data = wasm_runtime_malloc(builder->size);
+            if (!composite_value->data) {
+                if (composite_value->resource_values)
+                    wasm_runtime_free(composite_value->resource_values);
+                wasm_runtime_free(composite_value);
+                return false;
+            }
+            memcpy(composite_value->data, builder->storage, builder->size);
+        }
+
+        if (builder->storage != builder->inline_storage)
+            wasm_runtime_free(builder->storage);
+        builder->storage = builder->inline_storage;
+        builder->capacity = sizeof(builder->inline_storage);
+        builder->size = 0;
+
+        value->storage_kind = WASM_COMPONENT_VALUE_STORAGE_COMPOSITE_RESOURCE;
+        value->storage.owned_data = composite_value;
+        return true;
+    }
 
     if (builder->size == 0) {
         builder->storage = builder->inline_storage;
@@ -9989,26 +10202,7 @@ static bool
 init_component_defined_payload_value(
     wasm_component_value_t *value, WASMComponentResultPayloadBuilder *builder)
 {
-    memset(value, 0, sizeof(*value));
-    value->type.kind = WASM_COMPONENT_VALUE_TYPE_DEFINED;
-    value->byte_size = builder->size;
-
-    if (builder->size == 0)
-        return true;
-
-    if (builder->storage == builder->inline_storage) {
-        value->storage_kind = WASM_COMPONENT_VALUE_STORAGE_INLINE;
-        memcpy(value->storage.inline_storage, builder->inline_storage,
-               builder->size);
-        return true;
-    }
-
-    value->storage_kind = WASM_COMPONENT_VALUE_STORAGE_OWNED;
-    value->storage.owned_data = builder->storage;
-    builder->storage = builder->inline_storage;
-    builder->capacity = sizeof(builder->inline_storage);
-    builder->size = 0;
-    return true;
+    return finish_component_result_payload(value, builder);
 }
 
 static bool
@@ -10550,6 +10744,40 @@ append_component_result_list_string_leaf(WASMComponentInstance *inst,
 }
 
 static bool
+append_component_result_owned_resource_leaf(
+    WASMComponentInstance *inst, WASMComponentResultPayloadBuilder *builder,
+    const WASMComponentRuntimeResourceState *resource_state, uint32 resource_type_idx,
+    uint32 handle)
+{
+    WASMComponentPublicResourceValue resource_value;
+    uint8 handle_buf[5];
+    uint32 handle_len;
+    char error_buf[128] = { 0 };
+
+    memset(&resource_value, 0, sizeof(resource_value));
+    if (!resource_state
+        || !wasm_component_resource_take_owned_handle(
+            (WASMComponentRuntimeResourceState *)resource_state, resource_type_idx,
+            handle, &resource_value, error_buf, (uint32)sizeof(error_buf)))
+        return set_component_call_error(inst, error_buf[0] ? error_buf
+                                                            : "component canon "
+                                                              "lift function "
+                                                              "could not detach "
+                                                              "an owned "
+                                                              "resource result");
+
+    handle_len = encode_component_unsigned_leb(handle, handle_buf);
+    if (!append_component_result_payload_bytes(inst, builder, handle_buf, handle_len)
+        || !append_component_result_payload_resource_value(inst, builder,
+                                                           &resource_value)) {
+        wasm_component_resource_release_public_value(&resource_value);
+        return false;
+    }
+
+    return true;
+}
+
+static bool
 decode_component_canon_composite_result_value(
     WASMComponentInstance *inst, const WASMComponentRuntimeFunc *function,
     const WASMComponent *component, const WASMComponentValueType *value_type,
@@ -10636,6 +10864,48 @@ decode_component_canon_composite_result_value(
     if (!shape.def_type)
         return set_component_composite_result_leaf_error(inst, result_index);
 
+    {
+        WASMComponentCanonLiftValueInfo resource_type_info;
+        bool is_owned_resource = false;
+        bool is_borrowed_resource = false;
+        uint32 resource_type_idx = WASM_COMPONENT_RESOURCE_INVALID_TYPE_IDX;
+        const WASMComponentRuntimeResourceState *resource_state =
+            function->resource_state ? function->resource_state
+                                     : inst->resource_state;
+
+        memset(&resource_type_info, 0, sizeof(resource_type_info));
+        if (!try_lookup_component_owned_resource_transfer_type(
+                inst, resource_state, component, value_type, "result",
+                result_index, &is_owned_resource, &resource_type_info,
+                &resource_type_idx))
+            return false;
+
+        if (!is_owned_resource
+            && !try_lookup_component_borrowed_resource_param_type(
+                   inst, resource_state, component, value_type, "result",
+                   result_index, &is_borrowed_resource, &resource_type_info,
+                   &resource_type_idx))
+            return false;
+
+        if (is_borrowed_resource)
+            return set_component_call_error_fmt(
+                inst, "component canon lift function result %u does not support "
+                      "borrow<resource> leaves inside tuple/record results",
+                result_index);
+
+        if (is_owned_resource) {
+            uint32 handle = 0;
+
+            if (offset > ret_area_size || ret_area_size - offset < 4)
+                return set_component_call_error(
+                    inst, "component canon lift function composite result area "
+                          "is out of bounds");
+            memcpy(&handle, ret_area_bytes + offset, sizeof(handle));
+            return append_component_result_owned_resource_leaf(
+                inst, builder, resource_state, resource_type_idx, handle);
+        }
+    }
+
     switch (shape.def_type->tag) {
         case WASM_COMP_DEF_VAL_RECORD:
         {
@@ -10651,7 +10921,9 @@ decode_component_canon_composite_result_value(
                 uint64 nested_offset;
 
                 if (!compute_component_canon_abi_layout(
-                        inst, component,
+                        inst, function->resource_state ? function->resource_state
+                                                       : inst->resource_state,
+                        component,
                         shape.def_type->def_val.record->fields[i].value_type,
                         result_index, &field_size, &field_align,
                         &ignored_has_string, &ignored_has_list_scalar,
@@ -10691,7 +10963,9 @@ decode_component_canon_composite_result_value(
                 uint64 nested_offset;
 
                 if (!compute_component_canon_abi_layout(
-                        inst, component,
+                        inst, function->resource_state ? function->resource_state
+                                                       : inst->resource_state,
+                        component,
                         &shape.def_type->def_val.tuple->element_types[i],
                         result_index, &field_size, &field_align,
                         &ignored_has_string, &ignored_has_list_scalar,
@@ -10849,11 +11123,16 @@ decode_component_canon_composite_result_value(
 static bool
 collect_component_composite_result_leaves(
     WASMComponentInstance *inst, const WASMComponent *component,
+    const WASMComponentRuntimeResourceState *resource_state,
     const WASMComponentValueType *value_type, uint32 result_index,
     WASMComponentCompositeFlatLeaf *flat_leaves, uint32 leaf_capacity,
     uint32 *leaf_count_io)
 {
     WASMComponentCanonLiftValueShape shape;
+    WASMComponentCanonLiftValueInfo resource_type_info;
+    bool is_owned_resource = false;
+    bool is_borrowed_resource = false;
+    uint32 resource_type_idx = 0;
 
     if (!resolve_component_canon_lift_value_shape(component, value_type, "result",
                                                   result_index, &shape, inst))
@@ -10880,13 +11159,46 @@ collect_component_composite_result_leaves(
     if (!shape.def_type)
         return set_component_composite_result_leaf_error(inst, result_index);
 
+    if (!try_lookup_component_owned_resource_transfer_type(
+            inst, resource_state, component, value_type, "result", result_index,
+            &is_owned_resource, &resource_type_info, &resource_type_idx))
+        return false;
+
+    if (!is_owned_resource
+        && !try_lookup_component_borrowed_resource_param_type(
+               inst, resource_state, component, value_type, "result",
+               result_index, &is_borrowed_resource, &resource_type_info,
+               &resource_type_idx))
+        return false;
+
+    if (is_owned_resource || is_borrowed_resource) {
+        WASMComponentCompositeFlatLeaf *flat_leaf;
+
+        if (*leaf_count_io >= leaf_capacity)
+            return set_component_result_flattening_error(inst);
+
+        if (is_borrowed_resource)
+            return set_component_call_error_fmt(
+                inst, "component canon lift function result %u does not support "
+                      "borrow<resource> leaves inside tuple/record results",
+                result_index);
+
+        flat_leaf = &flat_leaves[*leaf_count_io];
+        memset(flat_leaf, 0, sizeof(*flat_leaf));
+        flat_leaf->type_info = resource_type_info;
+        flat_leaf->is_owned_resource = true;
+        flat_leaf->resource_type_idx = resource_type_idx;
+        (*leaf_count_io)++;
+        return true;
+    }
+
     switch (shape.def_type->tag) {
         case WASM_COMP_DEF_VAL_RECORD:
             if (!shape.def_type->def_val.record)
                 return set_component_composite_result_leaf_error(inst, result_index);
             for (uint32 i = 0; i < shape.def_type->def_val.record->count; i++) {
                 if (!collect_component_composite_result_leaves(
-                        inst, component,
+                        inst, component, resource_state,
                         shape.def_type->def_val.record->fields[i].value_type,
                         result_index, flat_leaves, leaf_capacity, leaf_count_io))
                     return false;
@@ -10897,7 +11209,7 @@ collect_component_composite_result_leaves(
                 return set_component_composite_result_leaf_error(inst, result_index);
             for (uint32 i = 0; i < shape.def_type->def_val.tuple->count; i++) {
                 if (!collect_component_composite_result_leaves(
-                        inst, component,
+                        inst, component, resource_state,
                         &shape.def_type->def_val.tuple->element_types[i],
                         result_index, flat_leaves, leaf_capacity, leaf_count_io))
                     return false;
@@ -10911,6 +11223,7 @@ collect_component_composite_result_leaves(
 static bool
 validate_component_composite_result_signature(
     WASMComponentInstance *inst, const WASMComponent *component,
+    const WASMComponentRuntimeResourceState *resource_state,
     const WASMComponentValueType *value_type, uint32 result_index,
     const WASMFuncType *core_type,
     WASMComponentCompositeFlatLeaf *flat_leaves, uint32 flat_leaf_capacity,
@@ -10920,7 +11233,7 @@ validate_component_composite_result_signature(
 
     *flat_leaf_count_out = 0;
     if (!collect_component_composite_result_leaves(
-            inst, component, value_type, result_index, flat_leaves,
+            inst, component, resource_state, value_type, result_index, flat_leaves,
             flat_leaf_capacity, flat_leaf_count_out))
         return false;
 
@@ -10951,11 +11264,11 @@ init_component_public_memory_composite_result(
     bool has_list_scalar_leaf = false;
     bool has_list_string_leaf = false;
 
-    if (!compute_component_canon_abi_layout(inst, component, value_type, result_index,
-                                            &ret_area_size, &ret_area_align,
-                                            &has_string_leaf,
-                                            &has_list_scalar_leaf,
-                                            &has_list_string_leaf))
+    if (!compute_component_canon_abi_layout(
+            inst, function->resource_state ? function->resource_state
+                                           : inst->resource_state,
+            component, value_type, result_index, &ret_area_size, &ret_area_align,
+            &has_string_leaf, &has_list_scalar_leaf, &has_list_string_leaf))
         return false;
     (void)ret_area_align;
 
@@ -11438,7 +11751,7 @@ write_component_public_composite_result_to_memory(
                 bool field_has_list_string = false;
 
                 if (!compute_component_canon_abi_layout(
-                        inst, component,
+                        inst, inst->resource_state, component,
                         shape.def_type->def_val.record->fields[i].value_type,
                         result_index, &field_size, &field_align,
                         &field_has_string, &field_has_list_scalar,
@@ -11471,7 +11784,7 @@ write_component_public_composite_result_to_memory(
                 bool field_has_list_string = false;
 
                 if (!compute_component_canon_abi_layout(
-                        inst, component,
+                        inst, inst->resource_state, component,
                         &shape.def_type->def_val.tuple->element_types[i],
                         result_index, &field_size, &field_align,
                         &field_has_string, &field_has_list_scalar,
@@ -11715,11 +12028,10 @@ materialize_component_public_composite_result_to_memory(
             inst, "component lowered core-call trampoline expected a defined "
                   "composite result");
 
-    if (!compute_component_canon_abi_layout(inst, component, value_type, result_index,
-                                            &ret_area_size, &ret_area_align,
-                                            &has_string_leaf,
-                                            &has_list_scalar_leaf,
-                                            &has_list_string_leaf))
+    if (!compute_component_canon_abi_layout(
+            inst, inst->resource_state, component, value_type, result_index,
+            &ret_area_size, &ret_area_align, &has_string_leaf,
+            &has_list_scalar_leaf, &has_list_string_leaf))
         return false;
 
     if ((result_area_ptr & (ret_area_align - 1)) != 0
@@ -11754,6 +12066,7 @@ materialize_component_public_composite_result_to_memory(
 static bool
 init_component_public_composite_result(
     WASMComponentInstance *inst,
+    const WASMComponentRuntimeResourceState *resource_state,
     const WASMComponentCompositeFlatLeaf *flat_leaves, uint32 flat_leaf_count,
     const wasm_val_t *core_results, wasm_component_value_t *value)
 {
@@ -11765,6 +12078,17 @@ init_component_public_composite_result(
     init_component_result_payload_builder(&builder);
 
     for (i = 0; i < flat_leaf_count; i++) {
+        if (flat_leaves[i].is_owned_resource) {
+            if (!append_component_result_owned_resource_leaf(
+                    inst, &builder, resource_state,
+                    flat_leaves[i].resource_type_idx,
+                    (uint32)core_results[i].of.i32)) {
+                destroy_component_result_payload_builder(&builder);
+                return false;
+            }
+            continue;
+        }
+
         if (!validate_component_scalar_value(inst, &core_results[i],
                                              flat_leaves[i].type_info.public_kind,
                                              flat_leaves[i].type_info.prim_type,
@@ -13141,7 +13465,9 @@ host_import_cleanup_fail:
             }
 
             if (!compute_component_canon_abi_result_vector_layout(
-                    inst, component, component_type->results->results,
+                    inst, function->resource_state ? function->resource_state
+                                                   : inst->resource_state,
+                    component, component_type->results->results,
                     expected_result_count, &result_vector_size,
                     &result_vector_align, result_offsets, result_sizes,
                     &has_string_leaf, &has_list_scalar_leaf,
@@ -13210,7 +13536,9 @@ host_import_cleanup_fail:
             uint32 composite_result_size = 0, composite_result_align = 1;
 
             if (!compute_component_canon_abi_layout(
-                    inst, component, component_type->results->results,
+                    inst, function->resource_state ? function->resource_state
+                                                   : inst->resource_state,
+                    component, component_type->results->results,
                     0, &composite_result_size, &composite_result_align,
                     &composite_result_has_string,
                     &composite_result_has_list_u8,
@@ -13246,6 +13574,8 @@ host_import_cleanup_fail:
 
                 if (!validate_component_composite_result_signature(
                         inst, component,
+                        function->resource_state ? function->resource_state
+                                                 : inst->resource_state,
                         component_type->results->results, 0, core_type,
                         result_leaves, core_type->result_count,
                         &flat_result_count))
@@ -13718,8 +14048,8 @@ host_import_cleanup_fail:
                 }
             }
             else if (!init_component_public_composite_result(
-                         inst, result_leaves, flat_result_count, core_results,
-                         &results[0])) {
+                         inst, call_resource_state, result_leaves,
+                         flat_result_count, core_results, &results[0])) {
                 call_succeeded = false;
                 goto cleanup;
             }

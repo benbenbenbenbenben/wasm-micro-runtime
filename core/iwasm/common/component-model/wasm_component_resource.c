@@ -1182,3 +1182,42 @@ wasm_component_resource_release_borrowed_handle(
         canonical_type->handle_table.live_handle_count--;
     return true;
 }
+
+void
+wasm_component_resource_release_public_value(
+    WASMComponentPublicResourceValue *resource_value)
+{
+    char error_buf[128] = { 0 };
+
+    if (!resource_value
+        || resource_value->magic != WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_MAGIC)
+        return;
+
+    switch (resource_value->kind) {
+        case WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_PENDING_IMPORTED_RESULT:
+            if (resource_value->data && resource_value->finalizer)
+                resource_value->finalizer(resource_value->data,
+                                          resource_value->finalizer_ctx);
+            break;
+        case WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_BORROWED:
+            if (resource_value->resource_state && resource_value->handle > 0)
+                (void)wasm_component_resource_release_borrowed_handle(
+                    resource_value->resource_state,
+                    resource_value->resource_type_idx, resource_value->handle,
+                    error_buf, (uint32)sizeof(error_buf));
+            break;
+        case WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_TRANSFERRED:
+            if (resource_value->resource_state && resource_value->handle > 0
+                && wasm_component_resource_restore_owned_handle(
+                    resource_value, error_buf, (uint32)sizeof(error_buf)))
+                (void)wasm_component_resource_drop_owned_handle(
+                    resource_value->resource_state,
+                    resource_value->resource_type_idx, resource_value->handle,
+                    error_buf, (uint32)sizeof(error_buf));
+            break;
+        default:
+            break;
+    }
+
+    memset(resource_value, 0, sizeof(*resource_value));
+}

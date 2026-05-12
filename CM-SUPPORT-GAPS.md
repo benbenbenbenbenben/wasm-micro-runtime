@@ -532,10 +532,12 @@ Still missing:
   `list<scalar> + s32` / `record{s32, string, list<scalar>} + s32` subset
 - host-import multi-result execution for broader resource-result seams beyond
   the current tested direct callback and direct lowered
-  `own<resource> + s32` / `borrow<resource> + s32` subset
+  `own<resource> + s32` / `borrow<resource> + s32` subset plus the tested
+  imported `own<resource> + string` lowered seam
 - start-section execution for retptr/canon-lifted resource multi-result
-  functions beyond the current tested local
-  `own<resource> + s32` / `borrow<resource> + s32` subset
+  functions beyond the current tested local/imported
+  `own<resource> + s32` / `borrow<resource> + s32` subset plus the tested
+  imported `own<resource> + string` start seam
 - retptr-backed Canonical ABI multi-results beyond the current scalar /
   UTF-8 string / `list<scalar>` / `list<string>` / tuple-record-leaf
   result-vector subset plus the current direct top-level local/imported
@@ -600,6 +602,9 @@ What exists:
     current borrowed argument for the current local-resource subset
   - direct lowered child-core execution of the tested imported
     `own<resource> + s32` host-import seam on the retptr/result-area path
+  - direct lowered child-core execution of the tested imported
+    `own<resource> + string` host-import seam on that same retptr/result-area
+    path, including rollback when the string lane is invalid
   - rollback/restoration when a later result lane fails after an earlier local
     owned-resource round-trip lane succeeded
 - retptr-backed canon-lift multi-result transport for the current tested direct
@@ -610,9 +615,10 @@ What exists:
     borrowed alias of the current borrowed argument for the current
     local/imported-resource subset
   - direct canon-lift `own<resource> + string` result vectors for the current
-    local-resource subset
-  - top-level start-section materialization of direct canon-lift local
-    `own<resource> + s32` / `borrow<resource> + s32` result vectors
+    local/imported-resource subset
+  - top-level start-section materialization of direct canon-lift local/imported
+    `own<resource> + s32` / `borrow<resource> + s32` result vectors plus the
+    tested imported `own<resource> + string` subset
 - synchronous host callback transport of borrowed resource parameters for host
   function imports, including both local owned handles and imported handles
   without consuming ownership
@@ -674,13 +680,17 @@ What is still missing:
   imported-resource binding, and the current owned-resource /
   borrowed-parameter / scalar borrowed-result call subset plus the current
   direct host-import/lowered `own<resource> + s32` /
-  `borrow<resource> + s32` multi-result subset plus the current direct
-  top-level retptr/canon-lift local/imported `own<resource> + s32` /
-  `borrow<resource> + s32` subset, the tested local
+  `borrow<resource> + s32` multi-result subset plus the tested imported
+  lowered `own<resource> + string` seam, the current direct top-level
+  retptr/canon-lift local/imported `own<resource> + s32` /
+  `borrow<resource> + s32` subset, the tested local/imported
+  `tuple<own<resource>> + s32` composite retptr witness, the tested local/imported
   `own<resource> + string` retptr witness, and top-level start materialization
-  of the local retptr `own<resource> + s32` / `borrow<resource> + s32` subset;
-  broader borrow/lend behavior, imported-resource retptr start flows, broader
-  mixed/composite resource retptr vectors, composite/non-scalar borrow-result
+  of the local/imported retptr `own<resource> + s32` /
+  `borrow<resource> + s32` subset plus the tested imported
+  `own<resource> + string` start seam; broader borrow/lend behavior, broader
+  mixed/composite resource retptr vectors beyond the tested
+  `tuple<own<resource>>` local/imported witness pair, composite/non-scalar borrow-result
   flows, and stricter caller-side ownership/consumption semantics still remain
   open
 - full trap/failure-path operational cleanup semantics
