@@ -12028,6 +12028,87 @@ decode_component_canon_composite_result_value(
             return append_component_result_list_scalar_leaf(
                 inst, builder, element_count, payload_bytes, byte_count);
         }
+        case WASM_COMP_DEF_VAL_OPTION:
+            if (!shape.def_type->def_val.option)
+                return set_component_composite_result_leaf_error(inst, result_index);
+            {
+                uint32 discriminant = 0;
+                if (offset > ret_area_size || ret_area_size - offset < 4)
+                    return set_component_call_error(
+                        inst, "component canon lift function composite result area "
+                              "is out of bounds");
+                memcpy(&discriminant, ret_area_bytes + offset, sizeof(discriminant));
+                if (!append_component_result_payload_bytes(inst, builder,
+                        (const uint8 *)&discriminant, 4))
+                    return false;
+                if (discriminant == 1
+                    && shape.def_type->def_val.option->element_type) {
+                    if (!decode_component_canon_composite_result_value(
+                            inst, function, component,
+                            shape.def_type->def_val.option->element_type,
+                            result_index, ret_area_bytes, ret_area_size,
+                            offset + 4, builder))
+                        return false;
+                }
+            }
+            return true;
+        case WASM_COMP_DEF_VAL_RESULT:
+            if (!shape.def_type->def_val.result)
+                return set_component_composite_result_leaf_error(inst, result_index);
+            {
+                uint32 discriminant = 0;
+                if (offset > ret_area_size || ret_area_size - offset < 4)
+                    return set_component_call_error(
+                        inst, "component canon lift function composite result area "
+                              "is out of bounds");
+                memcpy(&discriminant, ret_area_bytes + offset, sizeof(discriminant));
+                if (!append_component_result_payload_bytes(inst, builder,
+                        (const uint8 *)&discriminant, 4))
+                    return false;
+                if (discriminant == 0
+                    && shape.def_type->def_val.result->result_type) {
+                    if (!decode_component_canon_composite_result_value(
+                            inst, function, component,
+                            shape.def_type->def_val.result->result_type,
+                            result_index, ret_area_bytes, ret_area_size,
+                            offset + 4, builder))
+                        return false;
+                }
+                else if (discriminant == 1
+                         && shape.def_type->def_val.result->error_type) {
+                    if (!decode_component_canon_composite_result_value(
+                            inst, function, component,
+                            shape.def_type->def_val.result->error_type,
+                            result_index, ret_area_bytes, ret_area_size,
+                            offset + 4, builder))
+                        return false;
+                }
+            }
+            return true;
+        case WASM_COMP_DEF_VAL_VARIANT:
+            if (!shape.def_type->def_val.variant)
+                return set_component_composite_result_leaf_error(inst, result_index);
+            {
+                uint32 discriminant = 0;
+                if (offset > ret_area_size || ret_area_size - offset < 4)
+                    return set_component_call_error(
+                        inst, "component canon lift function composite result area "
+                              "is out of bounds");
+                memcpy(&discriminant, ret_area_bytes + offset, sizeof(discriminant));
+                if (!append_component_result_payload_bytes(inst, builder,
+                        (const uint8 *)&discriminant, 4))
+                    return false;
+                if (discriminant < shape.def_type->def_val.variant->count
+                    && shape.def_type->def_val.variant->cases[discriminant].value_type) {
+                    if (!decode_component_canon_composite_result_value(
+                            inst, function, component,
+                            shape.def_type->def_val.variant->cases[discriminant].value_type,
+                            result_index, ret_area_bytes, ret_area_size,
+                            offset + 4, builder))
+                        return false;
+                }
+            }
+            return true;
         case WASM_COMP_DEF_VAL_LIST_LEN:
             return set_component_call_error_fmt(
                 inst, "component canon lift function result %u only supports "
