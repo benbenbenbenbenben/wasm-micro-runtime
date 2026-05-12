@@ -3419,6 +3419,39 @@ validate_lowered_import_composite_param_signature(
                              "do not support composite parameters flattened "
                              "beyond 16 core arguments");
         }
+        case WASM_COMP_DEF_VAL_OPTION:
+        case WASM_COMP_DEF_VAL_RESULT:
+        case WASM_COMP_DEF_VAL_VARIANT:
+        {
+            uint32 i;
+            /* Discriminant: 1 i32 */
+            if (*core_param_index_io >= expected_type->param_count
+                || expected_type->types[*core_param_index_io] != VALUE_TYPE_I32)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "core import parameter %u does not match the lowered "
+                    "component function signature",
+                    *core_param_index_io);
+            (*core_param_index_io)++;
+            (*flat_param_count_io)++;
+            /* Payload: 1 i32 (scalar payload for all cases) */
+            if (*core_param_index_io >= expected_type->param_count
+                || expected_type->types[*core_param_index_io] != VALUE_TYPE_I32)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "core import parameter %u does not match the lowered "
+                    "component function signature",
+                    *core_param_index_io);
+            (*core_param_index_io)++;
+            (*flat_param_count_io)++;
+            return *flat_param_count_io <= 16
+                       ? true
+                       : set_component_runtime_error_fmt(
+                             error_buf, error_buf_size,
+                             "component canon lower direct core-call bindings "
+                             "do not support composite parameters flattened "
+                             "beyond 16 core arguments");
+        }
         default:
             return set_component_runtime_error_fmt(
                 error_buf, error_buf_size,
