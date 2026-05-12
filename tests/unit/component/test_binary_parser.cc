@@ -63625,6 +63625,46 @@ TEST_F(BinaryParserTest, TestRuntimeSupportsOptionStringParam)
     wasm_runtime_unload(module);
 }
 
+TEST_F(BinaryParserTest, TestRuntimeLoadsOptionStringResultType)
+{
+    bool ret = helper->read_wasm_file("option_string_result.component.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "runtime-option-string-result-type";
+    load_args.name = module_name;
+
+    /* This test verifies option<string> as a function result through the
+       retptr memory-backed composite result path. */
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    WASMComponentRuntimeFunc *func =
+        wasm_runtime_lookup_component_function(module_inst, "g");
+    ASSERT_NE(func, nullptr);
+
+    /* Call and expect option::none (discriminant 0) */
+    wasm_component_value_t result = {};
+    ASSERT_TRUE(wasm_runtime_call_component_values(
+        module_inst, func, 1, &result, 0, nullptr))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(result.type.kind, WASM_COMPONENT_VALUE_TYPE_DEFINED);
+    { auto *d = (const uint8 *)wasm_component_value_get_data(&result);
+      ASSERT_NE(d, nullptr); ASSERT_EQ(d[0], 0u); }
+    wasm_runtime_drop_component_owned_result(module_inst, func, 0, &result);
+
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
 TEST_F(BinaryParserTest, TestRuntimeSupportsOptionListU8Param)
 {
     bool ret = helper->read_wasm_file("option_list_u8.component.wasm");

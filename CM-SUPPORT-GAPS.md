@@ -441,7 +441,7 @@ Major Canonical ABI gaps remain:
   direct tuple/record `list<string>`-leaf plus nested `list<scalar>` /
   `list<enum>` / `list<flags>` leaves in exported tuple/record values and
   host-import tuple/record parameter/result values
-- no variant marshalling
+- no general variant-with-non-scalar-payloads marshalling
   (enum, flags, option<scalar>, option<string>, option<list<scalar>>,
   result<scalar,scalar>, and variant<scalar> are now supported)
 - no non-string memory-backed leaves inside tuple/record Canonical ABI values beyond nested `list<scalar>` leaves for exported canon-lift calls and host-import tuple/record parameters
@@ -519,7 +519,7 @@ option<list<scalar>>, result<scalar,scalar>, and variant<scalar> (both
 params and results) are now supported in the Canonical ABI. These types
 are treated as composite types with a discriminant and inner payload(s);
 the current implementation covers scalar, string, and list<u8> payloads
-for option.)
+for option and result.)
 
 Today, composite value support is still mostly "opaque bytes plus limited special cases", not full typed component-value semantics.
 
