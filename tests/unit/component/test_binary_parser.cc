@@ -63625,6 +63625,59 @@ TEST_F(BinaryParserTest, TestRuntimeSupportsOptionStringParam)
     wasm_runtime_unload(module);
 }
 
+TEST_F(BinaryParserTest, TestRuntimeSupportsOptionListU8Param)
+{
+    bool ret = helper->read_wasm_file("option_list_u8.component.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "runtime-option-list-u8-test";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    WASMComponentRuntimeFunc *func =
+        wasm_runtime_lookup_component_function(module_inst, "g");
+    ASSERT_NE(func, nullptr);
+
+    /* option::none */
+    uint8_t none_bytes[1] = { 0 };
+    wasm_component_value_t arg =
+        make_component_defined_value(none_bytes, sizeof(none_bytes));
+    wasm_component_value_t result = {};
+    ASSERT_TRUE(wasm_runtime_call_component_values(
+        module_inst, func, 1, &result, 1, &arg))
+        << wasm_runtime_get_exception(module_inst);
+    { auto *d = (const uint8 *)wasm_component_value_get_data(&result);
+      ASSERT_NE(d, nullptr); ASSERT_EQ(d[0] & 0x7f, 0u); }
+    wasm_component_value_destroy(&arg);
+    wasm_runtime_drop_component_owned_result(module_inst, func, 0, &result);
+
+    /* option::some([42]) -> discriminant 1 */
+    uint8_t some_bytes[3] = { 1, 1, 42 };
+    arg = make_component_defined_value(some_bytes, sizeof(some_bytes));
+    result = {};
+    ASSERT_TRUE(wasm_runtime_call_component_values(
+        module_inst, func, 1, &result, 1, &arg))
+        << wasm_runtime_get_exception(module_inst);
+    { auto *d = (const uint8 *)wasm_component_value_get_data(&result);
+      ASSERT_NE(d, nullptr); ASSERT_EQ(d[0] & 0x7f, 1u); }
+    wasm_component_value_destroy(&arg);
+    wasm_runtime_drop_component_owned_result(module_inst, func, 0, &result);
+
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
 TEST_F(BinaryParserTest, TestRuntimeSupportsVariantScalarParamAndResult)
 {
     bool ret = helper->read_wasm_file("variant_scalar.component.wasm");

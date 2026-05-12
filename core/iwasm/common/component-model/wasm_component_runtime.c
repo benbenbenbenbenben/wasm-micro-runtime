@@ -9232,6 +9232,12 @@ component_type_flat_i32_count(const WASMComponent *component,
         case WASM_COMP_DEF_VAL_ENUM:
         case WASM_COMP_DEF_VAL_FLAGS:
             return 1;
+        case WASM_COMP_DEF_VAL_LIST:
+            return 2;
+        case WASM_COMP_DEF_VAL_OPTION:
+            return 1 + component_type_flat_i32_count(
+                       component,
+                       entry->type.def_val_type->def_val.option->element_type);
         default:
             return 0;
     }
@@ -9796,33 +9802,9 @@ flatten_component_public_composite_bytes(
                 (*offset_io) += consumed;
                 /* Compute the payload's flat scalar count so we emit the
                    right number of dummy args for the "none" case. */
-                if (shape.def_type->def_val.option->element_type) {
-                    WASMComponentCanonLiftValueShape payload_shape;
-                    if (!resolve_component_canon_lift_value_shape(
-                            component,
-                            shape.def_type->def_val.option->element_type,
-                            "parameter", param_index, &payload_shape, inst))
-                        return false;
-                    if (payload_shape.is_primitive) {
-                        if (payload_shape.prim_type == WASM_COMP_PRIMVAL_STRING)
-                            dummy_count = 2;
-                        else {
-                            uint8 ignored_core = 0;
-                            wasm_valkind_t ignored_kind = WASM_I32;
-                            if (component_scalar_prim_to_core(
-                                    payload_shape.prim_type, &ignored_core,
-                                    &ignored_kind))
-                                dummy_count = 1;
-                        }
-                    }
-                    else if (payload_shape.def_type) {
-                        if (payload_shape.def_type->tag
-                                == WASM_COMP_DEF_VAL_ENUM
-                            || payload_shape.def_type->tag
-                                   == WASM_COMP_DEF_VAL_FLAGS)
-                            dummy_count = 1;
-                    }
-                }
+                dummy_count = component_type_flat_i32_count(
+                    component,
+                    shape.def_type->def_val.option->element_type);
                 if (discriminant_value.of.i32 == 1
                     && shape.def_type->def_val.option->element_type) {
                     if (!flatten_component_public_composite_bytes(
