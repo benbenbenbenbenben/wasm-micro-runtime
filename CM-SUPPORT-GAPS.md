@@ -300,6 +300,8 @@ This is now a real but narrow operational slice, not yet full resource semantics
   first-time proven lifted execution of component `enum` types
 - flags type params and results through the component value API, including
   first-time proven lifted execution of component `flags` types
+- `list<enum>` and `list<flags>` params and results, including both
+  top-level and tuple/record composite paths
 
 ## 2. What is still missing for full component-model support
 
@@ -426,9 +428,10 @@ Major Canonical ABI gaps remain:
 - no list marshalling beyond UTF-8 strings, the tested direct top-level and
   nested child-core `list<string>` parameter/result paths, the tested
   cross-component `list<string>` parameter/result seams, top-level
-  `list<scalar>`, and the tested top-level direct tuple/record
-  `list<string>`-leaf plus nested `list<scalar>` leaves in exported
-  tuple/record values and host-import tuple/record parameter/result values
+  `list<scalar>`, `list<enum>`, `list<flags>`, and the tested top-level
+  direct tuple/record `list<string>`-leaf plus nested `list<scalar>` /
+  `list<enum>` / `list<flags>` leaves in exported tuple/record values and
+  host-import tuple/record parameter/result values
 - no variant / option / result marshalling
   (enum and flags are now supported)
 - no non-string memory-backed leaves inside tuple/record Canonical ABI values beyond nested `list<scalar>` leaves for exported canon-lift calls and host-import tuple/record parameters
@@ -504,8 +507,8 @@ What is still missing:
 - results
 - richer defined-type introspection/manipulation
 
-(Enum and flags are now supported as scalar i32 bitfields in the
-Canonical ABI.)
+(Enum, flags, and list<enum>/list<flags> are now supported in the
+Canonical ABI, including inside tuple/record composites.)
 
 Today, composite value support is still mostly "opaque bytes plus limited special cases", not full typed component-value semantics.
 

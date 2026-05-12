@@ -5784,13 +5784,34 @@ resolve_component_lift_list_scalar_usage(const WASMComponent *component,
         return true;
 
     if (!resolve_component_runtime_primitive_type(component,
-                                                  def_type->def_val.list->element_type,
-                                                  &is_primitive, &prim_type,
-                                                  error_buf, error_buf_size))
+                                                   def_type->def_val.list->element_type,
+                                                   &is_primitive, &prim_type,
+                                                   error_buf, error_buf_size))
         return false;
 
-    *is_list_scalar =
-        is_primitive && component_scalar_prim_byte_size(prim_type) > 0;
+    if (is_primitive && component_scalar_prim_byte_size(prim_type) > 0) {
+        *is_list_scalar = true;
+        return true;
+    }
+
+    if (!is_primitive
+        && def_type->def_val.list->element_type->type
+               == WASM_COMP_VAL_TYPE_IDX) {
+        const WASMComponentTypes *elem_type_entry =
+            wasm_component_lookup_type(
+                component,
+                def_type->def_val.list->element_type->type_specific.type_idx);
+        if (elem_type_entry && elem_type_entry->tag == WASM_COMP_DEF_TYPE
+            && elem_type_entry->type.def_val_type) {
+            uint8 elem_tag = elem_type_entry->type.def_val_type->tag;
+            if (elem_tag == WASM_COMP_DEF_VAL_ENUM
+                || elem_tag == WASM_COMP_DEF_VAL_FLAGS) {
+                *is_list_scalar = true;
+                return true;
+            }
+        }
+    }
+
     return true;
 }
 
@@ -5971,13 +5992,35 @@ classify_component_runtime_composite_param(const WASMComponent *component,
                     component, def_type->def_val.list->element_type,
                     &is_primitive, &prim_type, error_buf, error_buf_size))
                 return false;
-            if (!is_primitive)
-                return set_component_runtime_error_fmt(
-                    error_buf, error_buf_size,
-                    "component canon lift function parameter %u only supports "
-                    "variable-length list<scalar>/list<string> leaves inside "
-                    "tuple/record parameters",
-                    param_index);
+            if (!is_primitive) {
+                bool is_scalar_defined = false;
+                if (def_type->def_val.list->element_type->type
+                    == WASM_COMP_VAL_TYPE_IDX) {
+                    const WASMComponentTypes *elem_type_entry =
+                        wasm_component_lookup_type(
+                            component,
+                            def_type->def_val.list->element_type
+                                ->type_specific.type_idx);
+                    if (elem_type_entry
+                        && elem_type_entry->tag == WASM_COMP_DEF_TYPE
+                        && elem_type_entry->type.def_val_type) {
+                        uint8 elem_tag =
+                            elem_type_entry->type.def_val_type->tag;
+                        is_scalar_defined =
+                            elem_tag == WASM_COMP_DEF_VAL_ENUM
+                            || elem_tag == WASM_COMP_DEF_VAL_FLAGS;
+                    }
+                }
+                if (!is_scalar_defined)
+                    return set_component_runtime_error_fmt(
+                        error_buf, error_buf_size,
+                        "component canon lift function parameter %u only "
+                        "supports variable-length list<scalar>/list<string> "
+                        "leaves inside tuple/record parameters",
+                        param_index);
+                *has_list_scalar_leaf_out = true;
+                return true;
+            }
             if (prim_type == WASM_COMP_PRIMVAL_STRING)
                 *has_list_string_leaf_out = true;
             else if (component_scalar_prim_byte_size(prim_type) > 0)
@@ -6128,12 +6171,34 @@ classify_component_runtime_composite_result(const WASMComponent *component,
                     component, def_type->def_val.list->element_type,
                     &is_primitive, &prim_type, error_buf, error_buf_size))
                 return false;
-            if (!is_primitive)
-                return set_component_runtime_error_fmt(
-                    error_buf, error_buf_size,
-                    "component canon lift function result 0 only supports "
-                    "variable-length list<scalar>/list<string> leaves inside "
-                    "tuple/record results");
+            if (!is_primitive) {
+                bool is_scalar_defined = false;
+                if (def_type->def_val.list->element_type->type
+                    == WASM_COMP_VAL_TYPE_IDX) {
+                    const WASMComponentTypes *elem_type_entry =
+                        wasm_component_lookup_type(
+                            component,
+                            def_type->def_val.list->element_type
+                                ->type_specific.type_idx);
+                    if (elem_type_entry
+                        && elem_type_entry->tag == WASM_COMP_DEF_TYPE
+                        && elem_type_entry->type.def_val_type) {
+                        uint8 elem_tag =
+                            elem_type_entry->type.def_val_type->tag;
+                        is_scalar_defined =
+                            elem_tag == WASM_COMP_DEF_VAL_ENUM
+                            || elem_tag == WASM_COMP_DEF_VAL_FLAGS;
+                    }
+                }
+                if (!is_scalar_defined)
+                    return set_component_runtime_error_fmt(
+                        error_buf, error_buf_size,
+                        "component canon lift function result 0 only supports "
+                        "variable-length list<scalar>/list<string> leaves "
+                        "inside tuple/record results");
+                *has_list_scalar_leaf_out = true;
+                return true;
+            }
             if (prim_type == WASM_COMP_PRIMVAL_STRING)
                 *has_list_string_leaf_out = true;
             else if (component_scalar_prim_byte_size(prim_type) > 0)
@@ -6306,6 +6371,28 @@ lookup_component_canon_lift_value_type(const WASMComponent *component,
                 out_info->declared_as_defined = true;
                 out_info->prim_type = element_prim_type;
                 return true;
+            }
+
+            if (!is_primitive) {
+                const WASMComponentTypes *elem_type_entry =
+                    wasm_component_lookup_type(
+                        component,
+                        def_type->def_val.list->element_type->type_specific
+                            .type_idx);
+                if (elem_type_entry && elem_type_entry->tag == WASM_COMP_DEF_TYPE
+                    && elem_type_entry->type.def_val_type) {
+                    uint8 elem_tag =
+                        elem_type_entry->type.def_val_type->tag;
+                    if (elem_tag == WASM_COMP_DEF_VAL_ENUM
+                        || elem_tag == WASM_COMP_DEF_VAL_FLAGS) {
+                        memset(out_info, 0, sizeof(*out_info));
+                        out_info->kind =
+                            WASM_COMP_CANON_LIFT_VALUE_LIST_SCALAR;
+                        out_info->declared_as_defined = true;
+                        out_info->prim_type = WASM_COMP_PRIMVAL_U32;
+                        return true;
+                    }
+                }
             }
 
             if (allow_list_string && is_primitive
