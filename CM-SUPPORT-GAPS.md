@@ -311,6 +311,8 @@ This is now a real but narrow operational slice, not yet full resource semantics
 - `variant<scalar>` type params and results through the canon lift path,
   including N-case variants with per-discriminant case selection and
   payload dispatch
+- `alias outer` for core func, table, memory, and global sorts in
+  nested components
 
 ## 2. What is still missing for full component-model support
 
@@ -747,9 +749,11 @@ Nested components now support:
 
 Nested components still reject:
 
-- nested `alias outer` for core runtime refs
 - broader operational use of nested `core type` entries beyond the current
   typed core-module import matching subset
+
+(Nested `alias outer` for core runtime refs now works for func, table,
+memory, and global sorts.)
 
 The runtime can now thread nested local core-module handles and construct nested
 local/synthetic core instances, including the current nested core-function,
@@ -801,4 +805,4 @@ If this feature is described as:
 
 The right maturity label today is:
 
-> **A real but still partial component runtime: public host APIs, scalar / UTF-8 string / `list<scalar>` / limited tuple-record / enum / flags canon-lift calls, a narrow executable direct-core-call `canon lower` subset, supported host-provided component-function imports, runtime values, value imports/exports, start execution slices, a narrow scalar local/imported resource-call subset (including borrowed callback results), and a limited nested core-runtime subset for local core modules/instances plus nested core `func`/`memory`/`table`/`global` aliases are implemented; full support is still blocked on broader canon-lower/imported-function lowering, broader composite Canonical ABI and value semantics, operational resources, remaining host API gaps, and the rest of nested core-runtime support.**
+> **A real but still partial component runtime: public host APIs, scalar / UTF-8 string / `list<scalar>` / `list<record>` / tuple-record / enum / flags / option / result / variant canon-lift calls, a narrow executable direct-core-call `canon lower` subset, supported host-provided component-function imports, runtime values, value imports/exports, start execution slices, a narrow scalar local/imported resource-call subset (including borrowed callback results), and a limited nested core-runtime subset for local core modules/instances plus nested core `func`/`memory`/`table`/`global` aliases and `alias outer` for core sorts are implemented; full support is still blocked on broader canon-lower/imported-function lowering, `list<variant>` and other composite list elements, operational resources, remaining host API gaps, and non-flat nested core type usage.**
