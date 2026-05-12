@@ -305,9 +305,9 @@ This is now a real but narrow operational slice, not yet full resource semantics
 - `option<scalar>`, `option<string>`, and `option<list<u8>>` type params
   through the canon lift path, including both the `none` and `some`
   discriminants with correct dummy-payload-width emission
-- `result<scalar,scalar>` type params and results through the canon lift
-  path, including both `ok` and `error` discriminants with per-case
-  payload dispatch
+- `result<scalar,scalar>` and `result<u32, string>` type params through
+  the canon lift path, including both `ok` and `error` discriminants
+  with per-case payload dispatch and max-width padding
 - `variant<scalar>` type params and results through the canon lift path,
   including N-case variants with per-discriminant case selection and
   payload dispatch
@@ -517,9 +517,9 @@ What is still missing:
 (Enum, flags, list<enum>, list<flags>, option<scalar>, option<string>,
 option<list<scalar>>, result<scalar,scalar>, and variant<scalar> (both
 params and results) are now supported in the Canonical ABI. These types
-are treated as composite types with a discriminant and inner payload(s);
+are treated as   composite types with a discriminant and inner payload(s);
 the current implementation covers scalar, string, and list<u8> payloads
-for option and result.)
+for option, result, and variant.)
 
 Today, composite value support is still mostly "opaque bytes plus limited special cases", not full typed component-value semantics.
 
