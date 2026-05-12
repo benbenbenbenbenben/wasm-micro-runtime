@@ -388,7 +388,16 @@ wasm_component_detach_matching_public_resource_value(
         return;
 
     for (i = 0; i < count; i++) {
-        if (wasm_component_get_public_resource_value(&values[i]) == match)
+        WASMComponentPublicResourceValue *candidate =
+            wasm_component_get_public_resource_value(&values[i]);
+        bool same_transferred_identity =
+            candidate && match
+            && candidate->kind == WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_TRANSFERRED
+            && match->kind == WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_TRANSFERRED
+            && candidate->resource_state == match->resource_state
+            && candidate->resource_type_idx == match->resource_type_idx
+            && candidate->handle == match->handle;
+        if (candidate == match || same_transferred_identity)
             wasm_component_clear_public_resource_value(&values[i]);
     }
 }

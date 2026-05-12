@@ -218,6 +218,23 @@ validate_host_component_public_composite_result_value(
     uint32 result_index);
 
 static bool
+drop_component_owned_resource_handle_internal(
+    WASMComponentInstance *inst,
+    const WASMComponentRuntimeResourceState *resource_state,
+    uint32 resource_type_idx, uint32 handle, bool *consumed_out);
+
+static bool
+find_lowered_import_borrowed_result_caller_handle(
+    WASMComponentInstance *inst, wasm_component_value_t *call_args,
+    uint32 param_count, const uint32 *borrow_arg_caller_handles,
+    wasm_component_value_t *result, uint32 *caller_handle_out);
+
+static bool
+lowered_import_owned_result_matches_current_arg(
+    uint32 handle, uint32 resource_type_idx, const uint32 *owned_arg_caller_handles,
+    const uint32 *owned_arg_resource_type_idxs, uint32 param_count);
+
+static bool
 compute_component_canon_abi_layout(WASMComponentInstance *inst,
                                    const WASMComponent *component,
                                    const WASMComponentValueType *value_type,
@@ -2644,6 +2661,8 @@ validate_lowered_import_signature(
         for (i = 0; i < expected_result_count; i++) {
             WASMComponentCanonLiftValueShape shape;
             WASMComponentCanonLiftValueInfo type_info;
+            bool has_owned_resource_result = false;
+            bool has_borrowed_resource_result = false;
 
             wasm_runtime_clear_exception((WASMModuleInstanceCommon *)component_inst);
             if (!resolve_component_canon_lift_value_shape(
@@ -2659,9 +2678,19 @@ validate_lowered_import_signature(
                 continue;
 
             wasm_runtime_clear_exception((WASMModuleInstanceCommon *)component_inst);
-            if (!lookup_component_canon_lift_value_type(
-                    component, &component_type->results->results[i], "result", i,
-                    true, false, true, true, &type_info, component_inst))
+            if (!try_lookup_component_owned_resource_transfer_type(
+                    component_inst, lowered_function->resource_state, component,
+                    &component_type->results->results[i], "result", i,
+                    &has_owned_resource_result, &type_info, NULL)
+                || (!has_owned_resource_result
+                    && !try_lookup_component_borrowed_resource_param_type(
+                        component_inst, lowered_function->resource_state, component,
+                        &component_type->results->results[i], "result", i,
+                        &has_borrowed_resource_result, &type_info, NULL))
+                || (!has_owned_resource_result && !has_borrowed_resource_result
+                    && !lookup_component_canon_lift_value_type(
+                        component, &component_type->results->results[i], "result", i,
+                        true, false, true, true, &type_info, component_inst)))
                 return set_component_runtime_error_from_exception(
                     component_inst, error_buf, error_buf_size,
                     "component canon lower result type resolution failed");
@@ -2674,7 +2703,7 @@ validate_lowered_import_signature(
                     error_buf, error_buf_size,
                     "component canon lower direct core-call bindings currently "
                     "support only scalar, string, list<scalar>, list<string>, "
-                    "or tuple/record multi-results");
+                    "own/borrow resource, or tuple/record multi-results");
         }
 
         wasm_runtime_clear_exception((WASMModuleInstanceCommon *)component_inst);
@@ -3222,17 +3251,33 @@ materialize_lowered_import_multi_results(
     WASMComponentFuncType *component_type,
     WASMComponentRuntimeStringEncoding lower_string_encoding,
     wasm_component_value_t *results, uint32 result_count,
+    const WASMComponentRuntimeResourceState *resource_state,
+    wasm_component_value_t *call_args, uint32 param_count,
+    const uint32 *owned_arg_caller_handles,
+    const uint32 *owned_arg_resource_type_idxs,
+    const uint32 *borrow_arg_caller_handles,
     WASMModuleInstanceCommon *caller_module_inst, uint32 result_area_ptr)
 {
     WASMComponentCanonLiftValueInfo stack_type_infos[16];
     LoweredImportMultiResultDecoded stack_decoded[16];
     uint32 stack_offsets[16];
     uint32 stack_sizes[16];
+    uint32 stack_resource_type_idxs[16];
+    uint32 stack_rollback_handles[16];
+    uint32 stack_rollback_type_idxs[16];
+    bool stack_is_owned_resource[16];
+    bool stack_is_borrowed_resource[16];
     WASMComponentCanonLiftValueInfo *type_infos = stack_type_infos;
     LoweredImportMultiResultDecoded *decoded = stack_decoded;
     uint32 *result_offsets = stack_offsets;
     uint32 *result_sizes = stack_sizes;
+    uint32 *resource_type_idxs = stack_resource_type_idxs;
+    uint32 *rollback_handles = stack_rollback_handles;
+    uint32 *rollback_type_idxs = stack_rollback_type_idxs;
+    bool *is_owned_resource = stack_is_owned_resource;
+    bool *is_borrowed_resource = stack_is_borrowed_resource;
     uint32 result_vector_size = 0, result_vector_align = 1, payload_cursor;
+    uint32 rollback_count = 0;
     bool has_string_leaf = false;
     bool has_list_scalar_leaf = false;
     bool has_list_string_leaf = false;
@@ -3246,7 +3291,19 @@ materialize_lowered_import_multi_results(
         decoded = wasm_runtime_malloc(sizeof(*decoded) * result_count);
         result_offsets = wasm_runtime_malloc(sizeof(*result_offsets) * result_count);
         result_sizes = wasm_runtime_malloc(sizeof(*result_sizes) * result_count);
-        if (!type_infos || !decoded || !result_offsets || !result_sizes) {
+        resource_type_idxs =
+            wasm_runtime_malloc(sizeof(*resource_type_idxs) * result_count);
+        rollback_handles =
+            wasm_runtime_malloc(sizeof(*rollback_handles) * result_count);
+        rollback_type_idxs =
+            wasm_runtime_malloc(sizeof(*rollback_type_idxs) * result_count);
+        is_owned_resource =
+            wasm_runtime_malloc(sizeof(*is_owned_resource) * result_count);
+        is_borrowed_resource =
+            wasm_runtime_malloc(sizeof(*is_borrowed_resource) * result_count);
+        if (!type_infos || !decoded || !result_offsets || !result_sizes
+            || !resource_type_idxs || !rollback_handles || !rollback_type_idxs
+            || !is_owned_resource || !is_borrowed_resource) {
             wasm_runtime_set_exception(
                 caller_module_inst,
                 "component lowered core-call trampoline could not allocate "
@@ -3257,6 +3314,9 @@ materialize_lowered_import_multi_results(
 
     memset(type_infos, 0, sizeof(*type_infos) * result_count);
     memset(decoded, 0, sizeof(*decoded) * result_count);
+    memset(resource_type_idxs, 0xFF, sizeof(*resource_type_idxs) * result_count);
+    memset(is_owned_resource, 0, sizeof(*is_owned_resource) * result_count);
+    memset(is_borrowed_resource, 0, sizeof(*is_borrowed_resource) * result_count);
 
     wasm_runtime_clear_exception((WASMModuleInstanceCommon *)component_inst);
     if (!compute_component_canon_abi_result_vector_layout(
@@ -3287,6 +3347,8 @@ materialize_lowered_import_multi_results(
 
     for (uint32 i = 0; i < result_count; i++) {
         WASMComponentCanonLiftValueShape shape = { 0 };
+        bool owned_resource = false;
+        bool borrowed_resource = false;
 
         wasm_runtime_clear_exception((WASMModuleInstanceCommon *)component_inst);
         if (!resolve_component_canon_lift_value_shape(
@@ -3309,10 +3371,19 @@ materialize_lowered_import_multi_results(
                 || shape.def_type->tag == WASM_COMP_DEF_VAL_TUPLE))
             continue;
 
-        wasm_runtime_clear_exception((WASMModuleInstanceCommon *)component_inst);
-        if (!lookup_component_canon_lift_value_type(
-                component, &component_type->results->results[i], "result", i, true,
-                false, true, true, &type_infos[i], component_inst)) {
+        if (!try_lookup_component_owned_resource_transfer_type(
+                component_inst, resource_state, component,
+                &component_type->results->results[i], "result", i, &owned_resource,
+                &type_infos[i], &resource_type_idxs[i])
+            || (!owned_resource
+                && !try_lookup_component_borrowed_resource_param_type(
+                    component_inst, resource_state, component,
+                    &component_type->results->results[i], "result", i,
+                    &borrowed_resource, &type_infos[i], &resource_type_idxs[i]))
+            || (!owned_resource && !borrowed_resource
+                && !lookup_component_canon_lift_value_type(
+                    component, &component_type->results->results[i], "result", i,
+                    true, false, true, true, &type_infos[i], component_inst))) {
             const char *component_exception = wasm_runtime_get_exception(
                 (WASMModuleInstanceCommon *)component_inst);
             wasm_runtime_set_exception(
@@ -3324,12 +3395,17 @@ materialize_lowered_import_multi_results(
             wasm_runtime_clear_exception((WASMModuleInstanceCommon *)component_inst);
             goto cleanup;
         }
+        is_owned_resource[i] = owned_resource;
+        is_borrowed_resource[i] = borrowed_resource;
 
         switch (type_infos[i].kind) {
             case WASM_COMP_CANON_LIFT_VALUE_SCALAR:
-                if (!decode_component_public_scalar_value(component_inst, &results[i],
-                                                          &type_infos[i], "result", i,
-                                                          &decoded[i].scalar)) {
+                if (borrowed_resource) {
+                    break;
+                }
+                if (!decode_component_public_scalar_value(
+                        component_inst, &results[i], &type_infos[i], "result", i,
+                        &decoded[i].scalar)) {
                     const char *component_exception = wasm_runtime_get_exception(
                         (WASMModuleInstanceCommon *)component_inst);
                     wasm_runtime_set_exception(
@@ -3551,8 +3627,56 @@ materialize_lowered_import_multi_results(
                 continue;
             }
 
+            if (is_borrowed_resource[i]) {
+                wasm_val_t lowered_borrow = { 0 };
+                uint32 caller_handle = 0;
+
+                if (!find_lowered_import_borrowed_result_caller_handle(
+                        component_inst, call_args, param_count,
+                        borrow_arg_caller_handles, &results[i], &caller_handle)) {
+                    const char *component_exception = wasm_runtime_get_exception(
+                        (WASMModuleInstanceCommon *)component_inst);
+                    if (component_exception) {
+                        wasm_runtime_set_exception(caller_module_inst,
+                                                   component_exception);
+                        wasm_runtime_clear_exception(
+                            (WASMModuleInstanceCommon *)component_inst);
+                    }
+                    goto cleanup;
+                }
+
+                lowered_borrow.kind = WASM_I32;
+                lowered_borrow.of.i32 = (int32)caller_handle;
+                if (!store_component_canon_memory_scalar_value(
+                        component_inst, type_infos[i].prim_type, &lowered_borrow,
+                        result_slot, result_sizes[i])) {
+                    const char *component_exception = wasm_runtime_get_exception(
+                        (WASMModuleInstanceCommon *)component_inst);
+                    wasm_runtime_set_exception(
+                        caller_module_inst,
+                        component_exception
+                            ? component_exception
+                            : "component lowered core-call trampoline could not "
+                              "materialize the component result");
+                    wasm_runtime_clear_exception(
+                        (WASMModuleInstanceCommon *)component_inst);
+                    goto cleanup;
+                }
+                continue;
+            }
+
         switch (type_infos[i].kind) {
             case WASM_COMP_CANON_LIFT_VALUE_SCALAR:
+                if (is_owned_resource[i]
+                    && !lowered_import_owned_result_matches_current_arg(
+                        (uint32)decoded[i].scalar.of.i32, resource_type_idxs[i],
+                        owned_arg_caller_handles, owned_arg_resource_type_idxs,
+                        param_count)) {
+                    rollback_handles[rollback_count] =
+                        (uint32)decoded[i].scalar.of.i32;
+                    rollback_type_idxs[rollback_count] = resource_type_idxs[i];
+                    rollback_count++;
+                }
                 if (!store_component_canon_memory_scalar_value(
                         component_inst, type_infos[i].prim_type, &decoded[i].scalar,
                         result_slot, result_sizes[i])) {
@@ -3689,6 +3813,17 @@ materialize_lowered_import_multi_results(
     ok = true;
 
 cleanup:
+    if (!ok && rollback_count > 0) {
+        for (uint32 i = 0; i < rollback_count; i++) {
+            bool consumed = false;
+            if (!drop_component_owned_resource_handle_internal(
+                    component_inst, resource_state, rollback_type_idxs[i],
+                    rollback_handles[i], &consumed)) {
+                wasm_runtime_clear_exception(
+                    (WASMModuleInstanceCommon *)component_inst);
+            }
+        }
+    }
     if (type_infos != stack_type_infos)
         wasm_runtime_free(type_infos);
     if (decoded != stack_decoded)
@@ -3697,6 +3832,16 @@ cleanup:
         wasm_runtime_free(result_offsets);
     if (result_sizes != stack_sizes)
         wasm_runtime_free(result_sizes);
+    if (resource_type_idxs != stack_resource_type_idxs)
+        wasm_runtime_free(resource_type_idxs);
+    if (rollback_handles != stack_rollback_handles)
+        wasm_runtime_free(rollback_handles);
+    if (rollback_type_idxs != stack_rollback_type_idxs)
+        wasm_runtime_free(rollback_type_idxs);
+    if (is_owned_resource != stack_is_owned_resource)
+        wasm_runtime_free(is_owned_resource);
+    if (is_borrowed_resource != stack_is_borrowed_resource)
+        wasm_runtime_free(is_borrowed_resource);
     return ok;
 }
 
@@ -3714,7 +3859,11 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
     wasm_component_value_t stack_results[16];
     wasm_component_value_t *call_args = stack_args;
     wasm_component_value_t *call_results = stack_results;
+    uint32 stack_owned_arg_caller_handles[16];
+    uint32 stack_owned_arg_resource_type_idxs[16];
     uint32 stack_borrow_arg_caller_handles[16];
+    uint32 *owned_arg_caller_handles = stack_owned_arg_caller_handles;
+    uint32 *owned_arg_resource_type_idxs = stack_owned_arg_resource_type_idxs;
     uint32 *borrow_arg_caller_handles = stack_borrow_arg_caller_handles;
     uint32 param_count, expected_result_count, core_param_index = 0, i;
     bool call_ok;
@@ -3821,11 +3970,22 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
         return;
     }
     memset(call_results, 0, sizeof(wasm_component_value_t) * expected_result_count);
+    memset(owned_arg_caller_handles, 0, sizeof(uint32) * param_count);
+    for (i = 0; i < param_count; i++)
+        owned_arg_resource_type_idxs[i] = WASM_COMPONENT_RESOURCE_INVALID_TYPE_IDX;
     if (param_count > sizeof(stack_borrow_arg_caller_handles)
                           / sizeof(stack_borrow_arg_caller_handles[0])) {
+        owned_arg_caller_handles = wasm_runtime_malloc(sizeof(uint32) * param_count);
+        owned_arg_resource_type_idxs =
+            wasm_runtime_malloc(sizeof(uint32) * param_count);
         borrow_arg_caller_handles =
             wasm_runtime_malloc(sizeof(uint32) * param_count);
-        if (!borrow_arg_caller_handles) {
+        if (!owned_arg_caller_handles || !owned_arg_resource_type_idxs
+            || !borrow_arg_caller_handles) {
+            if (owned_arg_caller_handles)
+                wasm_runtime_free(owned_arg_caller_handles);
+            if (owned_arg_resource_type_idxs)
+                wasm_runtime_free(owned_arg_resource_type_idxs);
             if (call_args != stack_args)
                 wasm_runtime_free(call_args);
             wasm_runtime_set_exception(
@@ -3834,8 +3994,25 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
                 "borrowed argument tracking");
             return;
         }
+        memset(owned_arg_caller_handles, 0, sizeof(uint32) * param_count);
+        for (i = 0; i < param_count; i++)
+            owned_arg_resource_type_idxs[i] =
+                WASM_COMPONENT_RESOURCE_INVALID_TYPE_IDX;
     }
     memset(borrow_arg_caller_handles, 0, sizeof(uint32) * param_count);
+
+#define FREE_LOWERED_ARG_TRACKING()                                             \
+    do {                                                                        \
+        if (call_args != stack_args)                                            \
+            wasm_runtime_free(call_args);                                       \
+        if (owned_arg_caller_handles != stack_owned_arg_caller_handles)         \
+            wasm_runtime_free(owned_arg_caller_handles);                        \
+        if (owned_arg_resource_type_idxs                                        \
+            != stack_owned_arg_resource_type_idxs)                              \
+            wasm_runtime_free(owned_arg_resource_type_idxs);                    \
+        if (borrow_arg_caller_handles != stack_borrow_arg_caller_handles)       \
+            wasm_runtime_free(borrow_arg_caller_handles);                       \
+    } while (0)
 
     if (expected_result_count > 1) {
         expects_memory_result_ptr = true;
@@ -3989,16 +4166,18 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
         {
             bool has_owned_resource_param = false;
             bool has_borrowed_resource_param = false;
+            uint32 resource_type_idx = WASM_COMPONENT_RESOURCE_INVALID_TYPE_IDX;
 
             if (!try_lookup_component_owned_resource_transfer_type(
                     component_inst, lowered_function->resource_state, component,
                     component_type->params->params[i].value_type, "parameter", i,
-                    &has_owned_resource_param, &type_info, NULL)
+                    &has_owned_resource_param, &type_info, &resource_type_idx)
                 || (!has_owned_resource_param
                     && !try_lookup_component_borrowed_resource_param_type(
                         component_inst, lowered_function->resource_state, component,
                         component_type->params->params[i].value_type, "parameter",
-                        i, &has_borrowed_resource_param, &type_info, NULL))
+                        i, &has_borrowed_resource_param, &type_info,
+                        &resource_type_idx))
                 || (!has_owned_resource_param && !has_borrowed_resource_param
                     && !lookup_component_canon_lift_value_type(
                         component, component_type->params->params[i].value_type,
@@ -4018,6 +4197,11 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
                 return;
             }
 
+            if (has_owned_resource_param
+                && func_type->types[core_param_index] == VALUE_TYPE_I32) {
+                owned_arg_caller_handles[i] = (uint32)raw_args[core_param_index];
+                owned_arg_resource_type_idxs[i] = resource_type_idx;
+            }
             if (has_borrowed_resource_param
                 && func_type->types[core_param_index] == VALUE_TYPE_I32)
                 borrow_arg_caller_handles[i] = (uint32)raw_args[core_param_index];
@@ -4400,8 +4584,7 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
         != func_type->param_count - (expects_memory_result_ptr ? 1u : 0u)) {
         for (i = 0; i < param_count; i++)
             wasm_component_value_destroy(&call_args[i]);
-        if (call_args != stack_args)
-            wasm_runtime_free(call_args);
+        FREE_LOWERED_ARG_TRACKING();
         wasm_runtime_set_exception(caller_module_inst,
                                    "component lowered core-call trampoline "
                                    "parameter arity mismatch");
@@ -4418,10 +4601,7 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
             wasm_runtime_get_exception((WASMModuleInstanceCommon *)component_inst);
         for (i = 0; i < param_count; i++)
             wasm_component_value_destroy(&call_args[i]);
-        if (call_args != stack_args)
-            wasm_runtime_free(call_args);
-        if (borrow_arg_caller_handles != stack_borrow_arg_caller_handles)
-            wasm_runtime_free(borrow_arg_caller_handles);
+        FREE_LOWERED_ARG_TRACKING();
         wasm_runtime_set_exception(caller_module_inst,
                                    component_exception
                                        ? component_exception
@@ -4432,23 +4612,11 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
     if (!has_borrowed_resource_result) {
         for (i = 0; i < param_count; i++)
             wasm_component_value_destroy(&call_args[i]);
-        if (call_args != stack_args)
-            wasm_runtime_free(call_args);
-        if (borrow_arg_caller_handles != stack_borrow_arg_caller_handles)
-            wasm_runtime_free(borrow_arg_caller_handles);
+        FREE_LOWERED_ARG_TRACKING();
     }
 
     if (expected_result_count > 1) {
         uint32 result_area_ptr = (uint32)raw_args[core_param_index];
-
-        if (has_borrowed_resource_result) {
-            destroy_component_public_values(call_results, expected_result_count);
-            wasm_runtime_set_exception(
-                caller_module_inst,
-                "component lowered core-call trampoline does not support "
-                "borrowed resource multi-results");
-            return;
-        }
 
         if (func_type->result_count != 0 || core_param_index >= func_type->param_count) {
             destroy_component_public_values(call_results, expected_result_count);
@@ -4470,8 +4638,10 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
 
         if (!materialize_lowered_import_multi_results(
                 component_inst, component, component_type, lower_string_encoding,
-                call_results, expected_result_count, caller_module_inst,
-                result_area_ptr)) {
+                call_results, expected_result_count, lowered_function->resource_state,
+                call_args, param_count, owned_arg_caller_handles,
+                owned_arg_resource_type_idxs, borrow_arg_caller_handles,
+                caller_module_inst, result_area_ptr)) {
             destroy_component_public_values(call_results, expected_result_count);
             return;
         }
@@ -4485,24 +4655,19 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
         wasm_val_t core_result = { 0 };
 
         if (has_borrowed_resource_result) {
-            WASMComponentPublicResourceValue *resource_value =
-                wasm_component_get_public_resource_value(&stack_results[0]);
-            uint32 matched_arg_index = UINT32_MAX;
+            uint32 caller_handle = 0;
 
             if (func_type->result_count != 1
                 || func_type->types[func_type->param_count] != VALUE_TYPE_I32
-                || !resource_value
-                || resource_value->kind
-                       != WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_BORROWED) {
+                || !find_lowered_import_borrowed_result_caller_handle(
+                    component_inst, call_args, param_count, borrow_arg_caller_handles,
+                    &stack_results[0], &caller_handle)) {
                 const char *component_exception =
                     wasm_runtime_get_exception(
                         (WASMModuleInstanceCommon *)component_inst);
                 for (i = 0; i < param_count; i++)
                     wasm_component_value_destroy(&call_args[i]);
-                if (call_args != stack_args)
-                    wasm_runtime_free(call_args);
-                if (borrow_arg_caller_handles != stack_borrow_arg_caller_handles)
-                    wasm_runtime_free(borrow_arg_caller_handles);
+                FREE_LOWERED_ARG_TRACKING();
                 wasm_component_value_destroy(&stack_results[0]);
                 wasm_runtime_set_exception(
                     caller_module_inst,
@@ -4514,43 +4679,10 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
                     (WASMModuleInstanceCommon *)component_inst);
                 return;
             }
-
-            for (uint32 arg_i = 0; arg_i < param_count; arg_i++) {
-                if (wasm_component_public_resource_values_have_same_borrowed_owner(
-                        resource_value,
-                        wasm_component_get_public_resource_value(
-                            &call_args[arg_i]))
-                    && borrow_arg_caller_handles[arg_i] > 0) {
-                    matched_arg_index = arg_i;
-                    break;
-                }
-            }
-            if (matched_arg_index == UINT32_MAX) {
-                for (i = 0; i < param_count; i++)
-                    wasm_component_value_destroy(&call_args[i]);
-                if (call_args != stack_args)
-                    wasm_runtime_free(call_args);
-                if (borrow_arg_caller_handles != stack_borrow_arg_caller_handles)
-                    wasm_runtime_free(borrow_arg_caller_handles);
-                wasm_component_value_destroy(&stack_results[0]);
-                wasm_runtime_set_exception(
-                    caller_module_inst,
-                    "component lowered core-call trampoline borrowed result "
-                    "must alias a current borrowed argument");
-                return;
-            }
-
-            raw_args[0] = borrow_arg_caller_handles[matched_arg_index];
-            if (wasm_component_get_public_resource_value(
-                    &call_args[matched_arg_index]) == resource_value)
-                wasm_component_clear_public_resource_value(
-                    &call_args[matched_arg_index]);
+            raw_args[0] = caller_handle;
             for (i = 0; i < param_count; i++)
                 wasm_component_value_destroy(&call_args[i]);
-            if (call_args != stack_args)
-                wasm_runtime_free(call_args);
-            if (borrow_arg_caller_handles != stack_borrow_arg_caller_handles)
-                wasm_runtime_free(borrow_arg_caller_handles);
+            FREE_LOWERED_ARG_TRACKING();
             wasm_component_value_destroy(&stack_results[0]);
             return;
         }
@@ -4562,18 +4694,15 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
             || !decode_component_public_scalar_value(component_inst, &stack_results[0],
                                                      &result_type_info, "result", 0,
                                                      &core_result)) {
-            const char *component_exception =
-                wasm_runtime_get_exception((WASMModuleInstanceCommon *)component_inst);
-            if (has_borrowed_resource_result) {
-                for (i = 0; i < param_count; i++)
-                    wasm_component_value_destroy(&call_args[i]);
-                if (call_args != stack_args)
-                    wasm_runtime_free(call_args);
-                if (borrow_arg_caller_handles != stack_borrow_arg_caller_handles)
-                    wasm_runtime_free(borrow_arg_caller_handles);
-            }
-            wasm_component_value_destroy(&stack_results[0]);
-            wasm_runtime_set_exception(caller_module_inst,
+                const char *component_exception =
+                    wasm_runtime_get_exception((WASMModuleInstanceCommon *)component_inst);
+                if (has_borrowed_resource_result) {
+                    for (i = 0; i < param_count; i++)
+                        wasm_component_value_destroy(&call_args[i]);
+                    FREE_LOWERED_ARG_TRACKING();
+                }
+                wasm_component_value_destroy(&stack_results[0]);
+                wasm_runtime_set_exception(caller_module_inst,
                                        component_exception
                                            ? component_exception
                                            : "component lowered core-call "
@@ -4603,10 +4732,7 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
                 if (has_borrowed_resource_result) {
                     for (i = 0; i < param_count; i++)
                         wasm_component_value_destroy(&call_args[i]);
-                    if (call_args != stack_args)
-                        wasm_runtime_free(call_args);
-                    if (borrow_arg_caller_handles != stack_borrow_arg_caller_handles)
-                        wasm_runtime_free(borrow_arg_caller_handles);
+                    FREE_LOWERED_ARG_TRACKING();
                 }
                 wasm_component_value_destroy(&stack_results[0]);
                 wasm_runtime_set_exception(
@@ -4619,10 +4745,7 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
         if (has_borrowed_resource_result) {
             for (i = 0; i < param_count; i++)
                 wasm_component_value_destroy(&call_args[i]);
-            if (call_args != stack_args)
-                wasm_runtime_free(call_args);
-            if (borrow_arg_caller_handles != stack_borrow_arg_caller_handles)
-                wasm_runtime_free(borrow_arg_caller_handles);
+            FREE_LOWERED_ARG_TRACKING();
         }
         wasm_component_value_destroy(&stack_results[0]);
     }
@@ -6174,8 +6297,9 @@ resolve_component_owned_result_type(
             inst, "component function result %u is out of bounds", result_index);
 
     if (!try_lookup_component_droppable_owned_resource_type(
-            inst, resource_state, component, component_type->results->results, "result",
-            result_index, &is_owned_resource, type_info_out, resource_type_idx_out))
+            inst, resource_state, component,
+            &component_type->results->results[result_index], "result", result_index,
+            &is_owned_resource, type_info_out, resource_type_idx_out))
         return false;
 
     if (!is_owned_resource)
@@ -6342,6 +6466,57 @@ cleanup_host_component_resource_arguments(WASMComponentInstance *inst,
     }
 
     return true;
+}
+
+static bool
+find_lowered_import_borrowed_result_caller_handle(
+    WASMComponentInstance *inst, wasm_component_value_t *call_args,
+    uint32 param_count, const uint32 *borrow_arg_caller_handles,
+    wasm_component_value_t *result, uint32 *caller_handle_out)
+{
+    WASMComponentPublicResourceValue *resource_value =
+        wasm_component_get_public_resource_value(result);
+    uint32 matched_arg_index = UINT32_MAX;
+
+    if (!resource_value
+        || resource_value->kind != WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_BORROWED)
+        return set_component_call_error(
+            inst, "component lowered core-call trampoline borrowed result must "
+                  "alias a current borrowed argument");
+
+    for (uint32 arg_i = 0; arg_i < param_count; arg_i++) {
+        if (wasm_component_public_resource_values_have_same_borrowed_owner(
+                resource_value,
+                wasm_component_get_public_resource_value(&call_args[arg_i]))
+            && borrow_arg_caller_handles[arg_i] > 0) {
+            matched_arg_index = arg_i;
+            break;
+        }
+    }
+
+    if (matched_arg_index == UINT32_MAX)
+        return set_component_call_error(
+            inst, "component lowered core-call trampoline borrowed result must "
+                  "alias a current borrowed argument");
+
+    *caller_handle_out = borrow_arg_caller_handles[matched_arg_index];
+    if (wasm_component_get_public_resource_value(&call_args[matched_arg_index])
+        == resource_value)
+        wasm_component_clear_public_resource_value(&call_args[matched_arg_index]);
+    return true;
+}
+
+static bool
+lowered_import_owned_result_matches_current_arg(
+    uint32 handle, uint32 resource_type_idx, const uint32 *owned_arg_caller_handles,
+    const uint32 *owned_arg_resource_type_idxs, uint32 param_count)
+{
+    for (uint32 i = 0; i < param_count; i++) {
+        if (owned_arg_caller_handles[i] == handle
+            && owned_arg_resource_type_idxs[i] == resource_type_idx)
+            return true;
+    }
+    return false;
 }
 
 static bool
@@ -6707,20 +6882,16 @@ validate_component_host_import_func_type(WASMComponentInstance *inst,
                         error_buf_size))
                     return false;
 
-                if (is_owned_resource || is_borrowed_resource)
-                    return set_component_runtime_error_fmt(
-                        error_buf, error_buf_size,
-                        "host component import \"%s\" only supports scalar, "
-                        "string, list<scalar>, list<string>, or tuple/record "
-                        "multi-result signatures",
-                        import_name);
-
                 if (is_string)
                     function->has_string_result = true;
                 if (is_list_scalar)
                     function->has_list_scalar_result = true;
                 if (is_composite)
                     function->has_composite_result = true;
+                if (is_owned_resource)
+                    function->has_owned_resource_result = true;
+                if (is_borrowed_resource)
+                    function->has_borrowed_resource_result = true;
             }
             return true;
         }
@@ -9555,6 +9726,11 @@ compute_component_canon_abi_layout(WASMComponentInstance *inst,
                       "variable-length list<scalar>/list<string> leaves inside "
                       "tuple/record results",
                 result_index);
+        case WASM_COMP_DEF_VAL_OWN:
+        case WASM_COMP_DEF_VAL_BORROW:
+            *size_out = 4;
+            *align_out = 4;
+            return true;
         default:
             return set_component_composite_result_leaf_error(inst, result_index);
     }
@@ -12252,11 +12428,19 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
         wasm_component_value_t *callback_results = stack_callback_results;
         wasm_component_value_t stack_callback_args[16];
         wasm_component_value_t *callback_args = stack_callback_args;
+        uint32 stack_owned_result_handles[4];
+        uint32 stack_owned_result_type_idxs[4];
+        bool stack_owned_result_requires_rollback[4];
+        uint32 *owned_result_handles = stack_owned_result_handles;
+        uint32 *owned_result_type_idxs = stack_owned_result_type_idxs;
+        bool *owned_result_requires_rollback =
+            stack_owned_result_requires_rollback;
         wasm_val_t ignored = { 0 };
         char host_error_buf[128] = { 0 };
         uint32 host_param_count = 0;
         const WASMComponentRuntimeResourceState *host_resource_state =
-            function->resource_state ? function->resource_state : inst->resource_state;
+            function->resource_state ? function->resource_state
+                                     : inst->resource_state;
 
         if (require_top_level_export && !function->is_top_level_export)
             return set_component_call_error(
@@ -12297,13 +12481,34 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
             callback_results =
                 wasm_runtime_malloc(sizeof(wasm_component_value_t)
                                     * expected_result_count);
-            if (!callback_results)
+            owned_result_handles =
+                wasm_runtime_malloc(sizeof(uint32) * expected_result_count);
+            owned_result_type_idxs =
+                wasm_runtime_malloc(sizeof(uint32) * expected_result_count);
+            owned_result_requires_rollback =
+                wasm_runtime_malloc(sizeof(bool) * expected_result_count);
+            if (!callback_results || !owned_result_handles
+                || !owned_result_type_idxs || !owned_result_requires_rollback) {
+                if (callback_results)
+                    wasm_runtime_free(callback_results);
+                if (owned_result_handles)
+                    wasm_runtime_free(owned_result_handles);
+                if (owned_result_type_idxs)
+                    wasm_runtime_free(owned_result_type_idxs);
+                if (owned_result_requires_rollback)
+                    wasm_runtime_free(owned_result_requires_rollback);
                 return set_component_call_error(
                     inst, "host component function could not allocate result "
                           "storage");
+            }
         }
         memset(callback_results, 0,
                sizeof(wasm_component_value_t) * expected_result_count);
+        memset(owned_result_handles, 0, sizeof(uint32) * expected_result_count);
+        memset(owned_result_type_idxs, 0xFF,
+               sizeof(uint32) * expected_result_count);
+        memset(owned_result_requires_rollback, 0,
+               sizeof(bool) * expected_result_count);
 
         if (host_param_count > sizeof(stack_callback_args)
                                    / sizeof(stack_callback_args[0])) {
@@ -12312,6 +12517,13 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
             if (!callback_args) {
                 if (callback_results != stack_callback_results)
                     wasm_runtime_free(callback_results);
+                if (owned_result_handles != stack_owned_result_handles)
+                    wasm_runtime_free(owned_result_handles);
+                if (owned_result_type_idxs != stack_owned_result_type_idxs)
+                    wasm_runtime_free(owned_result_type_idxs);
+                if (owned_result_requires_rollback
+                    != stack_owned_result_requires_rollback)
+                    wasm_runtime_free(owned_result_requires_rollback);
                 return set_component_call_error(
                     inst, "host component function could not allocate argument "
                           "storage");
@@ -12439,6 +12651,13 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
                 wasm_runtime_free(callback_args);
             if (callback_results != stack_callback_results)
                 wasm_runtime_free(callback_results);
+            if (owned_result_handles != stack_owned_result_handles)
+                wasm_runtime_free(owned_result_handles);
+            if (owned_result_type_idxs != stack_owned_result_type_idxs)
+                wasm_runtime_free(owned_result_type_idxs);
+            if (owned_result_requires_rollback
+                != stack_owned_result_requires_rollback)
+                wasm_runtime_free(owned_result_requires_rollback);
             return set_component_call_error_from_host_result(inst, host_error_buf);
         }
 
@@ -12551,10 +12770,15 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
                         wasm_component_value_destroy(&callback_results[result_i]);
                         goto host_import_success_fail;
                     }
+                    else {
+                        owned_result_handles[result_i] = (uint32)handle_value.of.i32;
+                        owned_result_type_idxs[result_i] = result_resource_type_idx;
+                        owned_result_requires_rollback[result_i] = true;
+                    }
 
                     if (!encode_component_public_scalar_value(
                             &result_info, &handle_value,
-                            &callback_results[result_i]))
+                        &callback_results[result_i]))
                         goto host_import_success_fail;
                 }
                 else if (host_borrowed_resource_result) {
@@ -12644,6 +12868,12 @@ wasm_component_call_values_internal(WASMComponentInstance *inst,
             wasm_runtime_free(callback_args);
         if (callback_results != stack_callback_results)
             wasm_runtime_free(callback_results);
+        if (owned_result_handles != stack_owned_result_handles)
+            wasm_runtime_free(owned_result_handles);
+        if (owned_result_type_idxs != stack_owned_result_type_idxs)
+            wasm_runtime_free(owned_result_type_idxs);
+        if (owned_result_requires_rollback != stack_owned_result_requires_rollback)
+            wasm_runtime_free(owned_result_requires_rollback);
         return true;
 
 host_import_param_fail_missing_callback:
@@ -12658,9 +12888,25 @@ host_import_param_fail:
         destroy_component_public_values(callback_results, expected_result_count);
         if (callback_results != stack_callback_results)
             wasm_runtime_free(callback_results);
+        if (owned_result_handles != stack_owned_result_handles)
+            wasm_runtime_free(owned_result_handles);
+        if (owned_result_type_idxs != stack_owned_result_type_idxs)
+            wasm_runtime_free(owned_result_type_idxs);
+        if (owned_result_requires_rollback != stack_owned_result_requires_rollback)
+            wasm_runtime_free(owned_result_requires_rollback);
         return false;
 
 host_import_success_fail:
+        for (uint32 result_i = 0; result_i < expected_result_count; result_i++) {
+            if (owned_result_requires_rollback[result_i]) {
+                bool consumed = false;
+                if (!drop_component_owned_resource_handle_internal(
+                        inst, host_resource_state, owned_result_type_idxs[result_i],
+                        owned_result_handles[result_i], &consumed))
+                    goto host_import_cleanup_fail;
+                owned_result_requires_rollback[result_i] = false;
+            }
+        }
         for (uint32 result_i = 0; result_i < expected_result_count; result_i++) {
             wasm_component_detach_matching_public_resource_value(
                 callback_args, host_param_count,
@@ -12675,6 +12921,12 @@ host_import_success_fail:
         destroy_component_public_values(callback_results, expected_result_count);
         if (callback_results != stack_callback_results)
             wasm_runtime_free(callback_results);
+        if (owned_result_handles != stack_owned_result_handles)
+            wasm_runtime_free(owned_result_handles);
+        if (owned_result_type_idxs != stack_owned_result_type_idxs)
+            wasm_runtime_free(owned_result_type_idxs);
+        if (owned_result_requires_rollback != stack_owned_result_requires_rollback)
+            wasm_runtime_free(owned_result_requires_rollback);
         return false;
 
 host_import_cleanup_fail:
@@ -12689,6 +12941,12 @@ host_import_cleanup_fail:
             wasm_runtime_free(callback_args);
         if (callback_results != stack_callback_results)
             wasm_runtime_free(callback_results);
+        if (owned_result_handles != stack_owned_result_handles)
+            wasm_runtime_free(owned_result_handles);
+        if (owned_result_type_idxs != stack_owned_result_type_idxs)
+            wasm_runtime_free(owned_result_type_idxs);
+        if (owned_result_requires_rollback != stack_owned_result_requires_rollback)
+            wasm_runtime_free(owned_result_requires_rollback);
         return false;
     }
 
@@ -14841,6 +15099,7 @@ append_component_canon_function(WASMComponentInstance *inst,
         func->kind = WASM_COMP_RUNTIME_FUNC_LOWER;
         func->canon_tag = canon->tag;
         func->owner_instance = inst;
+        func->resource_state = inst->resource_state;
         func->type_owner_component = &inst->module->component;
         func->canon_opts = canon->canon_data.lower.canon_opts;
         func->lowered_target = target_ref.of.function;
@@ -14957,6 +15216,7 @@ append_nested_component_canon(
             func->kind = WASM_COMP_RUNTIME_FUNC_LOWER;
             func->canon_tag = canon->tag;
             func->owner_instance = inst;
+            func->resource_state = runtime_inst->resource_state;
             func->type_owner_component = component;
             func->canon_opts = canon->canon_data.lower.canon_opts;
             func->lowered_target = bindings->funcs[canon->canon_data.lower.func_idx]
@@ -17960,6 +18220,7 @@ append_top_level_component_host_import(
     function->kind = WASM_COMP_RUNTIME_FUNC_HOST_IMPORT;
     function->type_idx = component_import->extern_desc->extern_desc.func.type_idx;
     function->owner_instance = inst;
+    function->resource_state = inst->resource_state;
     function->type_owner_component = &inst->module->component;
     function->host_callback = binding->callback;
     function->host_user_data = binding->user_data;

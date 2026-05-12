@@ -525,7 +525,9 @@ Still missing:
 - broader start-section execution for non-scalar multi-result host-imported
   component functions beyond the current tested `string + s32` /
   `list<scalar> + s32` / `record{s32, string, list<scalar>} + s32` subset
-- host-import multi-result execution for broader composite/resource results
+- host-import multi-result execution for broader retptr/canon-lifted
+  resource-result seams beyond the current tested direct callback and direct
+  lowered `own<resource> + s32` / `borrow<resource> + s32` subset
 - retptr-backed Canonical ABI multi-results beyond the current scalar /
   UTF-8 string / `list<scalar>` / `list<string>` / tuple-record-leaf
   result-vector subset
@@ -577,6 +579,19 @@ What exists:
   the currently supported local-resource subset
 - synchronous host callback round-tripping of existing `own<resource>` handles
   through `wasm_runtime_call_component_values(...)` for host function imports
+- synchronous host callback multi-result transport for the current tested
+  direct host-import subset:
+  - `own<resource> + s32` result vectors that round-trip an existing current-call
+    owned handle for the current local-resource subset
+  - fresh imported `own<resource> + s32` result vectors that mint a new owned
+    imported handle through
+    `wasm_component_value_init_owned_imported_resource_result(...)`
+  - `borrow<resource> + s32` result vectors that return a borrowed alias of the
+    current borrowed argument for the current local-resource subset
+  - direct lowered child-core execution of the tested imported
+    `own<resource> + s32` host-import seam on the retptr/result-area path
+  - rollback/restoration when a later result lane fails after an earlier local
+    owned-resource round-trip lane succeeded
 - synchronous host callback transport of borrowed resource parameters for host
   function imports, including both local owned handles and imported handles
   without consuming ownership
@@ -600,6 +615,7 @@ What exists:
     `wasm_runtime_drop_component_owned_result(...)` helper
   - finalizer-driven cleanup when result validation fails before the pending
     token is promoted
+  - the current direct host-import multi-result `own<resource> + s32` subset
 
 What is still missing:
 
@@ -635,9 +651,12 @@ What is still missing:
 - public resource-aware callable component APIs beyond the new
   owned-result drop helper, borrowed-result helper, top-level
   imported-resource binding, and the current owned-resource /
-  borrowed-parameter / scalar borrowed-result call subset; broader borrow/lend
-  behavior, composite/non-scalar borrow-result flows, and stricter caller-side
-  ownership/consumption semantics still remain open
+  borrowed-parameter / scalar borrowed-result call subset plus the current
+  direct host-import/lowered `own<resource> + s32` /
+  `borrow<resource> + s32` multi-result subset; broader borrow/lend behavior,
+  retptr/canon-lift multi-result resource flows, composite/non-scalar
+  borrow-result flows, and stricter caller-side ownership/consumption
+  semantics still remain open
 - full trap/failure-path operational cleanup semantics
 
 So resources now have a narrow executable seam, not a finished runtime.
