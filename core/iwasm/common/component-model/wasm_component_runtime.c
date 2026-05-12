@@ -134,6 +134,12 @@ encode_component_unsigned_leb(uint64 value, uint8 *out_buf);
 static uint32
 encode_component_signed_leb(int64 value, uint8 *out_buf);
 
+static uint32
+component_type_flat_byte_size(WASMComponentInstance *inst,
+                              const WASMComponentRuntimeResourceState *resource_state,
+                              const WASMComponent *component,
+                              const WASMComponentValueType *value_type);
+
 static bool
 wasm_component_call_values_internal(
     WASMComponentInstance *inst, const WASMComponentRuntimeFunc *function,
@@ -3352,9 +3358,23 @@ validate_lowered_import_composite_param_signature(
                     "parameter", param_index, &is_primitive, &element_prim_type,
                     component_inst))
                 return false;
-            if (!is_primitive
-                || (element_prim_type != WASM_COMP_PRIMVAL_STRING
-                    && component_scalar_prim_byte_size(element_prim_type) == 0))
+            if (!is_primitive) {
+                WASMComponentCanonLiftValueShape elem_shape;
+                if (!resolve_component_canon_lift_value_shape(
+                        component, shape.def_type->def_val.list->element_type,
+                        "parameter", param_index, &elem_shape, component_inst))
+                    return false;
+                if (!elem_shape.def_type
+                    || (elem_shape.def_type->tag != WASM_COMP_DEF_VAL_RECORD
+                        && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_TUPLE))
+                    return set_component_runtime_error_fmt(
+                        error_buf, error_buf_size,
+                        "component canon lower direct core-call bindings only "
+                        "support variable-length list<scalar>/list<string> leaves "
+                        "inside tuple/record parameters");
+            }
+            else if (element_prim_type != WASM_COMP_PRIMVAL_STRING
+                     && component_scalar_prim_byte_size(element_prim_type) == 0)
                 return set_component_runtime_error_fmt(
                     error_buf, error_buf_size,
                     "component canon lower direct core-call bindings only "
@@ -5838,7 +5858,9 @@ resolve_component_lift_list_scalar_usage(const WASMComponent *component,
             && elem_type_entry->type.def_val_type) {
             uint8 elem_tag = elem_type_entry->type.def_val_type->tag;
             if (elem_tag == WASM_COMP_DEF_VAL_ENUM
-                || elem_tag == WASM_COMP_DEF_VAL_FLAGS) {
+                || elem_tag == WASM_COMP_DEF_VAL_FLAGS
+                || elem_tag == WASM_COMP_DEF_VAL_RECORD
+                || elem_tag == WASM_COMP_DEF_VAL_TUPLE) {
                 *is_list_scalar = true;
                 return true;
             }
@@ -6041,7 +6063,9 @@ classify_component_runtime_composite_param(const WASMComponent *component,
                             elem_type_entry->type.def_val_type->tag;
                         is_scalar_defined =
                             elem_tag == WASM_COMP_DEF_VAL_ENUM
-                            || elem_tag == WASM_COMP_DEF_VAL_FLAGS;
+                            || elem_tag == WASM_COMP_DEF_VAL_FLAGS
+                            || elem_tag == WASM_COMP_DEF_VAL_RECORD
+                            || elem_tag == WASM_COMP_DEF_VAL_TUPLE;
                     }
                 }
                 if (!is_scalar_defined)
@@ -6271,7 +6295,9 @@ classify_component_runtime_composite_result(const WASMComponent *component,
                             elem_type_entry->type.def_val_type->tag;
                         is_scalar_defined =
                             elem_tag == WASM_COMP_DEF_VAL_ENUM
-                            || elem_tag == WASM_COMP_DEF_VAL_FLAGS;
+                            || elem_tag == WASM_COMP_DEF_VAL_FLAGS
+                            || elem_tag == WASM_COMP_DEF_VAL_RECORD
+                            || elem_tag == WASM_COMP_DEF_VAL_TUPLE;
                     }
                 }
                 if (!is_scalar_defined)
@@ -6518,12 +6544,18 @@ lookup_component_canon_lift_value_type(const WASMComponent *component,
                     uint8 elem_tag =
                         elem_type_entry->type.def_val_type->tag;
                     if (elem_tag == WASM_COMP_DEF_VAL_ENUM
-                        || elem_tag == WASM_COMP_DEF_VAL_FLAGS) {
+                        || elem_tag == WASM_COMP_DEF_VAL_FLAGS
+                        || elem_tag == WASM_COMP_DEF_VAL_RECORD
+                        || elem_tag == WASM_COMP_DEF_VAL_TUPLE) {
                         memset(out_info, 0, sizeof(*out_info));
                         out_info->kind =
                             WASM_COMP_CANON_LIFT_VALUE_LIST_SCALAR;
                         out_info->declared_as_defined = true;
-                        out_info->prim_type = WASM_COMP_PRIMVAL_U32;
+                        out_info->prim_type =
+                            (elem_tag == WASM_COMP_DEF_VAL_ENUM
+                             || elem_tag == WASM_COMP_DEF_VAL_FLAGS)
+                                ? WASM_COMP_PRIMVAL_U32
+                                : 0;
                         return true;
                     }
                 }
@@ -9089,10 +9121,21 @@ validate_component_public_composite_bytes(
                     "parameter", param_index, &is_primitive, &element_prim_type,
                     inst))
                 return false;
-            if (!is_primitive)
-                return set_component_composite_param_list_scalar_leaf_error(
-                    inst, param_index);
-            if (element_prim_type == WASM_COMP_PRIMVAL_STRING) {
+            if (!is_primitive) {
+                uint32 element_size = component_type_flat_byte_size(
+                    inst, inst->resource_state, component,
+                    shape.def_type->def_val.list->element_type);
+                if (element_size == 0)
+                    return set_component_composite_param_list_scalar_leaf_error(
+                        inst, param_index);
+                if (!decode_component_public_list_scalar_prefix(
+                        inst, data ? data + *offset_io : NULL,
+                        byte_size - *offset_io, "parameter", param_index,
+                        element_size,
+                        &ignored_payload, &ignored_payload_len, &consumed))
+                    return false;
+            }
+            else if (element_prim_type == WASM_COMP_PRIMVAL_STRING) {
                 if (!decode_component_public_list_string_prefix(
                         inst, data ? data + *offset_io : NULL,
                         byte_size - *offset_io, "parameter", param_index,
@@ -9101,10 +9144,12 @@ validate_component_public_composite_bytes(
                     return false;
             }
             else if (component_scalar_prim_byte_size(element_prim_type) > 0) {
+                uint32 element_size =
+                    component_scalar_prim_byte_size(element_prim_type);
                 if (!decode_component_public_list_scalar_prefix(
                         inst, data ? data + *offset_io : NULL,
                         byte_size - *offset_io, "parameter", param_index,
-                        component_scalar_prim_byte_size(element_prim_type),
+                        element_size,
                         &ignored_payload, &ignored_payload_len, &consumed))
                     return false;
             }
@@ -9400,10 +9445,6 @@ flatten_component_public_composite_bytes(
                     "parameter", param_index, &is_primitive, &element_prim_type,
                     inst))
                 return false;
-            if (!is_primitive)
-                return set_component_composite_param_list_scalar_leaf_error(
-                    inst, param_index);
-
             if (*core_arg_index_io + 1 >= core_type->param_count)
                 return set_component_param_flattening_error(inst);
 
@@ -9414,7 +9455,68 @@ flatten_component_public_composite_bytes(
                           "match the core function signature",
                     param_index);
 
-            if (element_prim_type == WASM_COMP_PRIMVAL_STRING) {
+            if (!is_primitive) {
+                WASMComponentCanonLiftValueShape elem_shape;
+                uint32 element_size;
+                uint32 element_align = 1;
+
+                if (!resolve_component_canon_lift_value_shape(
+                        component, shape.def_type->def_val.list->element_type,
+                        "parameter", param_index, &elem_shape, inst))
+                    return false;
+                if (!elem_shape.def_type
+                    || (elem_shape.def_type->tag != WASM_COMP_DEF_VAL_RECORD
+                        && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_TUPLE))
+                    return set_component_composite_param_list_scalar_leaf_error(
+                        inst, param_index);
+                element_size = component_type_flat_byte_size(
+                    inst,
+                    function->resource_state ? function->resource_state
+                                             : inst->resource_state,
+                    component, shape.def_type->def_val.list->element_type);
+                if (element_size == 0)
+                    return set_component_composite_param_list_scalar_leaf_error(
+                        inst, param_index);
+
+                if (!decode_component_public_list_scalar_prefix(
+                        inst, data ? data + *offset_io : NULL,
+                        byte_size - *offset_io, "parameter", param_index,
+                        element_size, &payload, &payload_len, &consumed))
+                    return false;
+
+                if (!call_component_canon_realloc_aligned(
+                        inst, function, payload_len, element_align, &guest_ptr))
+                    return false;
+
+                element_count = payload_len / element_size;
+
+                if (guest_ptr != 0 && allocation_tracker
+                    && allocation_tracker->count < allocation_tracker->capacity) {
+                    allocation_tracker
+                        ->allocations[allocation_tracker->count]
+                        .ptr = guest_ptr;
+                    allocation_tracker
+                        ->allocations[allocation_tracker->count]
+                        .size = payload_len;
+                    allocation_tracker->count++;
+                }
+
+                if (payload_len > 0) {
+                    if (!get_component_canon_memory_bytes(
+                            inst, function, guest_ptr, payload_len,
+                            "composite list<scalar> parameter buffer",
+                            &guest_bytes))
+                        return false;
+                    memcpy(guest_bytes, payload, payload_len);
+                }
+
+                core_args[*core_arg_index_io].kind = WASM_I32;
+                core_args[*core_arg_index_io].of.i32 = (int32)guest_ptr;
+                core_args[*core_arg_index_io + 1].kind = WASM_I32;
+                core_args[*core_arg_index_io + 1].of.i32 =
+                    (int32)element_count;
+            }
+            else if (element_prim_type == WASM_COMP_PRIMVAL_STRING) {
                 const uint8 *cursor;
                 const uint8 *end;
                 uint32 table_byte_count = 0;
@@ -9991,10 +10093,21 @@ validate_host_component_public_composite_result_bytes(
                     "result", result_index, &is_primitive, &element_prim_type,
                     inst))
                 return false;
-            if (!is_primitive)
-                return set_host_component_composite_result_list_scalar_leaf_error(
-                    inst, result_index);
-            if (element_prim_type == WASM_COMP_PRIMVAL_STRING) {
+            if (!is_primitive) {
+                uint32 element_size = component_type_flat_byte_size(
+                    inst, inst->resource_state, component,
+                    shape.def_type->def_val.list->element_type);
+                if (element_size == 0)
+                    return set_host_component_composite_result_list_scalar_leaf_error(
+                        inst, result_index);
+                if (!decode_component_public_list_scalar_prefix_with_context(
+                        inst, data ? data + *offset_io : NULL,
+                        byte_size - *offset_io, "host component function",
+                        "result", result_index, element_size,
+                        &ignored_payload, &ignored_payload_len, &consumed))
+                    return false;
+            }
+            else if (element_prim_type == WASM_COMP_PRIMVAL_STRING) {
                 if (!decode_component_public_list_string_prefix_with_context(
                         inst, data ? data + *offset_io : NULL,
                         byte_size - *offset_io, "host component function",
@@ -10004,11 +10117,12 @@ validate_host_component_public_composite_result_bytes(
                     return false;
             }
             else if (component_scalar_prim_byte_size(element_prim_type) > 0) {
+                uint32 element_size =
+                    component_scalar_prim_byte_size(element_prim_type);
                 if (!decode_component_public_list_scalar_prefix_with_context(
                         inst, data ? data + *offset_io : NULL,
                         byte_size - *offset_io, "host component function",
-                        "result", result_index,
-                        component_scalar_prim_byte_size(element_prim_type),
+                        "result", result_index, element_size,
                         &ignored_payload, &ignored_payload_len, &consumed))
                     return false;
             }
@@ -10268,17 +10382,42 @@ flatten_component_public_param_value(
             element_count = payload_len;
         }
         else {
-            uint32 element_size =
-                component_scalar_prim_byte_size(type_info.prim_type);
+            uint32 element_size = 0;
             uint32 element_align = 1;
             uint32 unused_size = 0;
 
+            if (type_info.prim_type != 0) {
+                element_size =
+                    component_scalar_prim_byte_size(type_info.prim_type);
+            }
+
             if (element_size == 0
                 || !lookup_component_canon_abi_scalar_size_align(
-                       type_info.prim_type, &unused_size, &element_align))
-                return set_component_call_error(
-                    inst, "component canon lift function parameter uses "
-                          "unsupported list element type");
+                       type_info.prim_type, &unused_size, &element_align)) {
+                /* Try computing element size from the list element type */
+                WASMComponentCanonLiftValueShape elem_shape;
+                if (!resolve_component_canon_lift_value_shape(
+                        component, value_type, "parameter", param_index,
+                        &elem_shape, inst))
+                    return false;
+                if (elem_shape.def_type
+                    && elem_shape.def_type->tag == WASM_COMP_DEF_VAL_LIST
+                    && elem_shape.def_type->def_val.list
+                    && elem_shape.def_type->def_val.list->element_type) {
+                    element_size = component_type_flat_byte_size(
+                        inst,
+                        function->resource_state
+                            ? function->resource_state
+                            : inst->resource_state,
+                        component,
+                        elem_shape.def_type->def_val.list->element_type);
+                }
+                if (element_size == 0)
+                    return set_component_call_error(
+                        inst, "component canon lift function parameter uses "
+                              "unsupported list element type");
+                element_align = 4;
+            }
 
             if (!decode_component_public_list_scalar_value(
                      inst, value, &type_info, "parameter", param_index,
@@ -10553,6 +10692,43 @@ component_scalar_prim_byte_size(uint8 prim_type)
                : 0;
 }
 
+static uint32
+component_type_flat_byte_size(WASMComponentInstance *inst,
+                              const WASMComponentRuntimeResourceState *resource_state,
+                              const WASMComponent *component,
+                              const WASMComponentValueType *value_type)
+{
+    if (!value_type)
+        return 0;
+
+    if (value_type->type == WASM_COMP_VAL_TYPE_PRIMVAL) {
+        return component_scalar_prim_byte_size(value_type->type_specific.primval_type);
+    }
+
+    const WASMComponentTypes *entry =
+        wasm_component_lookup_type(component, value_type->type_specific.type_idx);
+    if (!entry || entry->tag != WASM_COMP_DEF_TYPE || !entry->type.def_val_type)
+        return 0;
+
+    WASMComponentDefValType *def_type = entry->type.def_val_type;
+    if (def_type->tag == WASM_COMP_DEF_VAL_ENUM
+        || def_type->tag == WASM_COMP_DEF_VAL_FLAGS)
+        return 4;
+
+    uint32 size = 0, align = 1;
+    bool has_string = false, has_list_scalar = false, has_list_string = false;
+    if (!compute_component_canon_abi_layout(inst, resource_state, component,
+                                            value_type, 0, &size, &align,
+                                            &has_string, &has_list_scalar,
+                                            &has_list_string))
+        return 0;
+
+    if (has_string || has_list_string || has_list_scalar)
+        return 0;
+
+    return size;
+}
+
 static bool
 lookup_component_canon_abi_scalar_size_align(uint8 prim_type, uint32 *size_out,
                                              uint32 *align_out)
@@ -10783,16 +10959,23 @@ compute_component_canon_abi_layout(WASMComponentInstance *inst,
                     "result", result_index, &is_primitive, &element_prim_type,
                     inst))
                 return false;
-            if (!is_primitive)
-                return set_component_call_error_fmt(
-                    inst, "component canon lift function result %u only supports "
-                          "variable-length list<scalar>/list<string> leaves "
-                          "inside tuple/record results",
-                    result_index);
-
-            *size_out = 8;
-            *align_out = 4;
-            if (element_prim_type == WASM_COMP_PRIMVAL_STRING)
+            if (!is_primitive) {
+                WASMComponentCanonLiftValueShape elem_shape;
+                if (!resolve_component_canon_lift_value_shape(
+                        component, shape.def_type->def_val.list->element_type,
+                        "result", result_index, &elem_shape, inst))
+                    return false;
+                if (!elem_shape.def_type
+                    || (elem_shape.def_type->tag != WASM_COMP_DEF_VAL_RECORD
+                        && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_TUPLE))
+                    return set_component_call_error_fmt(
+                        inst, "component canon lift function result %u only supports "
+                              "variable-length list<scalar>/list<string> leaves "
+                              "inside tuple/record results",
+                        result_index);
+                *has_list_scalar_leaf_out = true;
+            }
+            else if (element_prim_type == WASM_COMP_PRIMVAL_STRING)
                 *has_list_string_leaf_out = true;
             else if (component_scalar_prim_byte_size(element_prim_type) > 0)
                 *has_list_scalar_leaf_out = true;
@@ -10802,6 +10985,9 @@ compute_component_canon_abi_layout(WASMComponentInstance *inst,
                           "variable-length list<scalar>/list<string> leaves "
                           "inside tuple/record results",
                     result_index);
+
+            *size_out = 8;
+            *align_out = 4;
             return true;
         }
         case WASM_COMP_DEF_VAL_LIST_LEN:
@@ -11429,26 +11615,14 @@ build_lowered_import_composite_param_payload(
                     "parameter", param_index, &is_primitive, &element_prim_type,
                     component_inst))
                 return false;
-            if (!is_primitive) {
-                wasm_runtime_set_exception(
-                    caller_module_inst,
-                    "component lowered core-call trampoline only supports "
-                    "variable-length list<scalar>/list<string> leaves inside tuple/record "
-                    "parameters");
-                return false;
-            }
             if (*core_param_index_io + 1 >= func_type->param_count
                 || func_type->types[*core_param_index_io] != VALUE_TYPE_I32
                 || func_type->types[*core_param_index_io + 1] != VALUE_TYPE_I32) {
                 wasm_runtime_set_exception(
                     caller_module_inst,
-                    element_prim_type == WASM_COMP_PRIMVAL_STRING
-                        ? "component lowered core-call trampoline composite "
-                          "list<string> parameters must flatten to i32 "
-                          "pointer/length pairs"
-                        : "component lowered core-call trampoline composite "
-                          "list<scalar> parameters must flatten to i32 "
-                          "pointer/length pairs");
+                    "component lowered core-call trampoline composite "
+                    "list parameters must flatten to i32 "
+                    "pointer/length pairs");
                 return false;
             }
 
@@ -11551,7 +11725,14 @@ build_lowered_import_composite_param_payload(
                 }
             }
             else {
-                element_size = component_scalar_prim_byte_size(element_prim_type);
+                if (is_primitive)
+                    element_size =
+                        component_scalar_prim_byte_size(element_prim_type);
+                else
+                    element_size = component_type_flat_byte_size(
+                        component_inst, component_inst->resource_state,
+                        component,
+                        shape.def_type->def_val.list->element_type);
                 if (element_size == 0) {
                     wasm_runtime_set_exception(
                         caller_module_inst,
@@ -12020,12 +12201,21 @@ decode_component_canon_composite_result_value(
                     "result", result_index, &is_primitive, &element_prim_type,
                     inst))
                 return false;
-            if (!is_primitive)
-                return set_component_call_error_fmt(
-                    inst, "component canon lift function result %u only supports "
-                          "variable-length list<scalar>/list<string> leaves "
-                          "inside tuple/record results",
-                    result_index);
+            if (!is_primitive) {
+                WASMComponentCanonLiftValueShape elem_shape;
+                if (!resolve_component_canon_lift_value_shape(
+                        component, shape.def_type->def_val.list->element_type,
+                        "result", result_index, &elem_shape, inst))
+                    return false;
+                if (!elem_shape.def_type
+                    || (elem_shape.def_type->tag != WASM_COMP_DEF_VAL_RECORD
+                        && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_TUPLE))
+                    return set_component_call_error_fmt(
+                        inst, "component canon lift function result %u only supports "
+                              "variable-length list<scalar>/list<string> leaves "
+                              "inside tuple/record results",
+                        result_index);
+            }
 
             if (offset > ret_area_size || ret_area_size - offset < 8)
                 return set_component_call_error(
@@ -12096,7 +12286,15 @@ decode_component_canon_composite_result_value(
                 return true;
             }
 
-            element_size = component_scalar_prim_byte_size(element_prim_type);
+            if (is_primitive)
+                element_size =
+                    component_scalar_prim_byte_size(element_prim_type);
+            else
+                element_size = component_type_flat_byte_size(
+                    inst,
+                    function->resource_state ? function->resource_state
+                                             : inst->resource_state,
+                    component, shape.def_type->def_val.list->element_type);
             if (element_size == 0)
                 return set_component_call_error_fmt(
                     inst, "component canon lift function result %u only supports "
