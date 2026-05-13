@@ -65198,6 +65198,168 @@ host_identity_callback(wasm_module_inst_t caller_component_inst,
                        void *user_data, uint32_t num_results,
                        wasm_component_value_t results[], uint32_t num_args,
                        const wasm_component_value_t args[], char *error_buf,
+                       uint32_t error_buf_size);
+
+TEST_F(BinaryParserTest,
+       TestRuntimeSupportsListOwnResourceParamClassification)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "component-list-own-resource-classification";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    /* Add a resource type (no dtor) */
+    ASSERT_TRUE(append_top_level_resource_type_section(
+        (WASMComponentModule *)module));
+
+    WASMComponentRuntimeResourceState *tmp_state =
+        wasm_component_resource_state_create(
+            &((WASMComponentModule *)module)->component, helper->error_buf,
+            (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(tmp_state, nullptr) << helper->error_buf;
+    const uint32_t resource_type_idx = tmp_state->type_count - 1;
+    wasm_component_resource_state_destroy(tmp_state);
+
+    /* Add core caller (resource-new, rep, drop) */
+    ASSERT_TRUE(append_top_level_resource_core_caller_sections(
+        (WASMComponentModule *)module, resource_type_idx,
+        "resource_core_caller.wasm"));
+
+    /* Define own<resource> type */
+    const int32_t own_type_idx =
+        append_component_own_type((WASMComponentModule *)module, resource_type_idx);
+    ASSERT_GE(own_type_idx, 0);
+
+    /* Define list<own<resource>> type (construct manually) */
+    auto *list_def = (WASMComponentDefValType *)wasm_runtime_malloc(
+        sizeof(WASMComponentDefValType));
+    ASSERT_NE(list_def, nullptr);
+    memset(list_def, 0, sizeof(WASMComponentDefValType));
+    list_def->tag = WASM_COMP_DEF_VAL_LIST;
+    auto *list_type = (WASMComponentListType *)wasm_runtime_malloc(
+        sizeof(WASMComponentListType));
+    ASSERT_NE(list_type, nullptr);
+    memset(list_type, 0, sizeof(WASMComponentListType));
+    list_type->element_type = (WASMComponentValueType *)wasm_runtime_malloc(
+        sizeof(WASMComponentValueType));
+    ASSERT_NE(list_type->element_type, nullptr);
+    *list_type->element_type = make_component_type_index_value_type(
+        (uint32_t)own_type_idx);
+    list_def->def_val.list = list_type;
+    const int32_t list_type_idx =
+        append_component_def_val_type((WASMComponentModule *)module, list_def);
+    ASSERT_GE(list_type_idx, 0);
+
+    /* Define a function that uses list<own<resource>>:
+       (list<own<r>>, s32) -> s32 */
+    const int32_t func_type_idx = append_component_func_type(
+        (WASMComponentModule *)module,
+        { { "l", make_component_type_index_value_type(
+                     (uint32_t)list_type_idx) },
+          { "x", make_component_primitive_value_type(WASM_COMP_PRIMVAL_S32) } },
+        make_component_primitive_value_type(WASM_COMP_PRIMVAL_S32));
+    ASSERT_GE(func_type_idx, 0);
+
+    /* Test that a lowered core caller can use list<own<resource>> params.
+       The core caller's import must match the lowered func's flat sig.
+       The lowered func is add.wasm's func[0] which has flat sig (i32,i32)->i32.
+       The component type (list<own<r>>, s32) -> s32 flattens to (i32,i32,i32)->i32,
+       which does NOT match — so this validates that list<own<r>> is at least
+       properly recognized as a valid list<scalar> type in the composite param
+       classification.
+
+       For an actual matching test, we use (list<own<r>>) -> s32 which
+       flattens to (i32,i32) -> i32. */
+    const int32_t simple_func_type_idx = append_component_func_type(
+        (WASMComponentModule *)module,
+        { { "l", make_component_type_index_value_type(
+                     (uint32_t)list_type_idx) } },
+        make_component_primitive_value_type(WASM_COMP_PRIMVAL_S32));
+    ASSERT_GE(simple_func_type_idx, 0);
+
+    /* Create a host import with the list<own> type */
+    ASSERT_TRUE(append_top_level_host_function_import_sections(
+        (WASMComponentModule *)module, "host-list-own", "host-instance",
+        "forwarded"));
+    WASMComponentImport *host_import = find_component_import_by_name_and_kind(
+        (WASMComponentModule *)module, "host-list-own", WASM_COMP_EXTERN_FUNC);
+    ASSERT_NE(host_import, nullptr);
+    host_import->extern_desc->extern_desc.func.type_idx =
+        (uint32_t)simple_func_type_idx;
+
+    ASSERT_TRUE(append_top_level_function_export_alias(
+        (WASMComponentModule *)module, "host-instance", "forwarded",
+        "aliased-list-own"));
+
+    const int32_t source_func_idx = find_top_level_export_sort_index(
+        (WASMComponentModule *)module, "aliased-list-own",
+        WASM_COMP_SORT_FUNC);
+    ASSERT_GE(source_func_idx, 0);
+
+    /* Create a lowered function using forward_core_caller (i32,i32)->i32 import.
+       This validates that the type classification accepts list<own<r>> in the
+       lowered import signature validation. */
+    ASSERT_TRUE(append_top_level_lowered_core_caller_sections_for_func(
+        (WASMComponentModule *)module, (uint32_t)source_func_idx,
+        "forward_core_caller.wasm", "source"));
+
+    /* Add memory opt to the lower canon for list<scalar> ABI */
+    {
+        auto *comp = &((WASMComponentModule *)module)->component;
+        WASMComponentSection *last_canon = nullptr;
+        for (uint32_t i = 0; i < comp->section_count; i++)
+            if (comp->sections[i].id == WASM_COMP_SECTION_CANONS)
+                last_canon = &comp->sections[i];
+        ASSERT_NE(last_canon, nullptr);
+        WASMComponentCanon *lower = nullptr;
+        for (uint32_t i = 0; i < last_canon->parsed.canon_section->count; i++)
+            if (last_canon->parsed.canon_section->canons[i].tag
+                == WASM_COMP_CANON_LOWER)
+                lower = &last_canon->parsed.canon_section->canons[i];
+        ASSERT_NE(lower, nullptr);
+        ASSERT_TRUE(ensure_canon_lower_memory_opt(lower, 0));
+    }
+
+    uint32_t callback_marker = 0;
+    wasm_component_func_import_binding_t func_import = {};
+    func_import.name = "host-list-own";
+    func_import.callback = host_identity_callback;
+    func_import.user_data = &callback_marker;
+
+    struct InstantiationArgs2 *inst_args = nullptr;
+    ASSERT_TRUE(wasm_runtime_instantiation_args_create(&inst_args));
+    wasm_runtime_instantiation_args_set_default_stack_size(inst_args,
+                                                           helper->stack_size);
+    wasm_runtime_instantiation_args_set_host_managed_heap_size(inst_args,
+                                                               helper->heap_size);
+    wasm_runtime_instantiation_args_set_wasi_stdio(inst_args, 0, 1, 2);
+    wasm_runtime_instantiation_args_set_wasi_dir(inst_args, nullptr, 0, nullptr,
+                                                 0);
+    wasm_runtime_instantiation_args_set_component_func_imports(inst_args,
+                                                               &func_import, 1);
+
+    wasm_module_inst_t module_inst = wasm_runtime_instantiate_ex2(
+        module, inst_args, helper->error_buf,
+        (uint32_t)sizeof(helper->error_buf));
+    wasm_runtime_instantiation_args_destroy(inst_args);
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+static bool
+host_identity_callback(wasm_module_inst_t caller_component_inst,
+                       void *user_data, uint32_t num_results,
+                       wasm_component_value_t results[], uint32_t num_args,
+                       const wasm_component_value_t args[], char *error_buf,
                        uint32_t error_buf_size)
 {
     ++*(uint32_t *)user_data;

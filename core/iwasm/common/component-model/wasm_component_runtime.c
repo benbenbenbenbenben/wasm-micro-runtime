@@ -6736,7 +6736,9 @@ classify_component_runtime_composite_param(const WASMComponent *component,
                             || elem_tag == WASM_COMP_DEF_VAL_TUPLE
                             || elem_tag == WASM_COMP_DEF_VAL_OPTION
                             || elem_tag == WASM_COMP_DEF_VAL_RESULT
-                            || elem_tag == WASM_COMP_DEF_VAL_VARIANT;
+                            || elem_tag == WASM_COMP_DEF_VAL_VARIANT
+                            || elem_tag == WASM_COMP_DEF_VAL_OWN
+                            || elem_tag == WASM_COMP_DEF_VAL_BORROW;
                     }
                 }
                 if (!is_scalar_defined)
@@ -6973,7 +6975,9 @@ classify_component_runtime_composite_result(const WASMComponent *component,
                             || elem_tag == WASM_COMP_DEF_VAL_TUPLE
                             || elem_tag == WASM_COMP_DEF_VAL_OPTION
                             || elem_tag == WASM_COMP_DEF_VAL_RESULT
-                            || elem_tag == WASM_COMP_DEF_VAL_VARIANT;
+                            || elem_tag == WASM_COMP_DEF_VAL_VARIANT
+                            || elem_tag == WASM_COMP_DEF_VAL_OWN
+                            || elem_tag == WASM_COMP_DEF_VAL_BORROW;
                     }
                 }
                 if (!is_scalar_defined)
@@ -7236,7 +7240,9 @@ lookup_component_canon_lift_value_type(const WASMComponent *component,
                         || elem_tag == WASM_COMP_DEF_VAL_TUPLE
                         || elem_tag == WASM_COMP_DEF_VAL_OPTION
                         || elem_tag == WASM_COMP_DEF_VAL_RESULT
-                        || elem_tag == WASM_COMP_DEF_VAL_VARIANT) {
+                        || elem_tag == WASM_COMP_DEF_VAL_VARIANT
+                        || elem_tag == WASM_COMP_DEF_VAL_OWN
+                        || elem_tag == WASM_COMP_DEF_VAL_BORROW) {
                         memset(out_info, 0, sizeof(*out_info));
                         out_info->kind =
                             WASM_COMP_CANON_LIFT_VALUE_LIST_SCALAR;
@@ -8039,7 +8045,13 @@ validate_component_host_import_value_type(
                     "index %u",
                     import_name, position, index,
                     element_type->type_specific.type_idx);
-            if (type_entry->type.def_val_type->tag != WASM_COMP_DEF_VAL_PRIMVAL)
+            if (type_entry->type.def_val_type->tag != WASM_COMP_DEF_VAL_PRIMVAL) {
+                if (type_entry->type.def_val_type->tag == WASM_COMP_DEF_VAL_OWN
+                    || type_entry->type.def_val_type->tag
+                           == WASM_COMP_DEF_VAL_BORROW) {
+                    *is_list_scalar_out = true;
+                    return true;
+                }
                 return set_component_runtime_error_fmt(
                     error_buf, error_buf_size,
                     !strcmp(position, "result")
@@ -8048,6 +8060,7 @@ validate_component_host_import_value_type(
                         : "host component import \"%s\" %s %u only supports "
                           "list<scalar> parameters",
                     import_name, position, index);
+            }
             prim_type = type_entry->type.def_val_type->def_val.primval;
         }
 
