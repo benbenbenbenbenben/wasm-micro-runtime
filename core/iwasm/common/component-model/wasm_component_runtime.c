@@ -904,6 +904,11 @@ destroy_component_runtime_instance(WASMComponentRuntimeInstance *component_inst)
         wasm_runtime_free(component_inst->exports);
         component_inst->exports = NULL;
     }
+    if (component_inst->core_types) {
+        wasm_runtime_free(component_inst->core_types);
+        component_inst->core_types = NULL;
+    }
+    component_inst->core_type_count = 0;
     if (component_inst->owned_components) {
         for (i = 0; i < component_inst->owned_component_count; i++) {
             WASMComponentRuntimeScope *scope =
@@ -6564,33 +6569,14 @@ bind_component_core_instance_import_args(
             "an interpreted core wasm module");
 
     module = module_inst->module;
-    if (!module || module->import_function_count == 0)
-        return set_component_runtime_error_fmt(
-            error_buf, error_buf_size,
-            "core instance expression provides import args but the target core "
-            "module has no function imports");
-    runtime_inst->patched_import_attachments = wasm_runtime_malloc(
-        sizeof(WASMComponentLoweredImportAttachment)
-         * module->import_function_count);
-    if (!runtime_inst->patched_import_attachments)
-        return set_component_runtime_error_fmt(
-            error_buf, error_buf_size,
-            "allocate memory failed for %u lowered core import attachments",
-            module->import_function_count);
-
-    memset(runtime_inst->patched_import_attachments, 0,
-           sizeof(WASMComponentLoweredImportAttachment)
-               * module->import_function_count);
-    runtime_inst->patched_import_count = module->import_function_count;
-    for (i = 0; i < module->import_function_count; i++) {
-        module_inst->e->functions[i].u.func_import =
-            &module->import_functions[i].u.function;
-    }
+    runtime_inst->patched_import_attachments = NULL;
+    runtime_inst->patched_import_count = 0;
 
     for (i = 0; i < arg_len; i++) {
         WASMComponentCoreRuntimeRef ref;
         const char *import_name = args[i].name ? args[i].name->name : NULL;
         bool matched = false;
+        uint8 core_sort;
 
         if ((uintptr_t)args[i].idx.sort_idx <= 0x1000)
             continue;
@@ -6602,12 +6588,20 @@ bind_component_core_instance_import_args(
                 i);
 
         if (!args[i].idx.sort_idx || !args[i].idx.sort_idx->sort
-            || args[i].idx.sort_idx->sort->sort != WASM_COMP_SORT_CORE_SORT
-            || args[i].idx.sort_idx->sort->core_sort != WASM_COMP_CORE_SORT_FUNC)
+            || args[i].idx.sort_idx->sort->sort != WASM_COMP_SORT_CORE_SORT)
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                "core instance import \"%s\" has an invalid sort", import_name);
+
+        core_sort = args[i].idx.sort_idx->sort->core_sort;
+        if (core_sort != WASM_COMP_CORE_SORT_FUNC
+            && core_sort != WASM_COMP_CORE_SORT_TABLE
+            && core_sort != WASM_COMP_CORE_SORT_MEMORY
+            && core_sort != WASM_COMP_CORE_SORT_GLOBAL)
             return set_component_runtime_error_fmt(
                 error_buf, error_buf_size,
                 "core instance import \"%s\" currently only supports lowered "
-                "component function bindings",
+                "component function, table, memory, or global bindings",
                 import_name);
 
         memset(&ref, 0, sizeof(ref));
@@ -6615,58 +6609,159 @@ bind_component_core_instance_import_args(
                              error_buf_size))
             return false;
 
-        if (ref.type != WASM_COMP_CORE_RUNTIME_REF_LOWERED_FUNC
-            || !ref.of.lowered_function)
-            return set_component_runtime_error_fmt(
-                error_buf, error_buf_size,
-                "core instance import \"%s\" currently only supports lowered "
-                "component function bindings",
-                import_name);
+        if (core_sort == WASM_COMP_CORE_SORT_FUNC) {
+            if (ref.type != WASM_COMP_CORE_RUNTIME_REF_LOWERED_FUNC
+                || !ref.of.lowered_function)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "core instance import \"%s\" currently only supports lowered "
+                    "component function bindings",
+                    import_name);
 
-        for (j = 0; j < module->import_function_count; j++) {
-            WASMFunctionImport *import = &module->import_functions[j].u.function;
-            WASMComponentLoweredImportAttachment *attachment =
-                &((WASMComponentLoweredImportAttachment *)
-                      runtime_inst->patched_import_attachments)[j];
+            /* Lazily allocate import attachments when we hit the first func arg */
+            if (!runtime_inst->patched_import_attachments) {
+                if (!module || module->import_function_count == 0)
+                    return set_component_runtime_error_fmt(
+                        error_buf, error_buf_size,
+                        "core instance expression provides import args but the "
+                        "target core module has no function imports");
+                runtime_inst->patched_import_attachments = wasm_runtime_malloc(
+                    sizeof(WASMComponentLoweredImportAttachment)
+                     * module->import_function_count);
+                if (!runtime_inst->patched_import_attachments)
+                    return set_component_runtime_error_fmt(
+                        error_buf, error_buf_size,
+                        "allocate memory failed for %u lowered core import "
+                        "attachments",
+                        module->import_function_count);
 
-            if (!import->field_name || strcmp(import->field_name, import_name))
-                continue;
-
-            if (!validate_lowered_import_signature(
-                    ref.of.lowered_function, import->func_type, error_buf,
-                    error_buf_size))
-                return false;
-            if (ref.of.lowered_function->kind
-                != WASM_COMP_RUNTIME_FUNC_RESOURCE_BUILTIN) {
-                if (!resolve_lowered_import_canon_memory(ref.of.lowered_function,
-                                                         module_inst,
-                                                         &attachment->canon_memory_ref,
-                                                         error_buf,
-                                                         error_buf_size))
-                    return false;
+                memset(runtime_inst->patched_import_attachments, 0,
+                       sizeof(WASMComponentLoweredImportAttachment)
+                           * module->import_function_count);
+                runtime_inst->patched_import_count = module->import_function_count;
+                for (j = 0; j < module->import_function_count; j++) {
+                    module_inst->e->functions[j].u.func_import =
+                        &module->import_functions[j].u.function;
+                }
             }
-            else
-                memset(&attachment->canon_memory_ref, 0,
-                       sizeof(attachment->canon_memory_ref));
 
-            import->func_ptr_linked = component_lowered_import_trampoline;
-            import->signature = NULL;
-            attachment->lowered_function = ref.of.lowered_function;
-            attachment->func_type = import->func_type;
-            import->attachment = attachment;
-            import->call_conv_raw = true;
-            module_inst->e->functions[j].u.func_import = import;
-            module_inst->e->functions[j].import_module_inst = NULL;
-            module_inst->e->functions[j].import_func_inst = NULL;
-            module_inst->import_func_ptrs[j] = component_lowered_import_trampoline;
-            if (module_inst->func_ptrs)
-                module_inst->func_ptrs[j] = component_lowered_import_trampoline;
+            for (j = 0; j < module->import_function_count; j++) {
+                WASMFunctionImport *import = &module->import_functions[j].u.function;
+                WASMComponentLoweredImportAttachment *attachment =
+                    &((WASMComponentLoweredImportAttachment *)
+                          runtime_inst->patched_import_attachments)[j];
+
+                if (!import->field_name || strcmp(import->field_name, import_name))
+                    continue;
+
+                if (!validate_lowered_import_signature(
+                        ref.of.lowered_function, import->func_type, error_buf,
+                        error_buf_size))
+                    return false;
+                if (ref.of.lowered_function->kind
+                    != WASM_COMP_RUNTIME_FUNC_RESOURCE_BUILTIN) {
+                    if (!resolve_lowered_import_canon_memory(ref.of.lowered_function,
+                                                             module_inst,
+                                                             &attachment->canon_memory_ref,
+                                                             error_buf,
+                                                             error_buf_size))
+                        return false;
+                }
+                else
+                    memset(&attachment->canon_memory_ref, 0,
+                           sizeof(attachment->canon_memory_ref));
+
+                import->func_ptr_linked = component_lowered_import_trampoline;
+                import->signature = NULL;
+                attachment->lowered_function = ref.of.lowered_function;
+                attachment->func_type = import->func_type;
+                import->attachment = attachment;
+                import->call_conv_raw = true;
+                module_inst->e->functions[j].u.func_import = import;
+                module_inst->e->functions[j].import_module_inst = NULL;
+                module_inst->e->functions[j].import_func_inst = NULL;
+                module_inst->import_func_ptrs[j] = component_lowered_import_trampoline;
+                if (module_inst->func_ptrs)
+                    module_inst->func_ptrs[j] = component_lowered_import_trampoline;
 #if WASM_ENABLE_MULTI_MODULE != 0
-            import->import_func_linked = NULL;
-            import->import_module = NULL;
+                import->import_func_linked = NULL;
+                import->import_module = NULL;
 #endif
-            matched = true;
-            break;
+                matched = true;
+                break;
+            }
+        }
+        else if (core_sort == WASM_COMP_CORE_SORT_TABLE) {
+            WASMModuleInstance *src_inst =
+                (WASMModuleInstance *)ref.owner_instance->module_inst;
+            uint32 k;
+            for (j = 0; j < module->import_table_count; j++) {
+                WASMTableImport *import = &module->import_tables[j].u.table;
+                if (!import->field_name || strcmp(import->field_name, import_name))
+                    continue;
+                if (src_inst && src_inst->module) {
+                    for (k = 0; k < src_inst->module->export_count; k++) {
+                        WASMExport *exp = &src_inst->module->exports[k];
+                        if (exp->kind == WASM_IMPORT_EXPORT_KIND_TABLE
+                            && !strcmp(exp->name, import_name)) {
+                            module_inst->tables[j] =
+                                src_inst->tables[exp->index];
+                            break;
+                        }
+                    }
+                }
+                if (!module_inst->tables[j])
+                    module_inst->tables[j] = (WASMTableInstance *)(uintptr_t)1;
+#if WASM_ENABLE_MULTI_MODULE != 0
+                import->import_table_linked = NULL;
+                import->import_module = NULL;
+                module_inst->e->table_insts_linked[j] = NULL;
+#endif
+                matched = true;
+                break;
+            }
+        }
+        else if (core_sort == WASM_COMP_CORE_SORT_MEMORY) {
+            for (j = 0; j < module->import_memory_count; j++) {
+                WASMMemoryImport *import = &module->import_memories[j].u.memory;
+                if (!import->field_name || strcmp(import->field_name, import_name))
+                    continue;
+                module_inst->memories[j] = ref.of.memory;
+                matched = true;
+                break;
+            }
+        }
+        else if (core_sort == WASM_COMP_CORE_SORT_GLOBAL) {
+            WASMModuleInstance *src_inst =
+                (WASMModuleInstance *)ref.owner_instance->module_inst;
+            uint32 k;
+            for (j = 0; j < module->import_global_count; j++) {
+                WASMGlobalImport *import = &module->import_globals[j].u.global;
+                if (!import->field_name || strcmp(import->field_name, import_name))
+                    continue;
+                if (src_inst && src_inst->module) {
+                    for (k = 0; k < src_inst->module->export_count; k++) {
+                        WASMExport *exp = &src_inst->module->exports[k];
+                        if (exp->kind == WASM_IMPORT_EXPORT_KIND_GLOBAL
+                            && !strcmp(exp->name, import_name)) {
+                            module_inst->e->globals[j].import_module_inst =
+                                src_inst;
+                            module_inst->e->globals[j].import_global_inst =
+                                &src_inst->e->globals[exp->index];
+                            break;
+                        }
+                    }
+                }
+                if (!module_inst->e->globals[j].import_global_inst) {
+                    module_inst->e->globals[j].import_module_inst =
+                        (WASMModuleInstance *)(uintptr_t)1;
+                    module_inst->e->globals[j].import_global_inst =
+                        (WASMGlobalInstance *)(uintptr_t)1;
+                }
+                import->is_linked = true;
+                matched = true;
+                break;
+            }
         }
 
         if (!matched)
@@ -18549,8 +18644,24 @@ lookup_core_instance_export(const WASMComponentCoreRuntimeInstance *core_instanc
             case WASM_COMP_CORE_RUNTIME_REF_FUNC:
                 out_ref->of.function = wasm_runtime_lookup_function(
                     core_instance->module_inst, name);
-                if (out_ref->of.function)
+                if (out_ref->of.function) {
+                    out_ref->func_type_idx = UINT32_MAX;
+#if WASM_ENABLE_INTERP != 0
+                    if (core_instance->module_inst->module_type
+                        == Wasm_Module_Bytecode) {
+                        WASMModuleInstance *mod_inst =
+                            (WASMModuleInstance *)core_instance->module_inst;
+                        WASMFunctionInstance *func_inst =
+                            (WASMFunctionInstance *)out_ref->of.function;
+                        if (mod_inst->func_type_indexes
+                            && func_inst->func_idx
+                                   < mod_inst->module->function_count)
+                            out_ref->func_type_idx =
+                                mod_inst->func_type_indexes[func_inst->func_idx];
+                    }
+#endif
                     return true;
+                }
                 break;
             case WASM_COMP_CORE_RUNTIME_REF_TABLE:
                 if (wasm_runtime_get_export_table_inst(core_instance->module_inst,
@@ -19455,7 +19566,8 @@ count_nested_component_local_bindings(const WASMComponent *nested_component,
                                       uint32 *owned_core_instance_count,
                                       uint32 *owned_lowered_func_count,
                                        uint32 *owned_instance_count,
-                                       uint32 *export_count, char *error_buf,
+                                       uint32 *export_count,
+                                       uint32 *core_type_count, char *error_buf,
                                        uint32 error_buf_size)
 {
     uint32 i;
@@ -19465,7 +19577,8 @@ count_nested_component_local_bindings(const WASMComponent *nested_component,
         = *core_func_count = *func_count = *value_count
         = *owned_value_count = *owned_component_count
         = *owned_core_instance_count = *owned_lowered_func_count
-        = *owned_instance_count = *export_count = *resource_type_count = 0;
+        = *owned_instance_count = *export_count = *resource_type_count
+        = *core_type_count = 0;
 
     for (i = 0; i < nested_component->section_count; i++) {
         const WASMComponentSection *section = &nested_component->sections[i];
@@ -19566,6 +19679,9 @@ count_nested_component_local_bindings(const WASMComponent *nested_component,
                 break;
             }
             case WASM_COMP_SECTION_CORE_TYPE:
+                if (section->parsed.core_type_section)
+                    (*core_type_count) +=
+                        section->parsed.core_type_section->count;
                 break;
             case WASM_COMP_SECTION_ALIASES:
             {
@@ -22977,6 +23093,7 @@ build_component_runtime_instance_from_component(
             &owned_func_count, &owned_value_count, &owned_component_count,
             &owned_core_instance_count, &owned_lowered_func_count,
             &owned_instance_count, &export_count,
+            &runtime_inst->core_type_count,
             error_buf, error_buf_size))
         return false;
 
@@ -23030,8 +23147,28 @@ build_component_runtime_instance_from_component(
         switch (section->id) {
             case WASM_COMP_SECTION_CORE_CUSTOM:
             case WASM_COMP_SECTION_TYPE:
-            case WASM_COMP_SECTION_CORE_TYPE:
                 break;
+            case WASM_COMP_SECTION_CORE_TYPE:
+            {
+                const WASMComponentCoreTypeSection *cts =
+                    section->parsed.core_type_section;
+                if (cts && cts->count > 0) {
+                    uint32 needed = runtime_inst->core_type_count + cts->count;
+                    WASMComponentCoreType *new_types = wasm_runtime_realloc(
+                        runtime_inst->core_types,
+                        sizeof(WASMComponentCoreType) * needed);
+                    if (!new_types)
+                        return set_component_runtime_error_fmt(
+                            error_buf, error_buf_size,
+                            "allocate memory failed for nested core types");
+                    runtime_inst->core_types = new_types;
+                    memcpy(&runtime_inst->core_types[runtime_inst->core_type_count],
+                           cts->types,
+                           sizeof(WASMComponentCoreType) * cts->count);
+                    runtime_inst->core_type_count = needed;
+                }
+                break;
+            }
             case WASM_COMP_SECTION_CORE_MODULE:
                 if (!section->parsed.core_module
                     || !section->parsed.core_module->module_handle

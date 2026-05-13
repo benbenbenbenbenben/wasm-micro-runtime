@@ -31,6 +31,7 @@ struct WASMComponentRuntimeFunc;
 typedef struct WASMComponentCoreRuntimeRef {
     WASMComponentCoreRuntimeRefType type;
     struct WASMComponentCoreRuntimeInstance *owner_instance;
+    uint32 func_type_idx;
     union {
         wasm_function_inst_t function;
         struct WASMComponentRuntimeFunc *lowered_function;
@@ -170,6 +171,8 @@ typedef struct WASMComponentRuntimeInstance {
     struct WASMComponentRuntimeInstance *owned_instances;
     uint32 owned_component_count;
     WASMComponentRuntimeComponent *owned_components;
+    uint32 core_type_count;
+    WASMComponentCoreType *core_types;
 } WASMComponentRuntimeInstance;
 
 typedef struct WASMComponentModule {
