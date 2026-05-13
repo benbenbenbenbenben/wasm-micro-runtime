@@ -293,6 +293,11 @@ lowered_import_owned_result_matches_current_arg(
     const uint32 *owned_arg_resource_type_idxs, uint32 param_count);
 
 static bool
+convert_utf8_bytes_to_utf16(const uint8 *utf8_bytes, uint32 utf8_byte_len,
+                            uint8 **utf16_out, uint32 *utf16_len_out,
+                            WASMComponentInstance *inst);
+
+static bool
 compute_component_canon_abi_layout(WASMComponentInstance *inst,
                                    const WASMComponentRuntimeResourceState *resource_state,
                                    const WASMComponent *component,
@@ -9586,17 +9591,14 @@ flatten_component_public_composite_bytes(
                 if (function->string_encoding
                         == WASM_COMP_RUNTIME_STRING_ENCODING_UTF16
                     && payload_len > 0) {
-                    uint32 utf16_len = payload_len * 2;
-                    uint8 *utf16_bytes = wasm_runtime_malloc(utf16_len);
-                    if (!utf16_bytes)
-                        return set_component_call_error(
-                            inst, "Failed to allocate utf16 buffer");
-                    for (uint32 k = 0; k < payload_len; k++) {
-                        utf16_bytes[k * 2] = payload[k];
-                        utf16_bytes[k * 2 + 1] = 0;
-                    }
-                    memcpy(guest_bytes, utf16_bytes, utf16_len);
-                    wasm_runtime_free(utf16_bytes);
+                    uint8 *utf16_buf = NULL;
+                    uint32 utf16_len = 0;
+                    if (!convert_utf8_bytes_to_utf16(payload, payload_len,
+                                                      &utf16_buf, &utf16_len,
+                                                      inst))
+                        return false;
+                    memcpy(guest_bytes, utf16_buf, utf16_len);
+                    wasm_runtime_free(utf16_buf);
                     payload_len = utf16_len;
                 }
                 else {
@@ -10632,8 +10634,12 @@ flatten_component_public_param_value(
 
             if (function->string_encoding == WASM_COMP_RUNTIME_STRING_ENCODING_UTF16
                 && payload_len > 0) {
-                /* Convert UTF-8 component value to UTF-16 in guest memory */
-                uint32 utf16_len = payload_len * 2;
+                uint8 *utf16_buf = NULL;
+                uint32 utf16_len = 0;
+                if (!convert_utf8_bytes_to_utf16(payload, payload_len,
+                                                  &utf16_buf, &utf16_len,
+                                                  inst))
+                    return false;
                 if (!call_component_canon_realloc(inst, function, utf16_len,
                                                    &guest_ptr))
                     return false;
@@ -10642,10 +10648,8 @@ flatten_component_public_param_value(
                                                        "utf16 string parameter",
                                                        &guest_bytes))
                     return false;
-                for (uint32 i = 0; i < payload_len; i++) {
-                    guest_bytes[i * 2] = payload[i];
-                    guest_bytes[i * 2 + 1] = 0;
-                }
+                memcpy(guest_bytes, utf16_buf, utf16_len);
+                wasm_runtime_free(utf16_buf);
                 element_count = utf16_len;
                 goto string_marshal_common;
             }
@@ -13172,6 +13176,86 @@ convert_utf16_bytes_to_utf8(const uint8 *utf16_bytes, uint32 utf16_byte_len,
 
     *utf8_out = utf8_buf;
     *utf8_len_out = utf8_pos;
+    return true;
+}
+
+static bool
+convert_utf8_bytes_to_utf16(const uint8 *utf8_bytes, uint32 utf8_byte_len,
+                            uint8 **utf16_out, uint32 *utf16_len_out,
+                            WASMComponentInstance *inst)
+{
+    uint32 max_utf16_len = utf8_byte_len * 2 + 2;
+    uint8 *utf16_buf = wasm_runtime_malloc(max_utf16_len);
+    uint32 utf16_pos = 0;
+
+    if (!utf16_buf) {
+        wasm_runtime_set_exception((WASMModuleInstanceCommon *)inst,
+                                    "Failed to allocate memory for UTF-16 "
+                                    "conversion");
+        return false;
+    }
+
+    for (uint32 i = 0; i < utf8_byte_len; ) {
+        uint8 lead = utf8_bytes[i];
+        uint32 code_point;
+        uint32 seq_len;
+
+        /* Decode UTF-8 sequence length from lead byte */
+        if (lead <= 0x7F) {
+            code_point = lead;
+            seq_len = 1;
+        }
+        else if (lead >= 0xC0 && lead <= 0xDF) {
+            if (i + 1 >= utf8_byte_len) break; /* truncated, stop */
+            code_point = (uint32)(lead & 0x1F) << 6
+                         | (uint32)(utf8_bytes[i + 1] & 0x3F);
+            seq_len = 2;
+        }
+        else if (lead >= 0xE0 && lead <= 0xEF) {
+            if (i + 2 >= utf8_byte_len) break;
+            code_point = (uint32)(lead & 0x0F) << 12
+                         | (uint32)(utf8_bytes[i + 1] & 0x3F) << 6
+                         | (uint32)(utf8_bytes[i + 2] & 0x3F);
+            seq_len = 3;
+        }
+        else if (lead >= 0xF0 && lead <= 0xF7) {
+            if (i + 3 >= utf8_byte_len) break;
+            code_point = (uint32)(lead & 0x07) << 18
+                         | (uint32)(utf8_bytes[i + 1] & 0x3F) << 12
+                         | (uint32)(utf8_bytes[i + 2] & 0x3F) << 6
+                         | (uint32)(utf8_bytes[i + 3] & 0x3F);
+            seq_len = 4;
+        }
+        else {
+            /* Invalid lead byte, skip */
+            i++;
+            continue;
+        }
+
+        /* Encode code point as UTF-16 */
+        if (code_point <= 0xFFFF) {
+            /* BMP: single code unit (little-endian) */
+            if (utf16_pos + 2 > max_utf16_len) break;
+            utf16_buf[utf16_pos++] = (uint8)(code_point & 0xFF);
+            utf16_buf[utf16_pos++] = (uint8)((code_point >> 8) & 0xFF);
+        }
+        else {
+            /* Supplementary plane: surrogate pair */
+            code_point -= 0x10000;
+            uint16 high_surrogate = (uint16)(0xD800 | (code_point >> 10));
+            uint16 low_surrogate = (uint16)(0xDC00 | (code_point & 0x3FF));
+            if (utf16_pos + 4 > max_utf16_len) break;
+            utf16_buf[utf16_pos++] = (uint8)(high_surrogate & 0xFF);
+            utf16_buf[utf16_pos++] = (uint8)((high_surrogate >> 8) & 0xFF);
+            utf16_buf[utf16_pos++] = (uint8)(low_surrogate & 0xFF);
+            utf16_buf[utf16_pos++] = (uint8)((low_surrogate >> 8) & 0xFF);
+        }
+
+        i += seq_len;
+    }
+
+    *utf16_out = utf16_buf;
+    *utf16_len_out = utf16_pos;
     return true;
 }
 
