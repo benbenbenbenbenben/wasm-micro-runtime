@@ -8492,7 +8492,9 @@ validate_required_opts:
         return true;
 
     if ((function->has_string_params || function->has_string_result)
-        && function->string_encoding != WASM_COMP_RUNTIME_STRING_ENCODING_UTF8)
+        && function->string_encoding != WASM_COMP_RUNTIME_STRING_ENCODING_UTF8
+        && function->string_encoding != WASM_COMP_RUNTIME_STRING_ENCODING_UTF16
+        && function->string_encoding != WASM_COMP_RUNTIME_STRING_ENCODING_LATIN1_UTF16)
         return set_component_runtime_error_fmt(
             error_buf, error_buf_size,
             "component canon lift function only supports UTF-8 strings");
@@ -10585,20 +10587,43 @@ flatten_component_public_param_value(
             return set_component_param_flattening_error(inst);
 
         if (type_info.kind == WASM_COMP_CANON_LIFT_VALUE_STRING) {
-            if (function->string_encoding != WASM_COMP_RUNTIME_STRING_ENCODING_UTF8)
+            if (function->string_encoding != WASM_COMP_RUNTIME_STRING_ENCODING_UTF8
+                && function->string_encoding != WASM_COMP_RUNTIME_STRING_ENCODING_UTF16
+                && function->string_encoding != WASM_COMP_RUNTIME_STRING_ENCODING_LATIN1_UTF16)
                 return set_component_call_error(
                     inst, "component canon lift function only supports UTF-8 "
                           "string encoding");
 
             if (!decode_component_public_string_value(inst, value, &type_info,
-                                                      "parameter", param_index,
-                                                      &payload, &payload_len))
+                                                       "parameter", param_index,
+                                                       &payload, &payload_len))
                 return false;
 
-            if (!call_component_canon_realloc(inst, function, payload_len,
-                                              &guest_ptr))
-                return false;
-            element_count = payload_len;
+            if (function->string_encoding == WASM_COMP_RUNTIME_STRING_ENCODING_UTF16
+                && payload_len > 0) {
+                /* Convert UTF-8 to UTF-16: each byte becomes 2 bytes */
+                uint32 utf16_len = payload_len * 2;
+                if (!call_component_canon_realloc(inst, function, utf16_len,
+                                                   &guest_ptr))
+                    return false;
+                uint8 *guest_bytes = NULL;
+                if (!get_component_canon_memory_bytes(inst, function, guest_ptr,
+                                                       utf16_len,
+                                                       "utf16 string parameter",
+                                                       &guest_bytes))
+                    return false;
+                for (uint32 i = 0; i < payload_len; i++) {
+                    guest_bytes[i * 2] = payload[i];
+                    guest_bytes[i * 2 + 1] = 0;
+                }
+                element_count = utf16_len;
+            }
+            else {
+                if (!call_component_canon_realloc(inst, function, payload_len,
+                                                   &guest_ptr))
+                    return false;
+                element_count = payload_len;
+            }
         }
         else {
             uint32 element_size = 0;
