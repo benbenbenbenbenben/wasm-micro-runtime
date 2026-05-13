@@ -3546,7 +3546,10 @@ validate_lowered_import_composite_param_signature(
                     return false;
                 if (!elem_shape.def_type
                     || (elem_shape.def_type->tag != WASM_COMP_DEF_VAL_RECORD
-                        && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_TUPLE))
+                        && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_TUPLE
+                        && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_OPTION
+                        && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_RESULT
+                        && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_VARIANT))
                     return set_component_runtime_error_fmt(
                         error_buf, error_buf_size,
                         "component canon lower direct core-call bindings only "
@@ -6040,7 +6043,10 @@ resolve_component_lift_list_scalar_usage(const WASMComponent *component,
             if (elem_tag == WASM_COMP_DEF_VAL_ENUM
                 || elem_tag == WASM_COMP_DEF_VAL_FLAGS
                 || elem_tag == WASM_COMP_DEF_VAL_RECORD
-                || elem_tag == WASM_COMP_DEF_VAL_TUPLE) {
+                || elem_tag == WASM_COMP_DEF_VAL_TUPLE
+                || elem_tag == WASM_COMP_DEF_VAL_OPTION
+                || elem_tag == WASM_COMP_DEF_VAL_RESULT
+                || elem_tag == WASM_COMP_DEF_VAL_VARIANT) {
                 *is_list_scalar = true;
                 return true;
             }
@@ -6245,7 +6251,10 @@ classify_component_runtime_composite_param(const WASMComponent *component,
                             elem_tag == WASM_COMP_DEF_VAL_ENUM
                             || elem_tag == WASM_COMP_DEF_VAL_FLAGS
                             || elem_tag == WASM_COMP_DEF_VAL_RECORD
-                            || elem_tag == WASM_COMP_DEF_VAL_TUPLE;
+                            || elem_tag == WASM_COMP_DEF_VAL_TUPLE
+                            || elem_tag == WASM_COMP_DEF_VAL_OPTION
+                            || elem_tag == WASM_COMP_DEF_VAL_RESULT
+                            || elem_tag == WASM_COMP_DEF_VAL_VARIANT;
                     }
                 }
                 if (!is_scalar_defined)
@@ -6477,7 +6486,10 @@ classify_component_runtime_composite_result(const WASMComponent *component,
                             elem_tag == WASM_COMP_DEF_VAL_ENUM
                             || elem_tag == WASM_COMP_DEF_VAL_FLAGS
                             || elem_tag == WASM_COMP_DEF_VAL_RECORD
-                            || elem_tag == WASM_COMP_DEF_VAL_TUPLE;
+                            || elem_tag == WASM_COMP_DEF_VAL_TUPLE
+                            || elem_tag == WASM_COMP_DEF_VAL_OPTION
+                            || elem_tag == WASM_COMP_DEF_VAL_RESULT
+                            || elem_tag == WASM_COMP_DEF_VAL_VARIANT;
                     }
                 }
                 if (!is_scalar_defined)
@@ -6726,7 +6738,10 @@ lookup_component_canon_lift_value_type(const WASMComponent *component,
                     if (elem_tag == WASM_COMP_DEF_VAL_ENUM
                         || elem_tag == WASM_COMP_DEF_VAL_FLAGS
                         || elem_tag == WASM_COMP_DEF_VAL_RECORD
-                        || elem_tag == WASM_COMP_DEF_VAL_TUPLE) {
+                        || elem_tag == WASM_COMP_DEF_VAL_TUPLE
+                        || elem_tag == WASM_COMP_DEF_VAL_OPTION
+                        || elem_tag == WASM_COMP_DEF_VAL_RESULT
+                        || elem_tag == WASM_COMP_DEF_VAL_VARIANT) {
                         memset(out_info, 0, sizeof(*out_info));
                         out_info->kind =
                             WASM_COMP_CANON_LIFT_VALUE_LIST_SCALAR;
@@ -9646,7 +9661,10 @@ flatten_component_public_composite_bytes(
                     return false;
                 if (!elem_shape.def_type
                     || (elem_shape.def_type->tag != WASM_COMP_DEF_VAL_RECORD
-                        && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_TUPLE))
+                        && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_TUPLE
+                        && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_OPTION
+                        && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_RESULT
+                        && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_VARIANT))
                     return set_component_composite_param_list_scalar_leaf_error(
                         inst, param_index);
                 element_size = component_type_flat_byte_size(
@@ -11147,7 +11165,10 @@ compute_component_canon_abi_layout(WASMComponentInstance *inst,
                     return false;
                 if (!elem_shape.def_type
                     || (elem_shape.def_type->tag != WASM_COMP_DEF_VAL_RECORD
-                        && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_TUPLE))
+                        && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_TUPLE
+                        && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_OPTION
+                        && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_RESULT
+                        && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_VARIANT))
                     return set_component_call_error_fmt(
                         inst, "component canon lift function result %u only supports "
                               "variable-length list<scalar>/list<string> leaves "
@@ -12389,7 +12410,10 @@ decode_component_canon_composite_result_value(
                     return false;
                 if (!elem_shape.def_type
                     || (elem_shape.def_type->tag != WASM_COMP_DEF_VAL_RECORD
-                        && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_TUPLE))
+                        && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_TUPLE
+                        && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_OPTION
+                        && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_RESULT
+                        && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_VARIANT))
                     return set_component_call_error_fmt(
                         inst, "component canon lift function result %u only supports "
                               "variable-length list<scalar>/list<string> leaves "
