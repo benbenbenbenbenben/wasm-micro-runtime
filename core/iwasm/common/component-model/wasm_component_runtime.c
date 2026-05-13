@@ -1116,6 +1116,10 @@ destroy_component_instance_graph(WASMComponentInstance *inst)
         wasm_runtime_free(inst->component_values);
         inst->component_values = NULL;
     }
+    if (inst->core_types) {
+        wasm_runtime_free(inst->core_types);
+        inst->core_types = NULL;
+    }
 
     inst->core_module_count = 0;
     inst->core_instance_count = 0;
@@ -1130,6 +1134,7 @@ destroy_component_instance_graph(WASMComponentInstance *inst)
     inst->component_value_count = 0;
     inst->component_instance_count = 0;
     inst->component_export_count = 0;
+    inst->core_type_count = 0;
 }
 
 static bool
@@ -23405,6 +23410,27 @@ build_component_instance_graph(WASMComponentInstance *inst,
                         error_buf_size))
                     return false;
                 break;
+            case WASM_COMP_SECTION_CORE_TYPE:
+            {
+                const WASMComponentCoreTypeSection *cts =
+                    section->parsed.core_type_section;
+                if (cts && cts->count > 0) {
+                    uint32 needed = inst->core_type_count + cts->count;
+                    WASMComponentCoreType *new_types = wasm_runtime_realloc(
+                        inst->core_types,
+                        sizeof(WASMComponentCoreType) * needed);
+                    if (!new_types)
+                        return set_component_runtime_error_fmt(
+                            error_buf, error_buf_size,
+                            "allocate memory failed for core types");
+                    inst->core_types = new_types;
+                    memcpy(&inst->core_types[inst->core_type_count],
+                           cts->types,
+                           sizeof(WASMComponentCoreType) * cts->count);
+                    inst->core_type_count = needed;
+                }
+                break;
+            }
             default:
                 break;
         }
