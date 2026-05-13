@@ -20482,10 +20482,56 @@ component_contains_nested_component(const WASMComponent *component,
         if (section->parsed.component == candidate
             || component_contains_nested_component(section->parsed.component,
                                                    candidate))
-            return true;
+        return true;
     }
 
     return false;
+}
+
+uint32_t
+wasm_runtime_get_component_lowered_func_count(wasm_module_inst_t module_inst)
+{
+    WASMComponentInstance *inst = (WASMComponentInstance *)module_inst;
+
+    if (!inst)
+        return 0;
+
+    return inst->lowered_func_count;
+}
+
+bool
+wasm_runtime_call_component_lowered_func(
+    wasm_module_inst_t module_inst, uint32_t lowered_func_index,
+    uint32_t num_results, wasm_component_value_t *results,
+    uint32_t num_args, const wasm_component_value_t *args)
+{
+    WASMComponentInstance *inst = (WASMComponentInstance *)module_inst;
+    WASMComponentRuntimeFunc *lowered_func;
+    WASMComponentRuntimeFunc *target;
+    uint32 i;
+    bool call_ok;
+
+    if (!inst || !results)
+        return false;
+
+    if (lowered_func_index >= inst->lowered_func_count)
+        return false;
+
+    lowered_func = &inst->lowered_funcs[lowered_func_index];
+    target = lowered_func->lowered_target;
+
+    if (!target)
+        return false;
+
+    /* Clear call results */
+    for (i = 0; i < num_results; i++)
+        wasm_component_value_destroy(&results[i]);
+
+    call_ok = wasm_component_call_values_internal(
+        inst, target, num_results, results, num_args, args, false,
+        lowered_func->resource_state);
+
+    return call_ok;
 }
 
 static bool

@@ -1468,6 +1468,15 @@ wasm_runtime_drop_component_owned_result(wasm_module_inst_t module_inst,
                                          wasm_component_func_t function,
                                          uint32_t result_index,
                                          wasm_component_value_t *value);
+
+WASM_RUNTIME_API_EXTERN uint32_t
+wasm_runtime_get_component_lowered_func_count(wasm_module_inst_t module_inst);
+
+WASM_RUNTIME_API_EXTERN bool
+wasm_runtime_call_component_lowered_func(
+    wasm_module_inst_t module_inst, uint32_t lowered_func_index,
+    uint32_t num_results, wasm_component_value_t *results,
+    uint32_t num_args, const wasm_component_value_t *args);
 #endif
 
 /**

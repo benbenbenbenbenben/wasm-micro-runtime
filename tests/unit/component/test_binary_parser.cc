@@ -65194,6 +65194,139 @@ TEST_F(BinaryParserTest,
 }
 
 static bool
+host_identity_callback(wasm_module_inst_t caller_component_inst,
+                       void *user_data, uint32_t num_results,
+                       wasm_component_value_t results[], uint32_t num_args,
+                       const wasm_component_value_t args[], char *error_buf,
+                       uint32_t error_buf_size)
+{
+    ++*(uint32_t *)user_data;
+    for (uint32_t i = 0; i < num_args && i < num_results; i++)
+        results[i] = args[i];
+    return true;
+}
+
+TEST_F(BinaryParserTest,
+       TestPublicApiCanCallLoweredFuncDirectly)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "public-api-lowered-func-call";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    /* Create func type: (s32, s32) -> s32 */
+    const int32_t func_type_idx = append_component_func_type(
+        (WASMComponentModule *)module,
+        { { "x", make_component_primitive_value_type(WASM_COMP_PRIMVAL_S32) },
+          { "y", make_component_primitive_value_type(WASM_COMP_PRIMVAL_S32) } },
+        make_component_primitive_value_type(WASM_COMP_PRIMVAL_S32));
+    ASSERT_GE(func_type_idx, 0);
+
+    /* Host import */
+    ASSERT_TRUE(append_top_level_host_function_import_sections(
+        (WASMComponentModule *)module, "host-identity", "host-instance",
+        "forwarded"));
+    WASMComponentImport *host_import = find_component_import_by_name_and_kind(
+        (WASMComponentModule *)module, "host-identity", WASM_COMP_EXTERN_FUNC);
+    ASSERT_NE(host_import, nullptr);
+    ASSERT_NE(host_import->extern_desc, nullptr);
+    host_import->extern_desc->extern_desc.func.type_idx = (uint32_t)func_type_idx;
+
+    ASSERT_TRUE(append_top_level_function_export_alias(
+        (WASMComponentModule *)module, "host-instance", "forwarded",
+        "aliased-host"));
+
+    const int32_t source_func_idx = find_top_level_export_sort_index(
+        (WASMComponentModule *)module, "aliased-host", WASM_COMP_SORT_FUNC);
+    ASSERT_GE(source_func_idx, 0);
+
+    /* Create lowered function (no core caller needed) */
+    WASMComponent *comp = &((WASMComponentModule *)module)->component;
+    const uint32_t old_count = comp->section_count;
+    auto *new_sections = (WASMComponentSection *)wasm_runtime_malloc(
+        sizeof(WASMComponentSection) * (old_count + 1));
+    ASSERT_NE(new_sections, nullptr);
+    memset(new_sections, 0, sizeof(WASMComponentSection) * (old_count + 1));
+    memcpy(new_sections, comp->sections,
+           sizeof(WASMComponentSection) * old_count);
+    wasm_runtime_free(comp->sections);
+    comp->sections = new_sections;
+    comp->section_count = old_count + 1;
+
+    auto *canon_section = &comp->sections[old_count];
+    canon_section->id = WASM_COMP_SECTION_CANONS;
+    canon_section->parsed.canon_section =
+        (WASMComponentCanonSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentCanonSection));
+    ASSERT_NE(canon_section->parsed.canon_section, nullptr);
+    memset(canon_section->parsed.canon_section, 0,
+           sizeof(WASMComponentCanonSection));
+    canon_section->parsed.canon_section->count = 1;
+    canon_section->parsed.canon_section->canons =
+        (WASMComponentCanon *)wasm_runtime_malloc(sizeof(WASMComponentCanon));
+    ASSERT_NE(canon_section->parsed.canon_section->canons, nullptr);
+    memset(canon_section->parsed.canon_section->canons, 0,
+           sizeof(WASMComponentCanon));
+    canon_section->parsed.canon_section->canons[0].tag = WASM_COMP_CANON_LOWER;
+    canon_section->parsed.canon_section->canons[0].canon_data.lower.func_idx =
+        (uint32_t)source_func_idx;
+
+    uint32_t callback_count = 0;
+    wasm_component_func_import_binding_t func_import = {};
+    func_import.name = "host-identity";
+    func_import.callback = host_identity_callback;
+    func_import.user_data = &callback_count;
+
+    struct InstantiationArgs2 *inst_args = nullptr;
+    ASSERT_TRUE(wasm_runtime_instantiation_args_create(&inst_args));
+    wasm_runtime_instantiation_args_set_default_stack_size(inst_args,
+                                                           helper->stack_size);
+    wasm_runtime_instantiation_args_set_host_managed_heap_size(inst_args,
+                                                               helper->heap_size);
+    wasm_runtime_instantiation_args_set_wasi_stdio(inst_args, 0, 1, 2);
+    wasm_runtime_instantiation_args_set_wasi_dir(inst_args, nullptr, 0, nullptr,
+                                                 0);
+    wasm_runtime_instantiation_args_set_component_func_imports(inst_args,
+                                                               &func_import, 1);
+
+    wasm_module_inst_t module_inst = wasm_runtime_instantiate_ex2(
+        module, inst_args, helper->error_buf,
+        (uint32_t)sizeof(helper->error_buf));
+    wasm_runtime_instantiation_args_destroy(inst_args);
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    /* Verify lowered function count */
+    ASSERT_EQ(wasm_runtime_get_component_lowered_func_count(module_inst), 1u);
+
+    /* Call the lowered function directly: (s32=7, s32=35) -> s32=42 */
+    wasm_component_value_t args[2] = { make_component_s32_value(7),
+                                       make_component_s32_value(35) };
+    wasm_component_value_t result = {};
+    ASSERT_TRUE(wasm_runtime_call_component_lowered_func(
+        module_inst, 0, 1, &result, 2, args))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(result.type.kind, WASM_COMPONENT_VALUE_TYPE_PRIMITIVE);
+    ASSERT_EQ(result.type.type.primitive_type,
+              WASM_COMPONENT_PRIMITIVE_VALUE_S32);
+    { auto *d = (const int32 *)wasm_component_value_get_data(&result);
+      ASSERT_NE(d, nullptr); ASSERT_EQ(*d, 7); }
+    ASSERT_EQ(callback_count, 1u);
+
+    wasm_component_value_destroy(&args[0]);
+    wasm_component_value_destroy(&args[1]);
+    wasm_component_value_destroy(&result);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+static bool
 host_create_record_result_callback(wasm_module_inst_t caller_component_inst,
                                    void *user_data, uint32_t num_results,
                                    wasm_component_value_t results[],
