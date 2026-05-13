@@ -174,6 +174,54 @@ wasm_component_promote_pending_imported_resource_result(
 }
 
 bool
+wasm_component_promote_pending_local_resource_result(
+    WASMComponentInstance *inst,
+    const WASMComponentRuntimeResourceState *resource_state, uint32 resource_type_idx,
+    wasm_component_value_t *value, wasm_val_t *handle_value_out)
+{
+    WASMComponentPublicResourceValue *resource_value =
+        wasm_component_get_public_resource_value(value);
+    const WASMComponentRuntimeResourceType *runtime_type;
+    const WASMComponentRuntimeResourceType *canonical_type;
+    char error_buf[128] = { 0 };
+    uint32 handle;
+
+    if (!resource_value
+        || resource_value->kind
+               != WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_PENDING_LOCAL_RESULT)
+        return set_component_call_error(
+            inst,
+            "host component function result 0 must return a pending local "
+            "resource result");
+
+    runtime_type = wasm_component_resource_lookup_runtime_type_const(
+        resource_state, resource_type_idx);
+    canonical_type = runtime_type
+                         ? wasm_component_resource_lookup_runtime_type_const(
+                               resource_state, runtime_type->canonical_type_idx)
+                         : NULL;
+    if (!canonical_type
+        || canonical_type->kind != WASM_COMP_RUNTIME_RESOURCE_TYPE_LOCAL)
+        return set_component_call_error(
+            inst,
+            "host component function fresh local resource results require a "
+            "local resource type");
+
+    if (!wasm_component_resource_create_owned_handle(
+            (WASMComponentRuntimeResourceState *)resource_state, resource_type_idx,
+            resource_value->data, resource_value->finalizer,
+            resource_value->finalizer_ctx, &handle, error_buf,
+            (uint32)sizeof(error_buf)))
+        return set_component_call_error(inst, error_buf);
+
+    wasm_component_consume_public_resource_value(resource_value);
+    wasm_component_value_destroy(value);
+    handle_value_out->kind = WASM_I32;
+    handle_value_out->of.i32 = (int32)handle;
+    return true;
+}
+
+bool
 wasm_component_restore_public_resource_value(WASMComponentInstance *inst,
                                              wasm_component_value_t *value)
 {

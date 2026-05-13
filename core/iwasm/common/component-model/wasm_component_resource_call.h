@@ -58,6 +58,12 @@ wasm_component_promote_pending_imported_resource_result(
     wasm_component_value_t *value, wasm_val_t *handle_value_out);
 
 bool
+wasm_component_promote_pending_local_resource_result(
+    WASMComponentInstance *inst,
+    const WASMComponentRuntimeResourceState *resource_state, uint32 resource_type_idx,
+    wasm_component_value_t *value, wasm_val_t *handle_value_out);
+
+bool
 wasm_component_restore_public_resource_value(WASMComponentInstance *inst,
                                              wasm_component_value_t *value);
 

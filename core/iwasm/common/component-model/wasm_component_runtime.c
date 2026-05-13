@@ -15635,10 +15635,21 @@ wasm_component_call_values_internal(
                         handle_value.kind = WASM_I32;
                         handle_value.of.i32 = (int32)restored_handle;
                     }
+                    else if (resource_value->kind
+                             == WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_PENDING_LOCAL_RESULT) {
+                        if (!wasm_component_promote_pending_local_resource_result(
+                                inst, host_resource_state,
+                                mapped_result_resource_type_idx,
+                                &callback_results[result_i], &handle_value)) {
+                            wasm_component_value_destroy(
+                                &callback_results[result_i]);
+                            goto host_import_success_fail;
+                        }
+                    }
                     else if (!wasm_component_promote_pending_imported_resource_result(
-                                  inst, host_resource_state,
-                                  mapped_result_resource_type_idx,
-                                  &callback_results[result_i], &handle_value)) {
+                                   inst, host_resource_state,
+                                   mapped_result_resource_type_idx,
+                                   &callback_results[result_i], &handle_value)) {
                         wasm_component_value_destroy(&callback_results[result_i]);
                         goto host_import_success_fail;
                     }

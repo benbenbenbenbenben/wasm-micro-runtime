@@ -334,6 +334,38 @@ wasm_component_value_init_owned_imported_resource_result(
 }
 
 WASM_RUNTIME_API_EXTERN bool
+wasm_component_value_init_owned_local_resource_result(
+    wasm_component_value_t *value, void *data,
+    wasm_component_resource_value_finalizer_t finalizer, void *finalizer_ctx)
+{
+    WASMComponentPublicResourceValue *resource_value;
+
+    if (!value)
+        return false;
+
+    wasm_component_value_destroy(value);
+    resource_value =
+        (WASMComponentPublicResourceValue *)wasm_runtime_malloc(
+            sizeof(WASMComponentPublicResourceValue));
+    if (!resource_value)
+        return false;
+
+    memset(resource_value, 0, sizeof(*resource_value));
+    resource_value->magic = WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_MAGIC;
+    resource_value->kind =
+        WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_PENDING_LOCAL_RESULT;
+    resource_value->data = data;
+    resource_value->finalizer = finalizer;
+    resource_value->finalizer_ctx = finalizer_ctx;
+
+    value->type.kind = WASM_COMPONENT_VALUE_TYPE_DEFINED;
+    value->storage_kind = WASM_COMPONENT_VALUE_STORAGE_RESOURCE;
+    value->byte_size = 0;
+    value->storage.owned_data = resource_value;
+    return true;
+}
+
+WASM_RUNTIME_API_EXTERN bool
 wasm_component_value_init_borrowed_resource_result(
     wasm_component_value_t *value, const wasm_component_value_t *borrowed_value)
 {
