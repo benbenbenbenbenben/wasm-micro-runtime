@@ -436,20 +436,11 @@ Major Canonical ABI gaps remain:
   `list<scalar>` tuple-record subset, and the tested nested imported
   `own<resource> + s32` retptr/result-area seam with nested `resource-drop`
   consumption
-- no list marshalling beyond UTF-8 strings, the tested direct top-level and
-  nested child-core `list<string>` parameter/result paths, the tested
-  cross-component `list<string>` parameter/result seams, top-level
-  `list<scalar>`, `list<enum>`, `list<flags>`, and the tested top-level
-  direct tuple/record `list<string>`-leaf plus nested `list<scalar>` /
-  `list<enum>` / `list<flags>` leaves in exported tuple/record values and
-  host-import tuple/record parameter/result values
-- no general variant-with-non-scalar-payloads marshalling
-  (enum, flags, option<scalar>, option<string>, option<list<scalar>>,
-  result<scalar,scalar>, and variant<scalar> are now supported)
-- no non-string memory-backed leaves inside tuple/record Canonical ABI values beyond nested `list<scalar>` leaves for exported canon-lift calls and host-import tuple/record parameters
-- no broader composite flattening/lifting rules beyond the current
-  string / variable-length `list<scalar>` / variable-length `list<string>`
-  tuple-record subset
+- list marshalling now includes top-level and composite paths for
+  `list<scalar>`, `list<string>`, `list<enum>`, `list<flags>`,
+  `list<record>`, `list<tuple>`, `list<option>`, `list<result>`,
+  and `list<variant>` (scalar-payload defined types with flat ALBI
+  layouts)
 - no non-UTF-8 string encodings (`utf16`, `latin1+utf16`)
 - no `memory64` memory-backed Canonical ABI support
 - no `error-context` value support
