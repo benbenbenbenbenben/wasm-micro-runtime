@@ -537,7 +537,14 @@ wasm_component_resource_state_destroy(
             continue;
 
         if (canonical_type->handle_table.entries[handle_index].is_live) {
-            release_handle_entry(&canonical_type->handle_table.entries[handle_index]);
+            WASMComponentResourceHandleEntry *entry =
+                &canonical_type->handle_table.entries[handle_index];
+            if (entry->borrow_count > 0) {
+                /* Skip owned handles with outstanding borrows to avoid
+                   use-after-free when borrowed handles are released later. */
+                continue;
+            }
+            release_handle_entry(entry);
             if (canonical_type->handle_table.live_handle_count > 0)
                 canonical_type->handle_table.live_handle_count--;
             if (canonical_type->handle_table.owned_handle_count > 0)
