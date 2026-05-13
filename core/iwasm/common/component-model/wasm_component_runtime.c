@@ -3072,6 +3072,9 @@ validate_lowered_import_signature(
                     string_encoding =
                         WASM_COMP_RUNTIME_STRING_ENCODING_LATIN1_UTF16;
                     continue;
+                case WASM_COMP_CANON_OPT_ASYNC:
+                case WASM_COMP_CANON_OPT_CALLBACK:
+                    continue;
                 default:
                     return set_component_runtime_error_fmt(
                         error_buf, error_buf_size,
@@ -9016,6 +9019,17 @@ resolve_component_canon_lift_abi(WASMComponentInstance *inst,
                         "canon lift post-return func index %u does not resolve to "
                         "a function",
                         opt->payload.post_return.func_idx);
+                break;
+            case WASM_COMP_CANON_OPT_ASYNC:
+                function->is_async = true;
+                break;
+            case WASM_COMP_CANON_OPT_CALLBACK:
+                if (opt->payload.callback.func_idx >= inst->core_func_count)
+                    return set_component_runtime_error_fmt(
+                        error_buf, error_buf_size,
+                        "canon lift callback func index %u is out of bounds",
+                        opt->payload.callback.func_idx);
+                function->callback_func_idx = opt->payload.callback.func_idx;
                 break;
             default:
                 break;

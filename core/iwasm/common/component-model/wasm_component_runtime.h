@@ -110,6 +110,8 @@ typedef struct WASMComponentRuntimeFunc {
     bool has_owned_resource_result;
     bool has_borrowed_resource_result;
     bool is_top_level_export;
+    bool is_async;
+    uint32 callback_func_idx;
     wasm_component_host_func_callback_t host_callback;
     void *host_user_data;
 } WASMComponentRuntimeFunc;

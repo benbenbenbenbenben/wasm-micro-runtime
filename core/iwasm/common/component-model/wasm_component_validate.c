@@ -2094,6 +2094,7 @@ validate_canon_opts(WASMComponentValidationContext *ctx,
     bool has_memory = false;
     bool has_realloc = false;
     bool has_post_return = false;
+    bool has_async = false;
     for (uint32_t i = 0; i < opts->canon_opts_count; i++) {
         WASMComponentCanonOpt *opt = &opts->canon_opts[i];
         switch (opt->tag) {
@@ -2171,10 +2172,20 @@ validate_canon_opts(WASMComponentValidationContext *ctx,
                 has_post_return = true;
                 break;
             case WASM_COMP_CANON_OPT_ASYNC:
+                if (has_async) {
+                    set_error_buf_ex(error_buf, error_buf_size,
+                                     "duplicate async in canonopt");
+                    return false;
+                }
+                has_async = true;
+                break;
             case WASM_COMP_CANON_OPT_CALLBACK:
-                set_error_buf_ex(error_buf, error_buf_size,
-                                 "async canonopt is not supported");
-                return false;
+                if (opt->payload.callback.func_idx >= ctx->core_func_count) {
+                    set_error_buf_ex(error_buf, error_buf_size,
+                                     "canonopt callback func idx out of bounds");
+                    return false;
+                }
+                break;
             default:
                 set_error_buf_ex(error_buf, error_buf_size,
                                  "unknown canonopt tag: 0x%02x", opt->tag);
