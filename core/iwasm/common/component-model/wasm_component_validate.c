@@ -2418,6 +2418,34 @@ validate_canons_section(WASMComponentValidationContext *ctx,
                 ctx->core_func_count++;
                 break;
 
+            case WASM_COMP_CANON_STREAM_NEW:
+            case WASM_COMP_CANON_STREAM_READ:
+            case WASM_COMP_CANON_STREAM_WRITE:
+            case WASM_COMP_CANON_STREAM_CANCEL_READ:
+            case WASM_COMP_CANON_STREAM_CANCEL_WRITE:
+            case WASM_COMP_CANON_STREAM_DROP_READABLE:
+            case WASM_COMP_CANON_STREAM_DROP_WRITABLE:
+            case WASM_COMP_CANON_FUTURE_NEW:
+            case WASM_COMP_CANON_FUTURE_READ:
+            case WASM_COMP_CANON_FUTURE_WRITE:
+            case WASM_COMP_CANON_FUTURE_CANCEL_READ:
+            case WASM_COMP_CANON_FUTURE_CANCEL_WRITE:
+            case WASM_COMP_CANON_FUTURE_DROP_READABLE:
+            case WASM_COMP_CANON_FUTURE_DROP_WRITABLE:
+            case WASM_COMP_CANON_ERROR_CONTEXT_NEW:
+            case WASM_COMP_CANON_ERROR_CONTEXT_DEBUG:
+            case WASM_COMP_CANON_ERROR_CONTEXT_DROP:
+            case WASM_COMP_CANON_WAITABLE_SET_NEW:
+            case WASM_COMP_CANON_WAITABLE_SET_WAIT:
+            case WASM_COMP_CANON_WAITABLE_SET_POLL:
+            case WASM_COMP_CANON_WAITABLE_SET_DROP:
+            case WASM_COMP_CANON_WAITABLE_JOIN:
+            case WASM_COMP_CANON_THREAD_SPAWN_REF:
+            case WASM_COMP_CANON_THREAD_SPAWN_INDIRECT:
+            case WASM_COMP_CANON_THREAD_AVAILABLE_PAR:
+                ctx->core_func_count++;
+                break;
+
             default:
                 set_error_buf_ex(error_buf, error_buf_size,
                                  "unsupported canon opcode: 0x%02x",

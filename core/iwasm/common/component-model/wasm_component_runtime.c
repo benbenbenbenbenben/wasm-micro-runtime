@@ -19090,7 +19090,20 @@ append_component_canon_function(WASMComponentInstance *inst,
              || canon->tag == WASM_COMP_CANON_YIELD
              || canon->tag == WASM_COMP_CANON_SUBTASK_DROP
              || canon->tag == WASM_COMP_CANON_CONTEXT_GET
-             || canon->tag == WASM_COMP_CANON_CONTEXT_SET) {
+             || canon->tag == WASM_COMP_CANON_CONTEXT_SET
+             || (canon->tag >= WASM_COMP_CANON_STREAM_NEW
+                 && canon->tag <= WASM_COMP_CANON_STREAM_DROP_WRITABLE)
+             || (canon->tag >= WASM_COMP_CANON_FUTURE_NEW
+                 && canon->tag <= WASM_COMP_CANON_FUTURE_DROP_WRITABLE)
+             || canon->tag == WASM_COMP_CANON_ERROR_CONTEXT_NEW
+             || canon->tag == WASM_COMP_CANON_ERROR_CONTEXT_DEBUG
+             || canon->tag == WASM_COMP_CANON_ERROR_CONTEXT_DROP
+             || (canon->tag >= WASM_COMP_CANON_WAITABLE_SET_NEW
+                 && canon->tag <= WASM_COMP_CANON_WAITABLE_SET_DROP)
+             || canon->tag == WASM_COMP_CANON_WAITABLE_JOIN
+             || canon->tag == WASM_COMP_CANON_THREAD_SPAWN_REF
+             || canon->tag == WASM_COMP_CANON_THREAD_SPAWN_INDIRECT
+             || canon->tag == WASM_COMP_CANON_THREAD_AVAILABLE_PAR) {
         if (inst->lowered_func_count >= UINT32_MAX
             || inst->core_func_count >= UINT32_MAX)
             return set_component_runtime_error_fmt(
@@ -19244,6 +19257,60 @@ append_nested_component_canon(
             core_ref.of.lowered_function = func;
             return append_nested_component_local_core_func(bindings, core_ref, error_buf,
                                                            error_buf_size);
+        }
+        case WASM_COMP_CANON_TASK_CANCEL:
+        case WASM_COMP_CANON_SUBTASK_CANCEL:
+        case WASM_COMP_CANON_BACKPRESSURE_SET:
+        case WASM_COMP_CANON_YIELD:
+        case WASM_COMP_CANON_SUBTASK_DROP:
+        case WASM_COMP_CANON_CONTEXT_GET:
+        case WASM_COMP_CANON_CONTEXT_SET:
+        case WASM_COMP_CANON_TASK_RETURN:
+        case WASM_COMP_CANON_STREAM_NEW:
+        case WASM_COMP_CANON_STREAM_READ:
+        case WASM_COMP_CANON_STREAM_WRITE:
+        case WASM_COMP_CANON_STREAM_CANCEL_READ:
+        case WASM_COMP_CANON_STREAM_CANCEL_WRITE:
+        case WASM_COMP_CANON_STREAM_DROP_READABLE:
+        case WASM_COMP_CANON_STREAM_DROP_WRITABLE:
+        case WASM_COMP_CANON_FUTURE_NEW:
+        case WASM_COMP_CANON_FUTURE_READ:
+        case WASM_COMP_CANON_FUTURE_WRITE:
+        case WASM_COMP_CANON_FUTURE_CANCEL_READ:
+        case WASM_COMP_CANON_FUTURE_CANCEL_WRITE:
+        case WASM_COMP_CANON_FUTURE_DROP_READABLE:
+        case WASM_COMP_CANON_FUTURE_DROP_WRITABLE:
+        case WASM_COMP_CANON_ERROR_CONTEXT_NEW:
+        case WASM_COMP_CANON_ERROR_CONTEXT_DEBUG:
+        case WASM_COMP_CANON_ERROR_CONTEXT_DROP:
+        case WASM_COMP_CANON_WAITABLE_SET_NEW:
+        case WASM_COMP_CANON_WAITABLE_SET_WAIT:
+        case WASM_COMP_CANON_WAITABLE_SET_POLL:
+        case WASM_COMP_CANON_WAITABLE_SET_DROP:
+        case WASM_COMP_CANON_WAITABLE_JOIN:
+        case WASM_COMP_CANON_THREAD_SPAWN_REF:
+        case WASM_COMP_CANON_THREAD_SPAWN_INDIRECT:
+        case WASM_COMP_CANON_THREAD_AVAILABLE_PAR:
+        {
+            if (runtime_inst->owned_lowered_func_count >= UINT32_MAX)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "too many nested component async builtins");
+
+            func = &runtime_inst->owned_lowered_funcs
+                        [runtime_inst->owned_lowered_func_count++];
+            memset(func, 0, sizeof(*func));
+            func->kind = WASM_COMP_RUNTIME_FUNC_RESOURCE_BUILTIN;
+            func->canon_tag = canon->tag;
+            func->owner_instance = inst;
+            func->resource_state = runtime_inst->resource_state;
+            func->type_owner_component = component;
+
+            memset(&core_ref, 0, sizeof(core_ref));
+            core_ref.type = WASM_COMP_CORE_RUNTIME_REF_LOWERED_FUNC;
+            core_ref.of.lowered_function = func;
+            return append_nested_component_local_core_func(
+                bindings, core_ref, error_buf, error_buf_size);
         }
         default:
             if (runtime_inst->owned_func_count >= UINT32_MAX)
