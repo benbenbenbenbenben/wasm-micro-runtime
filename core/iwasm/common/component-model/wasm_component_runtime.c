@@ -3726,6 +3726,33 @@ component_resource_builtin_trampoline(WASMModuleInstanceCommon *caller_module_in
 
     switch (resource_function->canon_tag) {
         case WASM_COMP_CANON_RESOURCE_NEW:
+            if (canonical_resource_type->kind
+                == WASM_COMP_RUNTIME_RESOURCE_TYPE_IMPORTED) {
+                void *new_data = NULL;
+                if (!canonical_resource_type->imported_new_callback) {
+                    wasm_runtime_set_exception(
+                        caller_module_inst,
+                        "component imported resource type has no bound new "
+                        "callback for resource.new");
+                    return;
+                }
+                if (!canonical_resource_type->imported_new_callback(
+                        &new_data,
+                        canonical_resource_type->imported_new_user_data,
+                        error_buf, (uint32)sizeof(error_buf))) {
+                    wasm_runtime_set_exception(caller_module_inst, error_buf);
+                    return;
+                }
+                if (!wasm_component_resource_create_imported_handle(
+                        resource_function->resource_state,
+                        resource_function->resource_type_idx, new_data, true,
+                        &handle, error_buf, (uint32)sizeof(error_buf))) {
+                    wasm_runtime_set_exception(caller_module_inst, error_buf);
+                    return;
+                }
+                raw_args[0] = handle;
+                return;
+            }
             rep = (uint32)raw_args[0];
             if (!wasm_component_resource_create_owned_handle(
                     resource_function->resource_state,
@@ -21054,9 +21081,14 @@ bind_top_level_imported_resource_type(WASMComponentInstance *inst,
             || strcmp(resource_type->import_name, import_name))
             continue;
 
-        return wasm_component_resource_bind_imported_drop_callback(
-            inst->resource_state, i, binding->value.resource_type.drop_callback,
-            binding->value.resource_type.user_data, error_buf, error_buf_size);
+        if (!wasm_component_resource_bind_imported_drop_callback(
+                inst->resource_state, i, binding->value.resource_type.drop_callback,
+                binding->value.resource_type.user_data, error_buf, error_buf_size))
+            return false;
+
+        return wasm_component_resource_bind_imported_new_callback(
+            inst->resource_state, i, binding->value.resource_type.new_callback,
+            binding->value.resource_type.new_user_data, error_buf, error_buf_size);
     }
 
     return set_component_runtime_error_fmt(

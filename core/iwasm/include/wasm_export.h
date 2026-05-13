@@ -204,9 +204,14 @@ typedef bool (*wasm_component_imported_resource_drop_callback_t)(
     void *data, void *user_data, char *error_buf, uint32_t error_buf_size);
 typedef void (*wasm_component_resource_value_finalizer_t)(void *data, void *ctx);
 
+typedef bool (*wasm_component_imported_resource_new_callback_t)(
+    void **data_out, void *user_data, char *error_buf, uint32_t error_buf_size);
+
 typedef struct wasm_component_resource_type_import_binding_t {
     wasm_component_imported_resource_drop_callback_t drop_callback;
     void *user_data;
+    wasm_component_imported_resource_new_callback_t new_callback;
+    void *new_user_data;
 } wasm_component_resource_type_import_binding_t;
 
 typedef struct wasm_component_export_t {

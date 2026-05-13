@@ -706,6 +706,29 @@ wasm_component_resource_bind_imported_drop_callback(
 }
 
 bool
+wasm_component_resource_bind_imported_new_callback(
+    WASMComponentRuntimeResourceState *resource_state, uint32 type_idx,
+    wasm_component_imported_resource_new_callback_t callback, void *user_data,
+    char *error_buf, uint32 error_buf_size)
+{
+    WASMComponentRuntimeResourceType *canonical_type =
+        resolve_canonical_resource_type(resource_state, type_idx);
+
+    if (!canonical_type)
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "component type index %u is not a runtime resource type", type_idx);
+    if (canonical_type->kind != WASM_COMP_RUNTIME_RESOURCE_TYPE_IMPORTED)
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "component type index %u is not an imported resource type", type_idx);
+
+    canonical_type->imported_new_callback = callback;
+    canonical_type->imported_new_user_data = user_data;
+    return true;
+}
+
+bool
 wasm_component_resource_create_imported_handle(
     WASMComponentRuntimeResourceState *resource_state, uint32 type_idx,
     void *data, bool owned, uint32 *out_handle, char *error_buf,

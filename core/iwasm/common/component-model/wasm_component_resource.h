@@ -59,6 +59,8 @@ typedef struct WASMComponentRuntimeResourceType {
     uint32 callback_func_idx;
     wasm_component_imported_resource_drop_callback_t imported_drop_callback;
     void *imported_drop_user_data;
+    wasm_component_imported_resource_new_callback_t imported_new_callback;
+    void *imported_new_user_data;
     WASMComponentResourceHandleTable handle_table;
 } WASMComponentRuntimeResourceType;
 
@@ -141,6 +143,12 @@ bool
 wasm_component_resource_bind_imported_drop_callback(
     WASMComponentRuntimeResourceState *resource_state, uint32 type_idx,
     wasm_component_imported_resource_drop_callback_t callback, void *user_data,
+    char *error_buf, uint32 error_buf_size);
+
+bool
+wasm_component_resource_bind_imported_new_callback(
+    WASMComponentRuntimeResourceState *resource_state, uint32 type_idx,
+    wasm_component_imported_resource_new_callback_t callback, void *user_data,
     char *error_buf, uint32 error_buf_size);
 
 bool
