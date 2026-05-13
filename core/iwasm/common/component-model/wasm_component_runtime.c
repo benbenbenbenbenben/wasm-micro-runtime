@@ -3771,6 +3771,79 @@ validate_lowered_import_composite_param_signature(
 }
 
 static void
+component_async_builtin_trampoline(WASMModuleInstanceCommon *caller_module_inst,
+                                    const WASMComponentRuntimeFunc *async_func,
+                                    const WASMFuncType *func_type,
+                                    uint64 *raw_args)
+{
+    WASMComponentInstance *component_inst =
+        (WASMComponentInstance *)caller_module_inst;
+    WASMComponentAsyncEngine *engine;
+
+    if (!component_inst)
+        return;
+
+    engine = component_inst->async_engine;
+    if (!engine) {
+        wasm_runtime_set_exception(
+            caller_module_inst,
+            "component async builtin requires an async engine");
+        return;
+    }
+
+    switch (async_func->canon_tag) {
+        case WASM_COMP_CANON_TASK_CANCEL:
+        case WASM_COMP_CANON_SUBTASK_CANCEL:
+        {
+            uint32 task_id = (uint32)raw_args[0];
+            bool ok = wasm_component_async_cancel_task(engine, task_id);
+            if (func_type->result_count > 0)
+                raw_args[0] = ok ? 1 : 0;
+            break;
+        }
+        case WASM_COMP_CANON_BACKPRESSURE_SET:
+        {
+            /* Stub: backpressure tracking is a no-op in sync execution */
+            break;
+        }
+        case WASM_COMP_CANON_TASK_RETURN:
+        {
+            /* Stub: in synchronous execution, task.return is handled
+               automatically when the function returns. This is called
+               by core code that wants to return results early. */
+            break;
+        }
+        case WASM_COMP_CANON_CONTEXT_GET:
+        {
+            /* Stub: context is not yet implemented — return 0 */
+            if (func_type->result_count > 0)
+                raw_args[0] = 0;
+            break;
+        }
+        case WASM_COMP_CANON_CONTEXT_SET:
+        {
+            /* Stub: context storage not yet implemented */
+            break;
+        }
+        case WASM_COMP_CANON_YIELD:
+        {
+            /* Stub: in synchronous execution, yield is a no-op */
+            break;
+        }
+        case WASM_COMP_CANON_SUBTASK_DROP:
+        {
+            /* Stub: subtask references not yet tracked */
+            break;
+        }
+        default:
+            wasm_runtime_set_exception(
+                caller_module_inst,
+                "unknown component async builtin");
+            break;
+    }
+}
+
+static void
 component_resource_builtin_trampoline(WASMModuleInstanceCommon *caller_module_inst,
                                       WASMComponentRuntimeFunc *resource_function,
                                       const WASMFuncType *func_type,
@@ -4635,6 +4708,18 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
     if (lowered_function->kind == WASM_COMP_RUNTIME_FUNC_RESOURCE_BUILTIN) {
         component_resource_builtin_trampoline(caller_module_inst, lowered_function,
                                              func_type, raw_args);
+        return;
+    }
+    if (lowered_function->canon_tag == WASM_COMP_CANON_TASK_CANCEL
+        || lowered_function->canon_tag == WASM_COMP_CANON_SUBTASK_CANCEL
+        || lowered_function->canon_tag == WASM_COMP_CANON_BACKPRESSURE_SET
+        || lowered_function->canon_tag == WASM_COMP_CANON_TASK_RETURN
+        || lowered_function->canon_tag == WASM_COMP_CANON_CONTEXT_GET
+        || lowered_function->canon_tag == WASM_COMP_CANON_CONTEXT_SET
+        || lowered_function->canon_tag == WASM_COMP_CANON_YIELD
+        || lowered_function->canon_tag == WASM_COMP_CANON_SUBTASK_DROP) {
+        component_async_builtin_trampoline(caller_module_inst, lowered_function,
+                                           func_type, raw_args);
         return;
     }
     if (!lowered_function->lowered_target)
