@@ -4276,7 +4276,7 @@ materialize_lowered_import_multi_results(
     for (uint32 i = 0; i < result_count; i++) {
             uint8 *result_slot = wasm_runtime_addr_app_to_native(
                 caller_module_inst, result_area_ptr + result_offsets[i]);
-            uint32 payload_ptr = 0;
+            uint64 payload_ptr = 0;
             WASMComponentCanonLiftValueShape shape = { 0 };
 
             if (!result_slot) {
@@ -5099,7 +5099,7 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
 
                 memcpy(storage, len_buf, len_len);
                 if (byte_count > 0) {
-                    uint32 arg_ptr = (uint32)raw_args[core_param_index];
+                    uint64 arg_ptr = raw_args[core_param_index];
                     uint8 *caller_bytes;
 
                     if (!wasm_runtime_validate_app_addr(caller_module_inst, arg_ptr,
@@ -5481,7 +5481,7 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
     }
 
     if (expected_result_count > 1) {
-        uint32 result_area_ptr = (uint32)raw_args[core_param_index];
+        uint64 result_area_ptr = raw_args[core_param_index];
 
         if (func_type->result_count != 0 || core_param_index >= func_type->param_count) {
             destroy_component_public_values(call_results, expected_result_count);
@@ -5680,7 +5680,7 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
         wasm_component_value_destroy(&stack_results[0]);
     }
     else if (has_result_type && has_composite_memory_result) {
-        uint32 result_area_ptr = (uint32)raw_args[core_param_index];
+        uint64 result_area_ptr = raw_args[core_param_index];
 
         if (func_type->result_count != 0 || core_param_index >= func_type->param_count) {
             wasm_component_value_destroy(&stack_results[0]);
@@ -5729,7 +5729,7 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
         const uint8 *result_bytes = NULL;
         uint32 byte_count = 0;
         uint32 result_length;
-        uint32 result_area_ptr = (uint32)raw_args[core_param_index];
+        uint64 result_area_ptr = raw_args[core_param_index];
         uint32 payload_ptr = 0;
         uint8 *result_area_bytes;
         const bool is_string_result =
@@ -12339,7 +12339,7 @@ build_lowered_import_composite_param_payload(
                 return false;
             }
 
-            payload_ptr = (uint32)raw_args[*core_param_index_io];
+            payload_ptr = raw_args[*core_param_index_io];
             payload_len = (uint32)raw_args[*core_param_index_io + 1];
             if (payload_len > 0) {
                 if (!wasm_runtime_validate_app_addr(caller_module_inst, payload_ptr,
@@ -12531,7 +12531,7 @@ build_lowered_import_composite_param_payload(
             bool is_primitive = false;
             uint8 element_prim_type = 0;
             uint32 element_count;
-            uint32 payload_ptr;
+            uint64 payload_ptr;
             uint32 byte_count;
             uint32 element_size;
             const uint8 *payload = NULL;
@@ -12558,7 +12558,7 @@ build_lowered_import_composite_param_payload(
                 return false;
             }
 
-            payload_ptr = (uint32)raw_args[*core_param_index_io];
+            payload_ptr = raw_args[*core_param_index_io];
             element_count = (uint32)raw_args[*core_param_index_io + 1];
             if (element_prim_type == WASM_COMP_PRIMVAL_STRING) {
                 uint32 table_byte_count = 0;
@@ -14570,7 +14570,7 @@ write_component_public_composite_result_to_memory(
         if (shape.prim_type == WASM_COMP_PRIMVAL_STRING) {
             const uint8 *payload = NULL;
             uint32 payload_len = 0, consumed = 0;
-            uint32 payload_ptr = 0;
+            uint64 payload_ptr = 0;
             uint32 payload_offset = *payload_offset_io;
             uint64 payload_end;
 
