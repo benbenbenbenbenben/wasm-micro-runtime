@@ -64457,6 +64457,162 @@ TEST_F(BinaryParserTest, TestRuntimeSupportsVariantScalarParamAndResult)
     wasm_runtime_unload(module);
 }
 
+static bool
+test_imported_lower_host_callback(wasm_module_inst_t caller_component_inst,
+                                  void *user_data, uint32_t num_results,
+                                  wasm_component_value_t results[],
+                                  uint32_t num_args,
+                                  const wasm_component_value_t args[],
+                                  char *error_buf, uint32 error_buf_size)
+{
+    if (num_args != 2 || num_results != 1) {
+        snprintf(error_buf, error_buf_size,
+                 "test_imported_lower_host_callback: unexpected arity %u %u",
+                 num_args, num_results);
+        return false;
+    }
+    auto *val = (uint32 *)user_data;
+    *val = 99;
+    results[0] = args[0];
+    return true;
+}
+
+TEST_F(BinaryParserTest,
+       TestCoreWasmCanCallLoweredImportedFuncDirectly)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "core-wasm-lowered-imported-func";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    /* Create func type for import: (s32, s32) -> s32
+       (flat: (i32,i32)->i32, matching forward_core_caller.wasm) */
+    const int32_t import_func_type_idx = append_component_func_type(
+        (WASMComponentModule *)module,
+        { { "x",
+            make_component_primitive_value_type(WASM_COMP_PRIMVAL_S32) },
+          { "y",
+            make_component_primitive_value_type(WASM_COMP_PRIMVAL_S32) } },
+        make_component_primitive_value_type(WASM_COMP_PRIMVAL_S32));
+    ASSERT_GE(import_func_type_idx, 0);
+
+    /* Get the import's func sort index (it's the next available one) */
+    uint32_t import_func_idx = count_top_level_sort_entries(
+        &((WASMComponentModule *)module)->component, WASM_COMP_SORT_FUNC);
+
+    /* Create import section for a function with that type */
+    auto *component = &((WASMComponentModule *)module)->component;
+    const uint32_t old_count = component->section_count;
+    auto *new_sections = (WASMComponentSection *)wasm_runtime_malloc(
+        sizeof(WASMComponentSection) * (old_count + 1));
+    ASSERT_NE(new_sections, nullptr);
+    memset(new_sections, 0, sizeof(WASMComponentSection) * (old_count + 1));
+    memcpy(new_sections, component->sections,
+           sizeof(WASMComponentSection) * old_count);
+    wasm_runtime_free(component->sections);
+    component->sections = new_sections;
+    component->section_count = old_count + 1;
+
+    auto *import_section = &component->sections[old_count];
+    import_section->id = WASM_COMP_SECTION_IMPORTS;
+    import_section->parsed.import_section =
+        (WASMComponentImportSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentImportSection));
+    ASSERT_NE(import_section->parsed.import_section, nullptr);
+    memset(import_section->parsed.import_section, 0,
+           sizeof(WASMComponentImportSection));
+    import_section->parsed.import_section->count = 1;
+    import_section->parsed.import_section->imports =
+        (WASMComponentImport *)wasm_runtime_malloc(sizeof(WASMComponentImport));
+    ASSERT_NE(import_section->parsed.import_section->imports, nullptr);
+    memset(import_section->parsed.import_section->imports, 0,
+           sizeof(WASMComponentImport));
+    import_section->parsed.import_section->imports[0].import_name =
+        create_import_name("host-func");
+    import_section->parsed.import_section->imports[0].extern_desc =
+        create_extern_desc(WASM_COMP_EXTERN_FUNC);
+    ASSERT_NE(
+        import_section->parsed.import_section->imports[0].import_name, nullptr);
+    ASSERT_NE(
+        import_section->parsed.import_section->imports[0].extern_desc, nullptr);
+    import_section->parsed.import_section->imports[0]
+        .extern_desc->extern_desc.func.type_idx =
+        (uint32_t)import_func_type_idx;
+
+    /* Lower+relift: source func idx = import's func sort index */
+    ASSERT_TRUE(append_top_level_lowered_core_caller_sections_for_func(
+        (WASMComponentModule *)module, import_func_idx,
+        "forward_core_caller.wasm", "source"));
+
+    uint32_t core_inst_idx = count_top_level_core_instance_entries(
+        &((WASMComponentModule *)module)->component);
+    ASSERT_GE(core_inst_idx, 1u);
+    core_inst_idx--;
+
+    ASSERT_TRUE(append_top_level_core_export_lift_sections(
+        (WASMComponentModule *)module, core_inst_idx, "process",
+        (uint32_t)import_func_type_idx, "lowered-imported-func"));
+
+    /* Bind the import to a callback */
+    uint32_t callback_marker = 0;
+    wasm_component_func_import_binding_t func_import = {};
+    func_import.name = "host-func";
+    func_import.callback = test_imported_lower_host_callback;
+    func_import.user_data = &callback_marker;
+
+    struct InstantiationArgs2 *inst_args = nullptr;
+    ASSERT_TRUE(wasm_runtime_instantiation_args_create(&inst_args));
+    wasm_runtime_instantiation_args_set_default_stack_size(
+        inst_args, helper->stack_size);
+    wasm_runtime_instantiation_args_set_host_managed_heap_size(
+        inst_args, helper->heap_size);
+    wasm_runtime_instantiation_args_set_wasi_stdio(inst_args, 0, 1, 2);
+    wasm_runtime_instantiation_args_set_wasi_dir(inst_args, nullptr, 0,
+                                                  nullptr, 0);
+    wasm_runtime_instantiation_args_set_component_func_imports(
+        inst_args, &func_import, 1);
+
+    wasm_module_inst_t module_inst = wasm_runtime_instantiate_ex2(
+        module, inst_args, helper->error_buf,
+        (uint32_t)sizeof(helper->error_buf));
+    wasm_runtime_instantiation_args_destroy(inst_args);
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func = wasm_runtime_lookup_component_function(
+        module_inst, "lowered-imported-func");
+    ASSERT_NE(func, nullptr);
+
+    /* Call with (s32=7, s32=35) → callback receives (7,35), returns first arg=7 */
+    {
+        wasm_component_value_t args[2] = { make_component_s32_value(7),
+                                           make_component_s32_value(35) };
+        wasm_component_value_t result = {};
+        ASSERT_TRUE(wasm_runtime_call_component_values(module_inst, func, 1,
+                                                       &result, 2, args))
+            << wasm_runtime_get_exception(module_inst);
+        ASSERT_EQ(result.type.kind, WASM_COMPONENT_VALUE_TYPE_PRIMITIVE);
+        ASSERT_EQ(result.type.type.primitive_type,
+                  WASM_COMPONENT_PRIMITIVE_VALUE_S32);
+        { auto *d = (const int32 *)wasm_component_value_get_data(&result);
+          ASSERT_NE(d, nullptr); ASSERT_EQ(*d, 7); }
+        ASSERT_EQ(callback_marker, 99u);
+
+        wasm_component_value_destroy(&args[0]);
+        wasm_component_value_destroy(&args[1]);
+        wasm_component_value_destroy(&result);
+    }
+
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
 TEST_F(BinaryParserTest, TestRuntimeSupportsOptionResultScalarParam)
 {
     bool ret = helper->read_wasm_file("option_result_scalar_param.component.wasm");
