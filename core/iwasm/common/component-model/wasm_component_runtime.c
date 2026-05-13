@@ -5628,10 +5628,45 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
                     string_len32 = (uint32)string_len;
                     if (string_len32 > 0) {
                         string_ptr = string_cursor;
-                        memcpy(wasm_runtime_addr_app_to_native(caller_module_inst,
-                                                               string_ptr),
-                               cursor, string_len32);
-                        string_cursor += string_len32;
+                        if (lower_string_encoding
+                                == WASM_COMP_RUNTIME_STRING_ENCODING_UTF16) {
+                            uint8 *utf16_buf = NULL;
+                            uint32 utf16_len = 0;
+                            if (!convert_utf8_bytes_to_utf16(
+                                    cursor, string_len32, &utf16_buf,
+                                    &utf16_len,
+                                    (WASMComponentInstance *)caller_module_inst)) {
+                                wasm_component_value_destroy(&stack_results[0]);
+                                wasm_runtime_set_exception(
+                                    caller_module_inst,
+                                    "component lowered core-call trampoline "
+                                    "could not convert list<string> element "
+                                    "to UTF-16");
+                                return;
+                            }
+                            if (!wasm_runtime_validate_app_addr(
+                                    caller_module_inst, string_ptr,
+                                    utf16_len)) {
+                                wasm_runtime_free(utf16_buf);
+                                wasm_component_value_destroy(&stack_results[0]);
+                                wasm_runtime_set_exception(
+                                    caller_module_inst,
+                                    "out of bounds memory access");
+                                return;
+                            }
+                            memcpy(wasm_runtime_addr_app_to_native(
+                                       caller_module_inst, string_ptr),
+                                   utf16_buf, utf16_len);
+                            wasm_runtime_free(utf16_buf);
+                            string_cursor += utf16_len;
+                            string_len32 = utf16_len;
+                        }
+                        else {
+                            memcpy(wasm_runtime_addr_app_to_native(
+                                       caller_module_inst, string_ptr),
+                                   cursor, string_len32);
+                            string_cursor += string_len32;
+                        }
                     }
 
                     bh_memcpy_s(payload_bytes + ((uint64)element_index * 8),
@@ -5672,7 +5707,42 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
                           "access the list<scalar> result bytes");
                 return;
             }
-            memcpy(payload_bytes, result_bytes, byte_count);
+            if (is_string_result
+                && lower_string_encoding
+                       == WASM_COMP_RUNTIME_STRING_ENCODING_UTF16
+                && byte_count > 0) {
+                uint8 *utf16_buf = NULL;
+                uint32 utf16_len = 0;
+                if (!convert_utf8_bytes_to_utf16(
+                        result_bytes, byte_count, &utf16_buf, &utf16_len,
+                        (WASMComponentInstance *)caller_module_inst)) {
+                    wasm_component_value_destroy(&stack_results[0]);
+                    wasm_runtime_set_exception(
+                        caller_module_inst,
+                        "component lowered core-call trampoline could not "
+                        "convert string result to UTF-16");
+                    return;
+                }
+                if (result_area_ptr + 8 > UINT32_MAX - utf16_len
+                    || !wasm_runtime_validate_app_addr(caller_module_inst,
+                                                       result_area_ptr + 8,
+                                                       utf16_len)) {
+                    wasm_runtime_free(utf16_buf);
+                    wasm_component_value_destroy(&stack_results[0]);
+                    wasm_runtime_set_exception(caller_module_inst,
+                                               "out of bounds memory access");
+                    return;
+                }
+                payload_ptr = result_area_ptr + 8;
+                payload_bytes =
+                    wasm_runtime_addr_app_to_native(caller_module_inst, payload_ptr);
+                memcpy(payload_bytes, utf16_buf, utf16_len);
+                wasm_runtime_free(utf16_buf);
+                result_length = utf16_len;
+            }
+            else {
+                memcpy(payload_bytes, result_bytes, byte_count);
+            }
         }
 
         bh_memcpy_s(result_area_bytes, sizeof(uint32), &payload_ptr, sizeof(uint32));
