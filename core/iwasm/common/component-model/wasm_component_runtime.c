@@ -23018,6 +23018,20 @@ wasm_component_value_init_defined(
                 : &def_type->def_val.tuple->element_types[i];
 
         if (field_type->type == WASM_COMP_VAL_TYPE_PRIMVAL) {
+            if (field_type->type_specific.primval_type
+                == WASM_COMP_PRIMVAL_STRING) {
+                /* String field: append the LEB128-prefixed string bytes */
+                const uint8 *data =
+                    wasm_component_value_get_data(&fields[i]);
+                if (!data || fields[i].byte_size == 0)
+                    goto fail;
+                if (!append_component_result_payload_bytes(
+                        component_inst, &builder, data,
+                        fields[i].byte_size))
+                    goto fail;
+                continue;
+            }
+
             WASMComponentCanonLiftValueInfo info;
             wasm_val_t flattened = { 0 };
             wasm_component_value_t encoded = { 0 };
