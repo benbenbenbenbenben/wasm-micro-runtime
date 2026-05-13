@@ -1483,6 +1483,26 @@ wasm_runtime_call_component_lowered_func(
     wasm_module_inst_t module_inst, uint32_t lowered_func_index,
     uint32_t num_results, wasm_component_value_t *results,
     uint32_t num_args, const wasm_component_value_t *args);
+
+WASM_RUNTIME_API_EXTERN uint32_t
+wasm_runtime_async_call(
+    wasm_module_inst_t module_inst, wasm_component_func_t func,
+    uint32_t num_results, wasm_component_value_t *results,
+    uint32_t num_args, const wasm_component_value_t *args);
+
+WASM_RUNTIME_API_EXTERN bool
+wasm_runtime_async_poll(wasm_module_inst_t module_inst);
+
+WASM_RUNTIME_API_EXTERN bool
+wasm_runtime_async_wait(wasm_module_inst_t module_inst, uint32_t task_id);
+
+WASM_RUNTIME_API_EXTERN bool
+wasm_runtime_async_cancel(wasm_module_inst_t module_inst, uint32_t task_id);
+
+WASM_RUNTIME_API_EXTERN bool
+wasm_runtime_async_get_result(
+    wasm_module_inst_t module_inst, uint32_t task_id,
+    uint32_t num_results, wasm_component_value_t *results);
 #endif
 
 /**

@@ -11,6 +11,7 @@
 #include "bh_leb128.h"
 #include "wasm_component_resource_call.h"
 #include "wasm_component_resource.h"
+#include "wasm_component_async.h"
 #include "wasm_export.h"
 #include "wasm_memory.h"
 #include "wasm_runtime_common.h"
@@ -23102,6 +23103,9 @@ wasm_component_module_instantiate(WASMComponentModule *module,
     }
     inst->resource_state->owner_instance = inst;
 
+    /* Create async engine (best-effort — null engine is valid) */
+    wasm_component_async_engine_create(&inst->async_engine, 8);
+
     return inst;
 }
 
@@ -23111,6 +23115,8 @@ wasm_component_module_deinstantiate(WASMComponentInstance *inst)
     if (!inst)
         return;
 
+    wasm_component_async_engine_destroy(inst->async_engine);
+    inst->async_engine = NULL;
     destroy_component_instance_graph(inst);
     wasm_runtime_free(inst);
 
@@ -23538,4 +23544,73 @@ wasm_runtime_get_component_export_resource_type(
         }
     }
     return NULL;
+}
+
+uint32
+wasm_runtime_async_call(
+    wasm_module_inst_t module_inst, wasm_component_func_t func,
+    uint32 num_results, wasm_component_value_t *results,
+    uint32 num_args, const wasm_component_value_t *args)
+{
+    WASMComponentInstance *inst = (WASMComponentInstance *)module_inst;
+    WASMComponentAsyncEngine *engine;
+
+    if (!inst || !func)
+        return WASM_COMPONENT_ASYNC_INVALID_TASK_ID;
+
+    engine = inst->async_engine;
+    if (!engine)
+        return WASM_COMPONENT_ASYNC_INVALID_TASK_ID;
+
+    return wasm_component_async_create_task(
+        engine, func, (wasm_component_value_t *)args, num_args, num_results);
+}
+
+bool
+wasm_runtime_async_poll(wasm_module_inst_t module_inst)
+{
+    WASMComponentInstance *inst = (WASMComponentInstance *)module_inst;
+
+    if (!inst || !inst->async_engine)
+        return false;
+
+    return wasm_component_async_poll_task(
+        inst->async_engine, inst, NULL);
+}
+
+bool
+wasm_runtime_async_wait(wasm_module_inst_t module_inst, uint32 task_id)
+{
+    WASMComponentInstance *inst = (WASMComponentInstance *)module_inst;
+
+    if (!inst || !inst->async_engine)
+        return false;
+
+    return wasm_component_async_wait_task(
+        inst->async_engine, inst, task_id);
+}
+
+bool
+wasm_runtime_async_cancel(wasm_module_inst_t module_inst, uint32 task_id)
+{
+    WASMComponentInstance *inst = (WASMComponentInstance *)module_inst;
+
+    if (!inst || !inst->async_engine)
+        return false;
+
+    return wasm_component_async_cancel_task(inst->async_engine, task_id);
+}
+
+bool
+wasm_runtime_async_get_result(
+    wasm_module_inst_t module_inst, uint32 task_id,
+    uint32 num_results, wasm_component_value_t *results)
+{
+    WASMComponentInstance *inst = (WASMComponentInstance *)module_inst;
+
+    if (!inst || !inst->async_engine)
+        return false;
+
+    return wasm_component_async_get_result(
+        inst->async_engine, task_id, results, num_results);
 }

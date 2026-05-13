@@ -65748,6 +65748,51 @@ TEST_F(BinaryParserTest,
 }
 
 TEST_F(BinaryParserTest,
+       TestPublicAsyncApiCanCallAndPoll)
+{
+    bool ret = helper->read_wasm_file("composite_string_results.component.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "public-async-api-call-and-poll";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    /* Look up any exported function from composite_string_results */
+    wasm_component_func_t func = wasm_runtime_lookup_component_function(
+        module_inst, "nested-result");
+    if (!func)
+        func = wasm_runtime_lookup_component_function(
+            module_inst, "mixed-result");
+    ASSERT_NE(func, nullptr);
+
+    /* Test async API: create task, poll, get result */
+    wasm_component_value_t result = {};
+    uint32_t task_id = wasm_runtime_async_call(
+        module_inst, func, 1, &result, 0, NULL);
+    ASSERT_NE(task_id, UINT32_MAX);
+
+    ASSERT_TRUE(wasm_runtime_async_poll(module_inst));
+
+    ASSERT_TRUE(wasm_runtime_async_get_result(
+        module_inst, task_id, 1, &result));
+
+    wasm_component_value_destroy(&result);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
        TestRuntimeSupportsAsyncCanonOpt)
 {
     bool ret = helper->read_wasm_file("add.wasm");

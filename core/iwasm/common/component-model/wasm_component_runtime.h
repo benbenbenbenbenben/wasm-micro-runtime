@@ -211,6 +211,7 @@ struct WASMComponentInstance {
     uint32 component_export_count;
     WASMComponentNamedExport *component_exports;
     WASMComponentRuntimeResourceState *resource_state;
+    struct WASMComponentAsyncEngine *async_engine;
 };
 
 WASMComponentModule *
