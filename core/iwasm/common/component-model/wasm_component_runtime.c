@@ -9478,6 +9478,27 @@ component_type_flat_i32_count(const WASMComponent *component,
             return 1 + component_type_flat_i32_count(
                        component,
                        entry->type.def_val_type->def_val.option->element_type);
+        case WASM_COMP_DEF_VAL_RESULT:
+        {
+            uint32 ok_width = component_type_flat_i32_count(
+                component,
+                entry->type.def_val_type->def_val.result->result_type);
+            uint32 err_width = component_type_flat_i32_count(
+                component,
+                entry->type.def_val_type->def_val.result->error_type);
+            return 1 + (ok_width > err_width ? ok_width : err_width);
+        }
+        case WASM_COMP_DEF_VAL_VARIANT:
+        {
+            uint32 max_width = 0;
+            for (uint32 k = 0; k < entry->type.def_val_type->def_val.variant->count; k++) {
+                uint32 case_width = component_type_flat_i32_count(
+                    component,
+                    entry->type.def_val_type->def_val.variant->cases[k].value_type);
+                max_width = case_width > max_width ? case_width : max_width;
+            }
+            return 1 + max_width;
+        }
         default:
             return 0;
     }

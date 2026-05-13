@@ -1,0 +1,17 @@
+(component
+  (type $res-u32 (result u32 (error u32)))
+  (type $opt-res (option $res-u32))
+  (type $f (func (param "x" $opt-res) (result s32)))
+  (core module $m
+    (memory (export "memory") 1)
+    (func $cabi_realloc (export "cabi_realloc") (param i32 i32 i32 i32) (result i32)
+      i32.const 0)
+    (func (export "f") (param i32 i32 i32) (result i32)
+      local.get 0))
+  (core instance $i (instantiate $m))
+  (alias core export $i "memory" (core memory $mem))
+  (alias core export $i "cabi_realloc" (core func $realloc))
+  (alias core export $i "f" (core func $f_func))
+  (func $g (type $f) (canon lift (core func $f_func) (memory $mem) (realloc $realloc)))
+  (export "g" (func $g))
+)
