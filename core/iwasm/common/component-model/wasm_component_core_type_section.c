@@ -12,6 +12,9 @@
 #include "wasm_export.h"
 #include <stdio.h>
 
+void
+free_core_subtype_no_free_comptype(WASMComponentCoreSubType *subtype);
+
 bool
 parse_core_limits(const uint8_t **payload, const uint8_t *end,
                   WASMComponentCoreLimits *out, char *error_buf,
@@ -154,6 +157,27 @@ parse_core_valtype(const uint8_t **payload, const uint8_t *end,
                 *payload = p;
                 return true;
             }
+            /* GC abstract heaptypes via (ref null ht) or (ref ht) */
+            uint8_t at = (uint8_t)heap_type.heap_type.abstract_type;
+            if (at == WASM_CORE_ABS_HEAP_TYPE_ANY
+                || at == WASM_CORE_ABS_HEAP_TYPE_EQ
+                || at == WASM_CORE_ABS_HEAP_TYPE_I31
+                || at == WASM_CORE_ABS_HEAP_TYPE_STRUCT
+                || at == WASM_CORE_ABS_HEAP_TYPE_ARRAY
+                || at == WASM_CORE_ABS_HEAP_TYPE_NONE
+                || at == WASM_CORE_ABS_HEAP_TYPE_NOEXTERN
+                || at == WASM_CORE_ABS_HEAP_TYPE_NOFUNC) {
+                out->tag = WASM_CORE_VALTYPE_REF;
+                out->type.ref_type = WASM_CORE_REFTYPE_EXTERN_REF;
+                *payload = p;
+                return true;
+            }
+        }
+        if (heap_type.tag == WASM_CORE_HEAP_TYPE_CONCRETE) {
+            out->tag = WASM_CORE_VALTYPE_REF;
+            out->type.ref_type = WASM_CORE_REFTYPE_EXTERN_REF;
+            *payload = p;
+            return true;
         }
         set_error_buf_ex(error_buf, error_buf_size,
                          "Unsupported reftype heaptype for core valtype");
@@ -175,6 +199,20 @@ parse_core_valtype(const uint8_t **payload, const uint8_t *end,
             *payload = p;
             return true;
         }
+        /* GC abstract heaptypes: all accepted as ref types */
+        if (tag == WASM_CORE_ABS_HEAP_TYPE_ANY
+            || tag == WASM_CORE_ABS_HEAP_TYPE_EQ
+            || tag == WASM_CORE_ABS_HEAP_TYPE_I31
+            || tag == WASM_CORE_ABS_HEAP_TYPE_STRUCT
+            || tag == WASM_CORE_ABS_HEAP_TYPE_ARRAY
+            || tag == WASM_CORE_ABS_HEAP_TYPE_NONE
+            || tag == WASM_CORE_ABS_HEAP_TYPE_NOEXTERN
+            || tag == WASM_CORE_ABS_HEAP_TYPE_NOFUNC) {
+            out->tag = WASM_CORE_VALTYPE_REF;
+            out->type.ref_type = WASM_CORE_REFTYPE_EXTERN_REF;
+            *payload = p;
+            return true;
+        }
         set_error_buf_ex(
             error_buf, error_buf_size,
             "Unsupported short-form absheaptype %02x for core valtype", tag);
@@ -184,6 +222,190 @@ parse_core_valtype(const uint8_t **payload, const uint8_t *end,
     set_error_buf_ex(error_buf, error_buf_size,
                      "Invalid core valtype tag: %02x", tag);
     return false;
+}
+
+static bool
+parse_core_resulttype(const uint8_t **payload, const uint8_t *end,
+                      WASMComponentCoreResultType *out, char *error_buf,
+                      uint32_t error_buf_size)
+{
+    const uint8_t *p = *payload;
+    uint64_t count = 0;
+    if (!read_leb((uint8_t **)&p, end, 32, false, &count, error_buf,
+                  error_buf_size))
+        return false;
+    out->count = (uint32_t)count;
+    if (count > 0) {
+        out->val_types = wasm_runtime_malloc(
+            sizeof(WASMComponentCoreValType) * (uint32_t)count);
+        if (!out->val_types) {
+            set_error_buf_ex(error_buf, error_buf_size, "OOM for resulttype");
+            return false;
+        }
+        memset(out->val_types, 0,
+               sizeof(WASMComponentCoreValType) * (uint32_t)count);
+        for (uint32_t i = 0; i < (uint32_t)count; i++) {
+            if (!parse_core_valtype(&p, end, &out->val_types[i], error_buf,
+                                    error_buf_size)) {
+                wasm_runtime_free(out->val_types);
+                out->val_types = NULL;
+                return false;
+            }
+        }
+    }
+    else
+        out->val_types = NULL;
+    *payload = p;
+    return true;
+}
+
+static bool
+parse_core_fieldtype(const uint8_t **payload, const uint8_t *end,
+                     WASMComponentCoreFieldType *out, char *error_buf,
+                     uint32_t error_buf_size)
+{
+    const uint8_t *p = *payload;
+    if (p >= end) {
+        set_error_buf_ex(error_buf, error_buf_size,
+                         "Unexpected end parsing fieldtype");
+        return false;
+    }
+    out->is_mutable = (*p++ != 0);
+    return parse_core_valtype(&p, end, &out->storage_type, error_buf,
+                              error_buf_size);
+}
+
+static bool
+parse_core_comptype(const uint8_t **payload, const uint8_t *end,
+                    WASMComponentCoreCompType *out, char *error_buf,
+                    uint32_t error_buf_size)
+{
+    const uint8_t *p = *payload;
+    if (p >= end) {
+        set_error_buf_ex(error_buf, error_buf_size,
+                         "Unexpected end parsing comptype");
+        return false;
+    }
+    uint8_t tag = *p++;
+    switch (tag) {
+        case 0x60: /* functype */
+            out->tag = WASM_CORE_COMPTYPE_FUNC;
+            if (!parse_core_resulttype(&p, end, &out->type.func_type.params,
+                                       error_buf, error_buf_size)
+                || !parse_core_resulttype(&p, end, &out->type.func_type.results,
+                                          error_buf, error_buf_size))
+                return false;
+            *payload = p;
+            return true;
+        case 0x5F: /* structtype */
+        {
+            uint64_t field_count = 0;
+            out->tag = WASM_CORE_COMPTYPE_STRUCT;
+            if (!read_leb((uint8_t **)&p, end, 32, false, &field_count,
+                          error_buf, error_buf_size))
+                return false;
+            out->type.struct_type.field_count = (uint32_t)field_count;
+            if (field_count > 0) {
+                out->type.struct_type.fields = wasm_runtime_malloc(
+                    sizeof(WASMComponentCoreFieldType) * (uint32_t)field_count);
+                if (!out->type.struct_type.fields) {
+                    set_error_buf_ex(error_buf, error_buf_size,
+                                     "OOM for struct fields");
+                    return false;
+                }
+                memset(out->type.struct_type.fields, 0,
+                       sizeof(WASMComponentCoreFieldType) * (uint32_t)field_count);
+                for (uint32_t i = 0; i < (uint32_t)field_count; i++) {
+                    if (!parse_core_fieldtype(&p, end,
+                                              &out->type.struct_type.fields[i],
+                                              error_buf, error_buf_size)) {
+                        wasm_runtime_free(out->type.struct_type.fields);
+                        out->type.struct_type.fields = NULL;
+                        return false;
+                    }
+                }
+            }
+            else
+                out->type.struct_type.fields = NULL;
+            *payload = p;
+            return true;
+        }
+        case 0x5E: /* arraytype */
+            out->tag = WASM_CORE_COMPTYPE_ARRAY;
+            if (!parse_core_fieldtype(&p, end, &out->type.array_type.field_type,
+                                      error_buf, error_buf_size))
+                return false;
+            *payload = p;
+            return true;
+        default:
+            set_error_buf_ex(error_buf, error_buf_size,
+                             "Invalid comptype tag: %02x", tag);
+            return false;
+    }
+}
+
+static bool
+parse_core_subtype(const uint8_t **payload, const uint8_t *end,
+                   WASMComponentCoreSubType *out, char *error_buf,
+                   uint32_t error_buf_size)
+{
+    const uint8_t *p = *payload;
+    if (p >= end) {
+        set_error_buf_ex(error_buf, error_buf_size,
+                         "Unexpected end parsing subtype");
+        return false;
+    }
+    uint8_t flags = *p;
+    bool has_prefix = false;
+
+    /* When called from rectype context, subtypes don't have a 0x00 prefix.
+       When called from inline subtype (0x00) context, the 0x00 was already
+       consumed by the caller. Check for sub-kinds */
+    if (flags == 0x4F) {
+        p++;
+        out->is_final = false;
+        has_prefix = true;
+    }
+    else if (flags == 0x50) {
+        p++;
+        out->is_final = true;
+        has_prefix = true;
+    }
+    /* No explicit flags byte means: final with no supertypes */
+
+    uint64_t st_count = 0;
+    if (!read_leb((uint8_t **)&p, end, 32, false, &st_count, error_buf,
+                  error_buf_size))
+        return false;
+    out->supertype_count = (uint32_t)st_count;
+    if (st_count > 0) {
+        out->supertypes = wasm_runtime_malloc(sizeof(uint32_t) * (uint32_t)st_count);
+        if (!out->supertypes) {
+            set_error_buf_ex(error_buf, error_buf_size, "OOM for supertypes");
+            return false;
+        }
+        for (uint32_t i = 0; i < (uint32_t)st_count; i++) {
+            uint64_t idx = 0;
+            if (!read_leb((uint8_t **)&p, end, 32, false, &idx, error_buf,
+                          error_buf_size)) {
+                wasm_runtime_free(out->supertypes);
+                out->supertypes = NULL;
+                return false;
+            }
+            out->supertypes[i] = (uint32_t)idx;
+        }
+    }
+    else
+        out->supertypes = NULL;
+
+    if (!parse_core_comptype(&p, end, &out->comptype, error_buf,
+                             error_buf_size)) {
+        if (out->supertypes)
+            wasm_runtime_free(out->supertypes);
+        return false;
+    }
+    *payload = p;
+    return true;
 }
 
 bool
@@ -603,28 +825,66 @@ parse_single_core_type(const uint8_t **payload, const uint8_t *end,
 
     // 2) rectype (GC): 0x4E ...
     if (b0 == 0x4E) {
-        set_error_buf_ex(
-            error_buf, error_buf_size,
-            "WebAssembly 3.0 core:rectype (0x4E ...) not supported");
-        return false;
+        p++;
+        WASMComponentCoreRecType *rec =
+            wasm_runtime_malloc(sizeof(WASMComponentCoreRecType));
+        if (!rec) {
+            set_error_buf_ex(error_buf, error_buf_size,
+                             "OOM allocating rectype");
+            return false;
+        }
+        memset(rec, 0, sizeof(*rec));
+        uint64_t st_count = 0;
+        if (!read_leb((uint8_t **)&p, end, 32, false, &st_count, error_buf,
+                      error_buf_size)) {
+            wasm_runtime_free(rec);
+            return false;
+        }
+        rec->subtype_count = (uint32_t)st_count;
+        rec->subtypes = wasm_runtime_malloc(
+            sizeof(WASMComponentCoreSubType) * rec->subtype_count);
+        if (!rec->subtypes && rec->subtype_count > 0) {
+            wasm_runtime_free(rec);
+            return false;
+        }
+        memset(rec->subtypes, 0,
+               sizeof(WASMComponentCoreSubType) * rec->subtype_count);
+        for (uint32_t si = 0; si < rec->subtype_count; si++) {
+            if (!parse_core_subtype(&p, end, &rec->subtypes[si], error_buf,
+                                    error_buf_size)) {
+                for (uint32_t j = 0; j < si; j++)
+                    free_core_subtype_no_free_comptype(&rec->subtypes[j]);
+                wasm_runtime_free(rec->subtypes);
+                wasm_runtime_free(rec);
+                return false;
+            }
+        }
+        out->tag = WASM_CORE_DEFTYPE_RECTYPE;
+        out->type.rectype = rec;
+        *payload = p;
+        return true;
     }
 
     // 3) subtype (GC): 0x00 followed by {0x50,0x4F,0x5E,0x5F,0x60}
     if (b0 == 0x00) {
-        if (p + 1 >= end) {
+        p++;
+        out->tag = WASM_CORE_DEFTYPE_SUBTYPE;
+        out->type.subtype =
+            wasm_runtime_malloc(sizeof(WASMComponentCoreModuleSubType));
+        if (!out->type.subtype) {
             set_error_buf_ex(error_buf, error_buf_size,
-                             "Unexpected end of data after 0x00");
+                             "OOM allocating subtype");
             return false;
         }
-        uint8_t b1 = *(p + 1);
-        if (b1 == 0x50 || b1 == 0x4F || b1 == 0x5E || b1 == 0x5F
-            || b1 == 0x60) {
-            set_error_buf_ex(
-                error_buf, error_buf_size,
-                "WebAssembly 3.0 core:subtype (0x00 0x%02x ...) not supported",
-                b1);
+        memset(out->type.subtype, 0, sizeof(WASMComponentCoreModuleSubType));
+        if (!parse_core_subtype(&p, end, (WASMComponentCoreSubType *)out->type.subtype,
+                                error_buf, error_buf_size)) {
+            wasm_runtime_free(out->type.subtype);
+            out->type.subtype = NULL;
             return false;
         }
+        *payload = p;
+        return true;
     }
 
     // Otherwise invalid in this context
@@ -985,6 +1245,15 @@ free_core_subtype(WASMComponentCoreSubType *subtype)
 
     // Free the comptype
     free_core_comptype(&subtype->comptype);
+}
+
+void
+free_core_subtype_no_free_comptype(WASMComponentCoreSubType *subtype)
+{
+    if (!subtype)
+        return;
+    if (subtype->supertypes)
+        wasm_runtime_free(subtype->supertypes);
 }
 
 void
