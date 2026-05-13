@@ -19277,6 +19277,465 @@ TEST_F(BinaryParserTest, TestCoreWasmCanCallLoweredScalarComponentFunctionDirect
 }
 
 TEST_F(BinaryParserTest,
+       TestCoreWasmCanCallLoweredOptionParamFromForwardCaller)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "core-wasm-lowered-option-forward";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    /* Create option<u32> type */
+    auto *option_def = (WASMComponentDefValType *)wasm_runtime_malloc(
+        sizeof(WASMComponentDefValType));
+    ASSERT_NE(option_def, nullptr);
+    memset(option_def, 0, sizeof(WASMComponentDefValType));
+    option_def->tag = WASM_COMP_DEF_VAL_OPTION;
+    auto *option_type = (WASMComponentOptionType *)wasm_runtime_malloc(
+        sizeof(WASMComponentOptionType));
+    ASSERT_NE(option_type, nullptr);
+    memset(option_type, 0, sizeof(WASMComponentOptionType));
+    option_type->element_type = (WASMComponentValueType *)wasm_runtime_malloc(
+        sizeof(WASMComponentValueType));
+    ASSERT_NE(option_type->element_type, nullptr);
+    *option_type->element_type = make_component_primitive_value_type(
+        WASM_COMP_PRIMVAL_U32);
+    option_def->def_val.option = option_type;
+    const int32_t option_type_idx =
+        append_component_def_val_type((WASMComponentModule *)module, option_def);
+    ASSERT_GE(option_type_idx, 0);
+
+    /* Create func type: (option<u32>) -> u32 (flat: (i32,i32)->i32) */
+    const int32_t func_type_idx = append_component_func_type(
+        (WASMComponentModule *)module,
+        { { "o",
+            make_component_type_index_value_type((uint32_t)option_type_idx) } },
+        make_component_primitive_value_type(WASM_COMP_PRIMVAL_U32));
+    ASSERT_GE(func_type_idx, 0);
+
+    /* Add lowered sections: lower func[0] from add.wasm, create core caller */
+    ASSERT_TRUE(append_top_level_lowered_core_caller_sections_for_func(
+        (WASMComponentModule *)module, 0, "forward_core_caller.wasm", "source"));
+
+    /* Get the core instance index created above */
+    uint32_t core_inst_idx = count_top_level_core_instance_entries(
+        &((WASMComponentModule *)module)->component);
+    ASSERT_GE(core_inst_idx, 1u);
+    core_inst_idx--;
+
+    /* Lift the core caller's "process" export with our option type */
+    ASSERT_TRUE(append_top_level_core_export_lift_sections(
+        (WASMComponentModule *)module, core_inst_idx, "process",
+        (uint32_t)func_type_idx, "lowered-option-forward"));
+
+    wasm_module_inst_t module_inst =
+        instantiate_component_with_default_wasi(module, helper.get());
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func = wasm_runtime_lookup_component_function(
+        module_inst, "lowered-option-forward");
+    ASSERT_NE(func, nullptr);
+
+    /* Test: some(42) → disc=1, payload=42 → add(1,42)=43 */
+    {
+        std::vector<uint8_t> val_bytes;
+        append_component_s32_payload(&val_bytes, 1);
+        append_component_s32_payload(&val_bytes, 42);
+        wasm_component_value_t arg =
+            make_component_defined_value(val_bytes.data(),
+                                         (uint32_t)val_bytes.size());
+        wasm_component_value_t result = {};
+        ASSERT_TRUE(wasm_runtime_call_component_values(module_inst, func, 1,
+                                                       &result, 1, &arg))
+            << wasm_runtime_get_exception(module_inst);
+        ASSERT_EQ(result.type.kind, WASM_COMPONENT_VALUE_TYPE_PRIMITIVE);
+        ASSERT_EQ(result.type.type.primitive_type,
+                  WASM_COMPONENT_PRIMITIVE_VALUE_U32);
+        { auto *d = (const uint32 *)wasm_component_value_get_data(&result);
+          ASSERT_NE(d, nullptr); ASSERT_EQ(*d, 43u); }
+        wasm_component_value_destroy(&arg);
+        wasm_component_value_destroy(&result);
+    }
+
+    /* Test: none → disc=0 → add(0,0)=0 */
+    {
+        std::vector<uint8_t> val_bytes;
+        append_component_s32_payload(&val_bytes, 0);
+        wasm_component_value_t arg =
+            make_component_defined_value(val_bytes.data(),
+                                         (uint32_t)val_bytes.size());
+        wasm_component_value_t result = {};
+        ASSERT_TRUE(wasm_runtime_call_component_values(module_inst, func, 1,
+                                                       &result, 1, &arg))
+            << wasm_runtime_get_exception(module_inst);
+        ASSERT_EQ(result.type.kind, WASM_COMPONENT_VALUE_TYPE_PRIMITIVE);
+        ASSERT_EQ(result.type.type.primitive_type,
+                  WASM_COMPONENT_PRIMITIVE_VALUE_U32);
+        { auto *d = (const uint32 *)wasm_component_value_get_data(&result);
+          ASSERT_NE(d, nullptr); ASSERT_EQ(*d, 0u); }
+        wasm_component_value_destroy(&arg);
+        wasm_component_value_destroy(&result);
+    }
+
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestCoreWasmCanCallLoweredEnumParamFromForwardCaller)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "core-wasm-lowered-enum-forward";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    /* Create enum type { a, b } */
+    auto *enum_def = (WASMComponentDefValType *)wasm_runtime_malloc(
+        sizeof(WASMComponentDefValType));
+    ASSERT_NE(enum_def, nullptr);
+    memset(enum_def, 0, sizeof(WASMComponentDefValType));
+    enum_def->tag = WASM_COMP_DEF_VAL_ENUM;
+    auto *enum_type = (WASMComponentEnumType *)wasm_runtime_malloc(
+        sizeof(WASMComponentEnumType));
+    ASSERT_NE(enum_type, nullptr);
+    memset(enum_type, 0, sizeof(WASMComponentEnumType));
+    enum_type->count = 2;
+    enum_type->labels = (WASMComponentCoreName *)wasm_runtime_malloc(
+        sizeof(WASMComponentCoreName) * 2);
+    ASSERT_NE(enum_type->labels, nullptr);
+    memset(enum_type->labels, 0, sizeof(WASMComponentCoreName) * 2);
+    {
+        auto *lbl = clone_core_name("a");
+        ASSERT_NE(lbl, nullptr);
+        enum_type->labels[0].name_len = lbl->name_len;
+        enum_type->labels[0].name = lbl->name;
+        wasm_runtime_free(lbl);
+    }
+    {
+        auto *lbl = clone_core_name("b");
+        ASSERT_NE(lbl, nullptr);
+        enum_type->labels[1].name_len = lbl->name_len;
+        enum_type->labels[1].name = lbl->name;
+        wasm_runtime_free(lbl);
+    }
+    enum_def->def_val.enum_type = enum_type;
+    const int32_t enum_type_idx =
+        append_component_def_val_type((WASMComponentModule *)module, enum_def);
+    ASSERT_GE(enum_type_idx, 0);
+
+    /* Func type: (enum, enum) -> u32 (flat: (i32,i32)->i32) */
+    const int32_t func_type_idx = append_component_func_type(
+        (WASMComponentModule *)module,
+        { { "e1",
+            make_component_type_index_value_type((uint32_t)enum_type_idx) },
+          { "e2",
+            make_component_type_index_value_type((uint32_t)enum_type_idx) } },
+        make_component_primitive_value_type(WASM_COMP_PRIMVAL_U32));
+    ASSERT_GE(func_type_idx, 0);
+
+    ASSERT_TRUE(append_top_level_lowered_core_caller_sections_for_func(
+        (WASMComponentModule *)module, 0, "forward_core_caller.wasm", "source"));
+
+    uint32_t core_inst_idx = count_top_level_core_instance_entries(
+        &((WASMComponentModule *)module)->component);
+    ASSERT_GE(core_inst_idx, 1u);
+    core_inst_idx--;
+
+    ASSERT_TRUE(append_top_level_core_export_lift_sections(
+        (WASMComponentModule *)module, core_inst_idx, "process",
+        (uint32_t)func_type_idx, "lowered-enum-forward"));
+
+    wasm_module_inst_t module_inst =
+        instantiate_component_with_default_wasi(module, helper.get());
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func = wasm_runtime_lookup_component_function(
+        module_inst, "lowered-enum-forward");
+    ASSERT_NE(func, nullptr);
+
+    /* Test: enum=0, enum=0 → add(0,0)=0 */
+    {
+        std::vector<uint8_t> bytes;
+        append_component_s32_payload(&bytes, 0);
+        wasm_component_value_t enum_a =
+            make_component_defined_value(bytes.data(), (uint32_t)bytes.size());
+        wasm_component_value_t args[2] = { enum_a, enum_a };
+        wasm_component_value_t result = {};
+        ASSERT_TRUE(wasm_runtime_call_component_values(module_inst, func, 1,
+                                                       &result, 2, args))
+            << wasm_runtime_get_exception(module_inst);
+        ASSERT_EQ(result.type.kind, WASM_COMPONENT_VALUE_TYPE_PRIMITIVE);
+        ASSERT_EQ(result.type.type.primitive_type,
+                  WASM_COMPONENT_PRIMITIVE_VALUE_U32);
+        { auto *d = (const uint32 *)wasm_component_value_get_data(&result);
+          ASSERT_NE(d, nullptr); ASSERT_EQ(*d, 0u); }
+        wasm_component_value_destroy(&enum_a);
+        wasm_component_value_destroy(&result);
+    }
+
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestCoreWasmCanCallLoweredResultParamFromForwardCaller)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "core-wasm-lowered-result-forward";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    /* Create result<u32, u32> type */
+    auto *result_def = (WASMComponentDefValType *)wasm_runtime_malloc(
+        sizeof(WASMComponentDefValType));
+    ASSERT_NE(result_def, nullptr);
+    memset(result_def, 0, sizeof(WASMComponentDefValType));
+    result_def->tag = WASM_COMP_DEF_VAL_RESULT;
+    auto *result_type = (WASMComponentResultType *)wasm_runtime_malloc(
+        sizeof(WASMComponentResultType));
+    ASSERT_NE(result_type, nullptr);
+    memset(result_type, 0, sizeof(WASMComponentResultType));
+    result_type->result_type = (WASMComponentValueType *)wasm_runtime_malloc(
+        sizeof(WASMComponentValueType));
+    ASSERT_NE(result_type->result_type, nullptr);
+    *result_type->result_type = make_component_primitive_value_type(
+        WASM_COMP_PRIMVAL_U32);
+    result_type->error_type = (WASMComponentValueType *)wasm_runtime_malloc(
+        sizeof(WASMComponentValueType));
+    ASSERT_NE(result_type->error_type, nullptr);
+    *result_type->error_type = make_component_primitive_value_type(
+        WASM_COMP_PRIMVAL_U32);
+    result_def->def_val.result = result_type;
+    const int32_t result_type_idx =
+        append_component_def_val_type((WASMComponentModule *)module, result_def);
+    ASSERT_GE(result_type_idx, 0);
+
+    /* Func type: (result<u32,u32>) -> u32 (flat: (i32,i32)->i32) */
+    const int32_t func_type_idx = append_component_func_type(
+        (WASMComponentModule *)module,
+        { { "r",
+            make_component_type_index_value_type(
+                (uint32_t)result_type_idx) } },
+        make_component_primitive_value_type(WASM_COMP_PRIMVAL_U32));
+    ASSERT_GE(func_type_idx, 0);
+
+    ASSERT_TRUE(append_top_level_lowered_core_caller_sections_for_func(
+        (WASMComponentModule *)module, 0, "forward_core_caller.wasm", "source"));
+
+    uint32_t core_inst_idx = count_top_level_core_instance_entries(
+        &((WASMComponentModule *)module)->component);
+    ASSERT_GE(core_inst_idx, 1u);
+    core_inst_idx--;
+
+    ASSERT_TRUE(append_top_level_core_export_lift_sections(
+        (WASMComponentModule *)module, core_inst_idx, "process",
+        (uint32_t)func_type_idx, "lowered-result-forward"));
+
+    wasm_module_inst_t module_inst =
+        instantiate_component_with_default_wasi(module, helper.get());
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func = wasm_runtime_lookup_component_function(
+        module_inst, "lowered-result-forward");
+    ASSERT_NE(func, nullptr);
+
+    /* Test: ok(42) → disc=0, payload=42 → add(0,42)=42 */
+    {
+        std::vector<uint8_t> val_bytes;
+        append_component_s32_payload(&val_bytes, 0);
+        append_component_s32_payload(&val_bytes, 42);
+        wasm_component_value_t arg =
+            make_component_defined_value(val_bytes.data(),
+                                         (uint32_t)val_bytes.size());
+        wasm_component_value_t result = {};
+        ASSERT_TRUE(wasm_runtime_call_component_values(module_inst, func, 1,
+                                                       &result, 1, &arg))
+            << wasm_runtime_get_exception(module_inst);
+        ASSERT_EQ(result.type.kind, WASM_COMPONENT_VALUE_TYPE_PRIMITIVE);
+        ASSERT_EQ(result.type.type.primitive_type,
+                  WASM_COMPONENT_PRIMITIVE_VALUE_U32);
+        { auto *d = (const uint32 *)wasm_component_value_get_data(&result);
+          ASSERT_NE(d, nullptr); ASSERT_EQ(*d, 42u); }
+        wasm_component_value_destroy(&arg);
+        wasm_component_value_destroy(&result);
+    }
+
+    /* Test: err(7) → disc=1, payload=7 → add(1,7)=8 */
+    {
+        std::vector<uint8_t> val_bytes;
+        append_component_s32_payload(&val_bytes, 1);
+        append_component_s32_payload(&val_bytes, 7);
+        wasm_component_value_t arg =
+            make_component_defined_value(val_bytes.data(),
+                                         (uint32_t)val_bytes.size());
+        wasm_component_value_t result = {};
+        ASSERT_TRUE(wasm_runtime_call_component_values(module_inst, func, 1,
+                                                       &result, 1, &arg))
+            << wasm_runtime_get_exception(module_inst);
+        ASSERT_EQ(result.type.kind, WASM_COMPONENT_VALUE_TYPE_PRIMITIVE);
+        ASSERT_EQ(result.type.type.primitive_type,
+                  WASM_COMPONENT_PRIMITIVE_VALUE_U32);
+        { auto *d = (const uint32 *)wasm_component_value_get_data(&result);
+          ASSERT_NE(d, nullptr); ASSERT_EQ(*d, 8u); }
+        wasm_component_value_destroy(&arg);
+        wasm_component_value_destroy(&result);
+    }
+
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestCoreWasmCanCallLoweredVariantParamFromForwardCaller)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "core-wasm-lowered-variant-forward";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    /* Create variant type: variant { c1: u32, c2: u32 } */
+    auto *var_def = (WASMComponentDefValType *)wasm_runtime_malloc(
+        sizeof(WASMComponentDefValType));
+    ASSERT_NE(var_def, nullptr);
+    memset(var_def, 0, sizeof(WASMComponentDefValType));
+    var_def->tag = WASM_COMP_DEF_VAL_VARIANT;
+    auto *var_type = (WASMComponentVariantType *)wasm_runtime_malloc(
+        sizeof(WASMComponentVariantType));
+    ASSERT_NE(var_type, nullptr);
+    memset(var_type, 0, sizeof(WASMComponentVariantType));
+    var_type->count = 2;
+    var_type->cases = (WASMComponentCaseValType *)wasm_runtime_malloc(
+        sizeof(WASMComponentCaseValType) * 2);
+    ASSERT_NE(var_type->cases, nullptr);
+    memset(var_type->cases, 0, sizeof(WASMComponentCaseValType) * 2);
+    {
+        auto *lbl = clone_core_name("c1"); ASSERT_NE(lbl, nullptr);
+        var_type->cases[0].label = lbl;
+        var_type->cases[0].value_type =
+            (WASMComponentValueType *)wasm_runtime_malloc(
+                sizeof(WASMComponentValueType));
+        ASSERT_NE(var_type->cases[0].value_type, nullptr);
+        *var_type->cases[0].value_type =
+            make_component_primitive_value_type(WASM_COMP_PRIMVAL_U32);
+    }
+    {
+        auto *lbl = clone_core_name("c2"); ASSERT_NE(lbl, nullptr);
+        var_type->cases[1].label = lbl;
+        var_type->cases[1].value_type =
+            (WASMComponentValueType *)wasm_runtime_malloc(
+                sizeof(WASMComponentValueType));
+        ASSERT_NE(var_type->cases[1].value_type, nullptr);
+        *var_type->cases[1].value_type =
+            make_component_primitive_value_type(WASM_COMP_PRIMVAL_U32);
+    }
+    var_def->def_val.variant = var_type;
+    const int32_t var_type_idx =
+        append_component_def_val_type((WASMComponentModule *)module, var_def);
+    ASSERT_GE(var_type_idx, 0);
+
+    /* Func type: (variant) -> u32 (flat: (i32,i32)->i32) */
+    const int32_t func_type_idx = append_component_func_type(
+        (WASMComponentModule *)module,
+        { { "v",
+            make_component_type_index_value_type(
+                (uint32_t)var_type_idx) } },
+        make_component_primitive_value_type(WASM_COMP_PRIMVAL_U32));
+    ASSERT_GE(func_type_idx, 0);
+
+    ASSERT_TRUE(append_top_level_lowered_core_caller_sections_for_func(
+        (WASMComponentModule *)module, 0, "forward_core_caller.wasm", "source"));
+
+    uint32_t core_inst_idx = count_top_level_core_instance_entries(
+        &((WASMComponentModule *)module)->component);
+    ASSERT_GE(core_inst_idx, 1u);
+    core_inst_idx--;
+
+    ASSERT_TRUE(append_top_level_core_export_lift_sections(
+        (WASMComponentModule *)module, core_inst_idx, "process",
+        (uint32_t)func_type_idx, "lowered-variant-forward"));
+
+    wasm_module_inst_t module_inst =
+        instantiate_component_with_default_wasi(module, helper.get());
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func = wasm_runtime_lookup_component_function(
+        module_inst, "lowered-variant-forward");
+    ASSERT_NE(func, nullptr);
+
+    /* Test: case 0 with payload 42 → disc=0, payload=42 → add(0,42)=42 */
+    {
+        std::vector<uint8_t> val_bytes;
+        append_component_s32_payload(&val_bytes, 0);
+        append_component_s32_payload(&val_bytes, 42);
+        wasm_component_value_t arg =
+            make_component_defined_value(val_bytes.data(),
+                                         (uint32_t)val_bytes.size());
+        wasm_component_value_t result = {};
+        ASSERT_TRUE(wasm_runtime_call_component_values(module_inst, func, 1,
+                                                       &result, 1, &arg))
+            << wasm_runtime_get_exception(module_inst);
+        ASSERT_EQ(result.type.kind, WASM_COMPONENT_VALUE_TYPE_PRIMITIVE);
+        ASSERT_EQ(result.type.type.primitive_type,
+                  WASM_COMPONENT_PRIMITIVE_VALUE_U32);
+        { auto *d = (const uint32 *)wasm_component_value_get_data(&result);
+          ASSERT_NE(d, nullptr); ASSERT_EQ(*d, 42u); }
+        wasm_component_value_destroy(&arg);
+        wasm_component_value_destroy(&result);
+    }
+
+    /* Test: case 1 with payload 7 → disc=1, payload=7 → add(1,7)=8 */
+    {
+        std::vector<uint8_t> val_bytes;
+        append_component_s32_payload(&val_bytes, 1);
+        append_component_s32_payload(&val_bytes, 7);
+        wasm_component_value_t arg =
+            make_component_defined_value(val_bytes.data(),
+                                         (uint32_t)val_bytes.size());
+        wasm_component_value_t result = {};
+        ASSERT_TRUE(wasm_runtime_call_component_values(module_inst, func, 1,
+                                                       &result, 1, &arg))
+            << wasm_runtime_get_exception(module_inst);
+        ASSERT_EQ(result.type.kind, WASM_COMPONENT_VALUE_TYPE_PRIMITIVE);
+        ASSERT_EQ(result.type.type.primitive_type,
+                  WASM_COMPONENT_PRIMITIVE_VALUE_U32);
+        { auto *d = (const uint32 *)wasm_component_value_get_data(&result);
+          ASSERT_NE(d, nullptr); ASSERT_EQ(*d, 8u); }
+        wasm_component_value_destroy(&arg);
+        wasm_component_value_destroy(&result);
+    }
+
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
        TestCoreWasmCanCallLoweredListU8ParamComponentFunctionDirectly)
 {
     bool ret = helper->read_wasm_file("add.wasm");
