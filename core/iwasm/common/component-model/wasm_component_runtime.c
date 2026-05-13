@@ -6570,6 +6570,8 @@ classify_component_runtime_composite_param(const WASMComponent *component,
                 param_index);
         case WASM_COMP_DEF_VAL_ENUM:
         case WASM_COMP_DEF_VAL_FLAGS:
+        case WASM_COMP_DEF_VAL_OWN:
+        case WASM_COMP_DEF_VAL_BORROW:
             return true;
         case WASM_COMP_DEF_VAL_VARIANT:
             if (def_type->def_val.variant) {
@@ -9724,6 +9726,19 @@ validate_component_public_composite_bytes(
         case WASM_COMP_DEF_VAL_LIST_LEN:
             return set_component_composite_param_list_scalar_leaf_error(inst,
                                                                     param_index);
+        case WASM_COMP_DEF_VAL_OWN:
+        case WASM_COMP_DEF_VAL_BORROW:
+        {
+            wasm_val_t ignored;
+            uint32 consumed = 0;
+            if (!decode_component_public_scalar_prefix(
+                    inst, data ? data + *offset_io : NULL,
+                    byte_size - *offset_io, WASM_COMP_PRIMVAL_U32, WASM_I32,
+                    "parameter", param_index, &ignored, &consumed))
+                return false;
+            (*offset_io) += consumed;
+            return true;
+        }
         default:
             return set_component_composite_param_leaf_error(inst, param_index);
     }
@@ -9755,6 +9770,8 @@ component_type_flat_i32_count(const WASMComponent *component,
     switch (entry->type.def_val_type->tag) {
         case WASM_COMP_DEF_VAL_ENUM:
         case WASM_COMP_DEF_VAL_FLAGS:
+        case WASM_COMP_DEF_VAL_OWN:
+        case WASM_COMP_DEF_VAL_BORROW:
             return 1;
         case WASM_COMP_DEF_VAL_LIST:
             return 2;
@@ -9796,7 +9813,10 @@ flatten_component_public_composite_bytes(
     uint32 byte_size, uint32 *offset_io, uint32 param_index,
     const WASMFuncType *core_type, wasm_val_t *core_args,
     uint32 *core_arg_index_io,
-    WASMComponentCanonParamAllocationTracker *allocation_tracker)
+    WASMComponentCanonParamAllocationTracker *allocation_tracker,
+    const WASMComponentRuntimeResourceState *resource_state,
+    WASMComponentCanonOwnedResourceParamTracker *owned_resource_tracker,
+    WASMComponentCanonBorrowedResourceParamTracker *borrowed_resource_tracker)
 {
     WASMComponentCanonLiftValueShape shape;
 
@@ -9940,7 +9960,8 @@ flatten_component_public_composite_bytes(
                         inst, component, function,
                         shape.def_type->def_val.record->fields[i].value_type, data,
                         byte_size, offset_io, param_index, core_type, core_args,
-                        core_arg_index_io, allocation_tracker))
+                        core_arg_index_io, allocation_tracker, resource_state,
+                        owned_resource_tracker, borrowed_resource_tracker))
                     return false;
             }
             return true;
@@ -9952,7 +9973,8 @@ flatten_component_public_composite_bytes(
                         inst, component, function,
                         &shape.def_type->def_val.tuple->element_types[i], data,
                         byte_size, offset_io, param_index, core_type, core_args,
-                        core_arg_index_io, allocation_tracker))
+                        core_arg_index_io, allocation_tracker, resource_state,
+                        owned_resource_tracker, borrowed_resource_tracker))
                     return false;
             }
             return true;
@@ -10277,7 +10299,9 @@ flatten_component_public_composite_bytes(
                                 [discriminant_value.of.i32]
                                 .value_type,
                             data, byte_size, offset_io, param_index, core_type,
-                            core_args, core_arg_index_io, allocation_tracker))
+                            core_args, core_arg_index_io, allocation_tracker,
+                            resource_state, owned_resource_tracker,
+                            borrowed_resource_tracker))
                         return false;
                     /* Pad to max_payload_width */
                     for (uint32 k = component_type_flat_i32_count(
@@ -10355,7 +10379,9 @@ flatten_component_public_composite_bytes(
                             inst, component, function,
                             shape.def_type->def_val.result->result_type, data,
                             byte_size, offset_io, param_index, core_type,
-                            core_args, core_arg_index_io, allocation_tracker))
+                            core_args, core_arg_index_io, allocation_tracker,
+                            resource_state, owned_resource_tracker,
+                            borrowed_resource_tracker))
                         return false;
                     /* Pad to max_payload_width */
                     for (uint32 k = component_type_flat_i32_count(
@@ -10381,7 +10407,9 @@ flatten_component_public_composite_bytes(
                             inst, component, function,
                             shape.def_type->def_val.result->error_type, data,
                             byte_size, offset_io, param_index, core_type,
-                            core_args, core_arg_index_io, allocation_tracker))
+                            core_args, core_arg_index_io, allocation_tracker,
+                            resource_state, owned_resource_tracker,
+                            borrowed_resource_tracker))
                         return false;
                     /* Pad to max_payload_width */
                     for (uint32 k = component_type_flat_i32_count(
@@ -10452,7 +10480,9 @@ flatten_component_public_composite_bytes(
                             inst, component, function,
                             shape.def_type->def_val.option->element_type, data,
                             byte_size, offset_io, param_index, core_type,
-                            core_args, core_arg_index_io, allocation_tracker))
+                            core_args, core_arg_index_io, allocation_tracker,
+                            resource_state, owned_resource_tracker,
+                            borrowed_resource_tracker))
                         return false;
                 }
                 else {
@@ -10473,9 +10503,60 @@ flatten_component_public_composite_bytes(
                 }
             }
             return true;
+        case WASM_COMP_DEF_VAL_OWN:
+        {
+            wasm_val_t handle_value = { 0 };
+            uint32 consumed = 0;
+
+            if (*core_arg_index_io >= core_type->param_count)
+                return set_component_param_flattening_error(inst);
+            if (core_type->types[*core_arg_index_io] != VALUE_TYPE_I32)
+                return set_component_call_error_fmt(
+                    inst,
+                    "component canon lift function parameter %u does not "
+                    "match the core function signature",
+                    param_index);
+
+            if (!decode_component_public_scalar_prefix(
+                    inst, data ? data + *offset_io : NULL,
+                    byte_size - *offset_io, WASM_COMP_PRIMVAL_U32, WASM_I32,
+                    "parameter", param_index, &handle_value, &consumed))
+                return false;
+            (*offset_io) += consumed;
+
+            core_args[*core_arg_index_io] = handle_value;
+            (*core_arg_index_io)++;
+            return true;
+        }
+        case WASM_COMP_DEF_VAL_BORROW:
+        {
+            wasm_val_t handle_value = { 0 };
+            uint32 consumed = 0;
+
+            if (*core_arg_index_io >= core_type->param_count)
+                return set_component_param_flattening_error(inst);
+            if (core_type->types[*core_arg_index_io] != VALUE_TYPE_I32)
+                return set_component_call_error_fmt(
+                    inst,
+                    "component canon lift function parameter %u does not "
+                    "match the core function signature",
+                    param_index);
+
+            if (!decode_component_public_scalar_prefix(
+                    inst, data ? data + *offset_io : NULL,
+                    byte_size - *offset_io, WASM_COMP_PRIMVAL_U32, WASM_I32,
+                    "parameter", param_index, &handle_value, &consumed))
+                return false;
+            (*offset_io) += consumed;
+
+            core_args[*core_arg_index_io].kind = WASM_I32;
+            core_args[*core_arg_index_io].of.i32 = handle_value.of.i32;
+            (*core_arg_index_io)++;
+            return true;
+        }
         case WASM_COMP_DEF_VAL_LIST_LEN:
             return set_component_composite_param_list_scalar_leaf_error(inst,
-                                                                    param_index);
+                                                                     param_index);
         default:
             return set_component_composite_param_leaf_error(inst, param_index);
     }
@@ -10768,7 +10849,8 @@ flatten_component_public_param_value(
         if (!flatten_component_public_composite_bytes(
                 inst, component, function, value_type, data, value->byte_size,
                 &offset, param_index, core_type, core_args, core_arg_index_io,
-                allocation_tracker))
+                allocation_tracker, resource_state, owned_resource_tracker,
+                borrowed_resource_tracker))
             return false;
 
         if (offset != value->byte_size)

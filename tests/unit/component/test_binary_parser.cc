@@ -64048,3 +64048,105 @@ TEST_F(BinaryParserTest, TestRuntimeSupportsOptionResultScalarParam)
     wasm_runtime_deinstantiate(module_inst);
     wasm_runtime_unload(module);
 }
+
+TEST_F(BinaryParserTest,
+       TestCallComponentValuesCanLiftRecordWithOwnResourceParam)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "component-record-own-resource-param";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    /* Add a resource type (no dtor) */
+    ASSERT_TRUE(append_top_level_resource_type_section((WASMComponentModule *)module));
+
+    WASMComponentRuntimeResourceState *tmp_state =
+        wasm_component_resource_state_create(
+            &((WASMComponentModule *)module)->component, helper->error_buf,
+            (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(tmp_state, nullptr) << helper->error_buf;
+    const uint32_t resource_type_idx = tmp_state->type_count - 1;
+    wasm_component_resource_state_destroy(tmp_state);
+
+    /* Add core caller module (resource-new, resource-rep, resource-drop) */
+    ASSERT_TRUE(append_top_level_resource_core_caller_sections(
+        (WASMComponentModule *)module, resource_type_idx,
+        "resource_core_caller.wasm"));
+
+    /* Define own<resource> type */
+    const int32_t own_type_idx =
+        append_component_own_type((WASMComponentModule *)module, resource_type_idx);
+    ASSERT_GE(own_type_idx, 0);
+
+    /* Define record type { f: own<resource> } */
+    const int32_t record_type_idx = append_component_record_type(
+        (WASMComponentModule *)module,
+        { { "f", make_component_type_index_value_type((uint32_t)own_type_idx) } });
+    ASSERT_GE(record_type_idx, 0);
+
+    /* Define function type: (record { f: own<resource> }) -> s32 */
+    const int32_t wrapper_type_idx = append_component_func_type(
+        (WASMComponentModule *)module,
+        { { "r", make_component_type_index_value_type((uint32_t)record_type_idx) } },
+        make_component_primitive_value_type(WASM_COMP_PRIMVAL_S32));
+    ASSERT_GE(wrapper_type_idx, 0);
+
+    /* Append canon lift: core "rep-handle-param" -> component func */
+    ASSERT_TRUE(append_top_level_core_export_lift_sections(
+        (WASMComponentModule *)module,
+        count_top_level_core_instance_entries(&((WASMComponentModule *)module)
+                                                   ->component)
+            - 1,
+        "rep-handle-param", (uint32_t)wrapper_type_idx,
+        "resource-record-param-lifted"));
+
+    /* Instantiate */
+    wasm_module_inst_t module_inst =
+        instantiate_component_with_default_wasi(module, helper.get());
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    auto *component_inst = (WASMComponentInstance *)module_inst;
+    wasm_component_func_t func = wasm_runtime_lookup_component_function(
+        module_inst, "resource-record-param-lifted");
+    ASSERT_NE(func, nullptr);
+
+    /* Create a resource handle with rep=42 */
+    auto noop_finalizer = [](void *, void *) {};
+    char ebuf[128] = {};
+    uint32_t handle = 0;
+    ASSERT_TRUE(wasm_component_resource_create_owned_handle(
+        component_inst->resource_state, resource_type_idx, (void *)(uintptr_t)42,
+        noop_finalizer, NULL, &handle, ebuf,
+        (uint32_t)sizeof(ebuf)))
+        << ebuf;
+
+    /* Construct a record value containing the handle (LEB128 u32) */
+    std::vector<uint8_t> record_payload;
+    append_component_s32_payload(&record_payload, (int32_t)handle);
+    wasm_component_value_t record_value =
+        make_component_defined_value(record_payload.data(),
+                                     (uint32_t)record_payload.size());
+
+    /* Call the function with the record -- flatten extracts handle,
+       core rep-handle-param calls resource.rep, returns rep value */
+    wasm_component_value_t result = {};
+    ASSERT_TRUE(wasm_runtime_call_component_values(module_inst, func, 1, &result, 1,
+                                                   &record_value))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(result.type.kind, WASM_COMPONENT_VALUE_TYPE_PRIMITIVE);
+    ASSERT_EQ(result.type.type.primitive_type, WASM_COMPONENT_PRIMITIVE_VALUE_S32);
+    { auto *d = (const int32 *)wasm_component_value_get_data(&result);
+      ASSERT_NE(d, nullptr); ASSERT_EQ(*d, 42); }
+
+    wasm_component_value_destroy(&record_value);
+    wasm_component_value_destroy(&result);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
