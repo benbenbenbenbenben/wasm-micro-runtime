@@ -65746,3 +65746,65 @@ TEST_F(BinaryParserTest,
     wasm_runtime_deinstantiate(module_inst);
     wasm_runtime_unload(module);
 }
+
+TEST_F(BinaryParserTest,
+       TestPublicApiCanGetResourceTypeExportKind)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "public-api-resource-type-export-kind";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    /* Add a resource type (no dtor) */
+    ASSERT_TRUE(append_top_level_resource_type_section(
+        (WASMComponentModule *)module));
+
+    WASMComponentRuntimeResourceState *tmp_state =
+        wasm_component_resource_state_create(
+            &((WASMComponentModule *)module)->component, helper->error_buf,
+            (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(tmp_state, nullptr) << helper->error_buf;
+    const uint32_t resource_type_idx = tmp_state->type_count - 1;
+    wasm_component_resource_state_destroy(tmp_state);
+
+    /* Export the resource type */
+    ASSERT_TRUE(append_top_level_resource_type_export_section(
+        (WASMComponentModule *)module, "my-resource", resource_type_idx));
+
+    wasm_module_inst_t module_inst =
+        instantiate_component_with_default_wasi(module, helper.get());
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    /* Find the resource type export index */
+    int32_t res_export_idx = -1;
+    int32_t export_count =
+        wasm_runtime_get_component_export_count(module_inst);
+    for (int32_t i = 0; i < export_count; i++) {
+        wasm_component_export_t export_type;
+        if (wasm_runtime_get_component_export_type(module_inst, i,
+                                                   &export_type)
+            && export_type.kind == WASM_COMPONENT_EXTERN_KIND_RESOURCE_TYPE) {
+            res_export_idx = i;
+            break;
+        }
+    }
+    ASSERT_GE(res_export_idx, 0);
+
+    /* Query the resource type API */
+    wasm_component_resource_type_t res_type =
+        wasm_runtime_get_component_export_resource_type(module_inst,
+                                                        res_export_idx);
+    ASSERT_NE(res_type, nullptr);
+    ASSERT_EQ(wasm_component_resource_type_get_kind(res_type),
+              WASM_COMPONENT_RESOURCE_TYPE_KIND_LOCAL);
+
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
