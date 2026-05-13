@@ -488,7 +488,12 @@ Major Canonical ABI gaps remain:
   using the same memory-backed (i32,i32) ABI as string; the size/align
   lookup now returns 8 bytes / 4 align; a test verifies that a canon lift
   function with `(error-context) -> s32` instantiates successfully
-- no async/callback canon options
+- async/callback canon options: Phase 1 complete — `async` (0x06) and
+  `callback` (0x07) canon opts are now accepted through validation and
+  runtime initialization; the `is_async` flag and `callback_func_idx`
+  are stored on the function struct; a test verifies async opt acceptance;
+  full async execution (Phases 2-8 per ASYNC-PLAN.md) remains to be
+  implemented
 
 So "Canonical ABI execution" is now **partially true**, but only for a small supported subset.
 

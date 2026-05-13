@@ -12,32 +12,28 @@ The async proposal touches every layer of the runtime:
 
 ---
 
-## Phase 1: Canon Opt Acceptance (3 files, ~50 lines)
+## Phase 1: Canon Opt Acceptance (3 files, ~50 lines) ✅ COMPLETE
 
 ### Goal
 Accept `async` (0x06) and `callback` (0x07) canon options through validation so lift/lower can be marked async.
 
-### Changes
+### Changes (committed)
 
-**`wasm_component_validate.c`** — `validate_canon_opts` (~10 lines)
-- Remove the `case WASM_COMP_CANON_OPT_ASYNC:` and `case WASM_COMP_CANON_OPT_CALLBACK:` rejection at lines 2173-2177
-- Add a `has_async` flag to the tracking variables
-- For `CALLBACK`: validate the func_idx against `ctx->core_func_count`
-- For `ASYNC`: no payload, just set `has_async = true`
+**`wasm_component_validate.c`** — `validate_canon_opts` ✅
+- Replaced ASYNC/CALLBACK rejection with acceptance: duplicate check for async, func_idx bounds check for callback
 
-**`wasm_component_runtime.h`** — function struct additions (~10 lines)
-- Add `bool is_async` and `uint32 callback_func_idx` to `WASMComponentRuntimeFunc`
-- Add `WASM_COMP_RUNTIME_FUNC_ASYNC` to `WASMComponentRuntimeFuncKind` enum
-- Add `bool has_async_params` and `bool has_async_results` flags
+**`wasm_component_runtime.h`** ✅
+- Added `bool is_async` and `uint32 callback_func_idx` to `WASMComponentRuntimeFunc`
 
-**`wasm_component_runtime.c`** — lift/lower initialization (~30 lines)
-- In the canon opt switch in `resolve_component_canon_lift_abi` (line ~8934), handle `ASYNC` and `CALLBACK` opts
-- Store `is_async` and `callback_func_idx` on the function struct
-- Validate that callback func_idx exists in the core function space
+**`wasm_component_runtime.c`** ✅
+- `resolve_component_canon_lift_abi`: handle ASYNC (set is_async) and CALLBACK (resolve func_idx) canon opts
+- `validate_lowered_import_signature`: accept ASYNC/CALLBACK opts in lower validation
 
-### Verification
-- A component with `(canon lift ... (async) (callback 0))` validates and instantiates
-- Test verifies `func->is_async == true`
+**Test** ✅
+- `TestRuntimeSupportsAsyncCanonOpt`: verifies async opt acceptance and is_async flag
+
+### Remaining for full async support
+See Phases 2-8 below.
 
 ---
 

@@ -18743,6 +18743,50 @@ append_component_canon_function(WASMComponentInstance *inst,
         inst->core_funcs[inst->core_func_count].of.lowered_function = func;
         inst->core_func_count++;
     }
+    else if (canon->tag == WASM_COMP_CANON_TASK_CANCEL
+             || canon->tag == WASM_COMP_CANON_SUBTASK_CANCEL
+             || canon->tag == WASM_COMP_CANON_BACKPRESSURE_SET
+             || canon->tag == WASM_COMP_CANON_YIELD
+             || canon->tag == WASM_COMP_CANON_SUBTASK_DROP
+             || canon->tag == WASM_COMP_CANON_CONTEXT_GET
+             || canon->tag == WASM_COMP_CANON_CONTEXT_SET) {
+        if (inst->lowered_func_count >= UINT32_MAX
+            || inst->core_func_count >= UINT32_MAX)
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size, "too many async builtins");
+        func = &inst->lowered_funcs[inst->lowered_func_count++];
+        memset(func, 0, sizeof(*func));
+        func->kind = WASM_COMP_RUNTIME_FUNC_RESOURCE_BUILTIN;
+        func->canon_tag = canon->tag;
+        func->owner_instance = inst;
+        func->resource_state = inst->resource_state;
+        func->type_owner_component = &inst->module->component;
+        memset(&inst->core_funcs[inst->core_func_count], 0,
+               sizeof(inst->core_funcs[inst->core_func_count]));
+        inst->core_funcs[inst->core_func_count].type =
+            WASM_COMP_CORE_RUNTIME_REF_LOWERED_FUNC;
+        inst->core_funcs[inst->core_func_count].of.lowered_function = func;
+        inst->core_func_count++;
+    }
+    else if (canon->tag == WASM_COMP_CANON_TASK_RETURN) {
+        if (inst->lowered_func_count >= UINT32_MAX
+            || inst->core_func_count >= UINT32_MAX)
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size, "too many async builtins");
+        func = &inst->lowered_funcs[inst->lowered_func_count++];
+        memset(func, 0, sizeof(*func));
+        func->kind = WASM_COMP_RUNTIME_FUNC_RESOURCE_BUILTIN;
+        func->canon_tag = canon->tag;
+        func->owner_instance = inst;
+        func->resource_state = inst->resource_state;
+        func->type_owner_component = &inst->module->component;
+        memset(&inst->core_funcs[inst->core_func_count], 0,
+               sizeof(inst->core_funcs[inst->core_func_count]));
+        inst->core_funcs[inst->core_func_count].type =
+            WASM_COMP_CORE_RUNTIME_REF_LOWERED_FUNC;
+        inst->core_funcs[inst->core_func_count].of.lowered_function = func;
+        inst->core_func_count++;
+    }
     else {
         if (inst->component_func_count >= UINT32_MAX)
             return set_component_runtime_error_fmt(

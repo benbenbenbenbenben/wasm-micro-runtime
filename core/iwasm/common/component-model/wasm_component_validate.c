@@ -2387,6 +2387,37 @@ validate_canons_section(WASMComponentValidationContext *ctx,
                 break;
             }
 
+            case WASM_COMP_CANON_TASK_CANCEL:
+            case WASM_COMP_CANON_SUBTASK_CANCEL:
+            case WASM_COMP_CANON_BACKPRESSURE_SET:
+            case WASM_COMP_CANON_YIELD:
+            case WASM_COMP_CANON_SUBTASK_DROP:
+                ctx->core_func_count++;
+                break;
+
+            case WASM_COMP_CANON_RESOURCE_DROP_ASYNC:
+            {
+                uint32_t rt_idx =
+                    canon_section->canon_data.resource_drop.resource_type_idx;
+                if (rt_idx >= ctx->type_count) {
+                    set_error_buf_ex(error_buf, error_buf_size,
+                                     "canon resource.drop.async type idx "
+                                     "out of bounds");
+                    return false;
+                }
+                ctx->core_func_count++;
+                break;
+            }
+
+            case WASM_COMP_CANON_TASK_RETURN:
+                ctx->core_func_count++;
+                break;
+
+            case WASM_COMP_CANON_CONTEXT_GET:
+            case WASM_COMP_CANON_CONTEXT_SET:
+                ctx->core_func_count++;
+                break;
+
             default:
                 set_error_buf_ex(error_buf, error_buf_size,
                                  "unsupported canon opcode: 0x%02x",
