@@ -271,8 +271,27 @@ parse_core_fieldtype(const uint8_t **payload, const uint8_t *end,
         return false;
     }
     out->is_mutable = (*p++ != 0);
-    return parse_core_valtype(&p, end, &out->storage_type, error_buf,
-                              error_buf_size);
+    if (p >= end) {
+        set_error_buf_ex(error_buf, error_buf_size,
+                         "Unexpected end parsing fieldtype storage");
+        return false;
+    }
+    uint8_t st = *p;
+    if (st == 0x78 || st == 0x77) {
+        p++;
+        out->storage_type.tag = WASM_CORE_STORAGETYPE_PACKED;
+        out->storage_type.storage_type.packed_type =
+            (WASMCorePackedTypeTag)st;
+    }
+    else {
+        out->storage_type.tag = WASM_CORE_STORAGETYPE_VAL;
+        if (!parse_core_valtype(&p, end,
+                                &out->storage_type.storage_type.val_type,
+                                error_buf, error_buf_size))
+            return false;
+    }
+    *payload = p;
+    return true;
 }
 
 static bool

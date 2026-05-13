@@ -1173,6 +1173,169 @@ validate_core_instance_section(WASMComponentValidationContext *ctx,
     return true;
 }
 
+// Validate core value types, field types, struct/array/func types, subtypes,
+// and recursive groups
+static bool
+validate_core_valtype(WASMComponentValidationContext *ctx,
+                      const WASMComponentCoreValType *valtype,
+                      char *error_buf, uint32_t error_buf_size)
+{
+    switch (valtype->tag) {
+        case WASM_CORE_VALTYPE_NUM:
+            if (valtype->type.num_type < WASM_CORE_NUM_TYPE_F64
+                || valtype->type.num_type > WASM_CORE_NUM_TYPE_I32) {
+                set_error_buf_ex(error_buf, error_buf_size,
+                                 "invalid num type in core valtype");
+                return false;
+            }
+            return true;
+        case WASM_CORE_VALTYPE_VECTOR:
+            if (valtype->type.vector_type != WASM_CORE_VECTOR_TYPE_V128) {
+                set_error_buf_ex(error_buf, error_buf_size,
+                                 "invalid vector type in core valtype");
+                return false;
+            }
+            return true;
+        case WASM_CORE_VALTYPE_REF:
+            return true;
+        default:
+            set_error_buf_ex(error_buf, error_buf_size,
+                             "invalid core valtype tag %u",
+                             (unsigned)valtype->tag);
+            return false;
+    }
+}
+
+static bool
+validate_core_storagetype(WASMComponentValidationContext *ctx,
+                          const WASMComponentCoreStorageType *st,
+                          char *error_buf, uint32_t error_buf_size)
+{
+    switch (st->tag) {
+        case WASM_CORE_STORAGETYPE_VAL:
+            return validate_core_valtype(ctx, &st->storage_type.val_type,
+                                         error_buf, error_buf_size);
+        case WASM_CORE_STORAGETYPE_PACKED:
+            if (st->storage_type.packed_type != WASM_CORE_PACKED_TYPE_I8
+                && st->storage_type.packed_type
+                       != WASM_CORE_PACKED_TYPE_I16) {
+                set_error_buf_ex(error_buf, error_buf_size,
+                                 "invalid packed type in storage type");
+                return false;
+            }
+            return true;
+        default:
+            set_error_buf_ex(error_buf, error_buf_size,
+                             "invalid storage type tag");
+            return false;
+    }
+}
+
+static bool
+validate_core_functype(WASMComponentValidationContext *ctx,
+                       const WASMComponentCoreFuncType *functype,
+                       char *error_buf, uint32_t error_buf_size)
+{
+    for (uint32_t i = 0; i < functype->params.count; i++) {
+        if (!validate_core_valtype(ctx, &functype->params.val_types[i],
+                                   error_buf, error_buf_size))
+            return false;
+    }
+    for (uint32_t i = 0; i < functype->results.count; i++) {
+        if (!validate_core_valtype(ctx, &functype->results.val_types[i],
+                                   error_buf, error_buf_size))
+            return false;
+    }
+    return true;
+}
+
+static bool
+validate_core_structtype(WASMComponentValidationContext *ctx,
+                         const WASMComponentCoreStructType *structtype,
+                         char *error_buf, uint32_t error_buf_size)
+{
+    for (uint32_t i = 0; i < structtype->field_count; i++) {
+        if (!validate_core_storagetype(ctx, &structtype->fields[i].storage_type,
+                                       error_buf, error_buf_size))
+            return false;
+    }
+    return true;
+}
+
+static bool
+validate_core_arraytype(WASMComponentValidationContext *ctx,
+                        const WASMComponentCoreArrayType *arraytype,
+                        char *error_buf, uint32_t error_buf_size)
+{
+    return validate_core_storagetype(ctx, &arraytype->field_type.storage_type,
+                                     error_buf, error_buf_size);
+}
+
+static bool
+validate_core_comptype(WASMComponentValidationContext *ctx,
+                       const WASMComponentCoreCompType *comptype,
+                       char *error_buf, uint32_t error_buf_size)
+{
+    switch (comptype->tag) {
+        case WASM_CORE_COMPTYPE_FUNC:
+            return validate_core_functype(ctx, &comptype->type.func_type,
+                                          error_buf, error_buf_size);
+        case WASM_CORE_COMPTYPE_STRUCT:
+            return validate_core_structtype(ctx, &comptype->type.struct_type,
+                                            error_buf, error_buf_size);
+        case WASM_CORE_COMPTYPE_ARRAY:
+            return validate_core_arraytype(ctx, &comptype->type.array_type,
+                                           error_buf, error_buf_size);
+        default:
+            set_error_buf_ex(error_buf, error_buf_size,
+                             "invalid core comptype tag %u",
+                             (unsigned)comptype->tag);
+            return false;
+    }
+}
+
+static bool
+validate_core_subtype(WASMComponentValidationContext *ctx,
+                      const WASMComponentCoreSubType *subtype,
+                      uint32_t type_index_bound, char *error_buf,
+                      uint32_t error_buf_size)
+{
+    if (subtype->supertype_count > 1) {
+        set_error_buf_ex(error_buf, error_buf_size,
+                         "super type count too large in core subtype");
+        return false;
+    }
+    for (uint32_t i = 0; i < subtype->supertype_count; i++) {
+        if (subtype->supertypes[i] >= type_index_bound) {
+            set_error_buf_ex(error_buf, error_buf_size,
+                             "super type index %u out of bounds in core subtype",
+                             subtype->supertypes[i]);
+            return false;
+        }
+    }
+    return validate_core_comptype(ctx, &subtype->comptype, error_buf,
+                                  error_buf_size);
+}
+
+static bool
+validate_core_rectype(WASMComponentValidationContext *ctx,
+                      const WASMComponentCoreRecType *rectype,
+                      char *error_buf, uint32_t error_buf_size)
+{
+    if (rectype->subtype_count == 0) {
+        set_error_buf_ex(error_buf, error_buf_size,
+                         "core rectype must have at least one subtype");
+        return false;
+    }
+    for (uint32_t i = 0; i < rectype->subtype_count; i++) {
+        uint32_t bound = ctx->core_type_count + rectype->subtype_count;
+        if (!validate_core_subtype(ctx, &rectype->subtypes[i], bound,
+                                   error_buf, error_buf_size))
+            return false;
+    }
+    return true;
+}
+
 // Support only moduletypes. rectype/subtype are not not supported, reject to
 // avoid silently accepting malformed binaries
 static bool
@@ -1186,11 +1349,22 @@ validate_core_type_section(WASMComponentValidationContext *ctx,
 
         switch (core_type_section->deftype->tag) {
             case WASM_CORE_DEFTYPE_RECTYPE:
+            {
+                if (!validate_core_rectype(
+                        ctx, core_type_section->deftype->type.rectype,
+                        error_buf, error_buf_size))
+                    return false;
+                break;
+            }
             case WASM_CORE_DEFTYPE_SUBTYPE:
             {
-                set_error_buf_ex(error_buf, error_buf_size,
-                                 "unsupported core deftype");
-                return false;
+                if (!validate_core_subtype(
+                        ctx,
+                        (const WASMComponentCoreSubType *)
+                            core_type_section->deftype->type.subtype,
+                        ctx->core_type_count, error_buf, error_buf_size))
+                    return false;
+                break;
             }
 
             case WASM_CORE_DEFTYPE_MODULETYPE:
