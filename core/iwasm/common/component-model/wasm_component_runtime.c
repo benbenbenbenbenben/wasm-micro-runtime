@@ -3185,8 +3185,10 @@ validate_lowered_import_signature(
 
         if (type_info.kind == WASM_COMP_CANON_LIFT_VALUE_STRING) {
             if (core_param_index + 1 >= expected_type->param_count
-                || expected_type->types[core_param_index] != VALUE_TYPE_I32
-                || expected_type->types[core_param_index + 1] != VALUE_TYPE_I32)
+                || (expected_type->types[core_param_index] != VALUE_TYPE_I32
+                    && expected_type->types[core_param_index] != VALUE_TYPE_I64)
+                || (expected_type->types[core_param_index + 1] != VALUE_TYPE_I32
+                    && expected_type->types[core_param_index + 1] != VALUE_TYPE_I64))
                 return set_component_runtime_error_fmt(
                     error_buf, error_buf_size,
                     "core import parameter %u does not match the lowered "
@@ -3214,8 +3216,10 @@ validate_lowered_import_signature(
                 "and scalar, string, list<scalar>, or list<string> parameters");
 
         if (core_param_index + 1 >= expected_type->param_count
-            || expected_type->types[core_param_index] != VALUE_TYPE_I32
-            || expected_type->types[core_param_index + 1] != VALUE_TYPE_I32)
+            || (expected_type->types[core_param_index] != VALUE_TYPE_I32
+                && expected_type->types[core_param_index] != VALUE_TYPE_I64)
+            || (expected_type->types[core_param_index + 1] != VALUE_TYPE_I32
+                && expected_type->types[core_param_index + 1] != VALUE_TYPE_I64))
             return set_component_runtime_error_fmt(
                 error_buf, error_buf_size,
                 "core import parameter %u does not match the lowered "
@@ -3347,7 +3351,8 @@ validate_lowered_import_signature(
 
             if (core_param_index + 1 != expected_type->param_count
                 || expected_type->result_count != 0
-                || expected_type->types[core_param_index] != VALUE_TYPE_I32)
+                || (expected_type->types[core_param_index] != VALUE_TYPE_I32
+                    && expected_type->types[core_param_index] != VALUE_TYPE_I64))
                 return set_component_runtime_error_fmt(
                     error_buf, error_buf_size,
                     "core import result 0 does not match the lowered component "
@@ -3417,7 +3422,8 @@ validate_lowered_import_signature(
 
             if (expected_type->result_count != 0
                 || core_param_index >= expected_type->param_count
-                || expected_type->types[core_param_index] != VALUE_TYPE_I32
+                || (expected_type->types[core_param_index] != VALUE_TYPE_I32
+                    && expected_type->types[core_param_index] != VALUE_TYPE_I64)
                 || core_param_index + 1 != expected_type->param_count)
                 return set_component_runtime_error_fmt(
                     error_buf, error_buf_size,
@@ -3437,7 +3443,8 @@ validate_lowered_import_signature(
 
             if (expected_type->result_count != 0
                 || core_param_index >= expected_type->param_count
-                || expected_type->types[core_param_index] != VALUE_TYPE_I32
+                || (expected_type->types[core_param_index] != VALUE_TYPE_I32
+                    && expected_type->types[core_param_index] != VALUE_TYPE_I64)
                 || core_param_index + 1 != expected_type->param_count)
                 return set_component_runtime_error_fmt(
                     error_buf, error_buf_size,
@@ -4585,17 +4592,20 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
     uint32 *owned_arg_caller_handles = stack_owned_arg_caller_handles;
     uint32 *owned_arg_resource_type_idxs = stack_owned_arg_resource_type_idxs;
     uint32 *borrow_arg_caller_handles = stack_borrow_arg_caller_handles;
-    uint32 param_count, expected_result_count, core_param_index = 0, i;
+    uint32 local_core_param_index = 0;
+    WASMComponentRuntimeStringEncoding lower_string_encoding =
+        WASM_COMP_RUNTIME_STRING_ENCODING_NONE;
+    uint32 param_count = 0, i, core_param_index = 0, expected_result_count;
     bool call_ok;
     WASMComponentCanonLiftValueShape result_shape;
     WASMComponentCanonLiftValueInfo result_type_info;
-    bool has_result_type = false;
+    bool has_result_type = false, expects_memory_result_ptr = false;
+    bool has_composite_memory_result = false;
+    bool has_owned_resource_result = false;
     bool has_borrowed_resource_result = false;
+    bool is_memory64 = false;
     uint32 borrowed_result_resource_type_idx =
         WASM_COMPONENT_RESOURCE_INVALID_TYPE_IDX;
-    bool expects_memory_result_ptr = false;
-    bool has_composite_memory_result = false;
-    WASMComponentRuntimeStringEncoding lower_string_encoding;
 
     if (!exec_env)
         return;
@@ -4605,6 +4615,10 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
         wasm_runtime_get_function_attachment(exec_env);
     lowered_function = attachment ? attachment->lowered_function : NULL;
     func_type = attachment ? attachment->func_type : NULL;
+    if (attachment && attachment->canon_memory_ref.type
+                         == WASM_COMP_CORE_RUNTIME_REF_MEMORY
+        && attachment->canon_memory_ref.of.memory)
+        is_memory64 = attachment->canon_memory_ref.of.memory->is_memory64;
     if (!caller_module_inst || !lowered_function)
         return;
     if (!func_type) {
@@ -5036,9 +5050,12 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
             uint32 len_len;
             uint8 len_buf[5];
 
+            uint8 expected_ptr_type =
+                is_memory64 ? VALUE_TYPE_I64 : VALUE_TYPE_I32;
+
             if (core_param_index + 1 >= func_type->param_count
-                || func_type->types[core_param_index] != VALUE_TYPE_I32
-                || func_type->types[core_param_index + 1] != VALUE_TYPE_I32) {
+                || func_type->types[core_param_index] != expected_ptr_type
+                || func_type->types[core_param_index + 1] != expected_ptr_type) {
                 if (call_args != stack_args)
                     wasm_runtime_free(call_args);
                 wasm_runtime_set_exception(
@@ -5189,9 +5206,12 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
             return;
         }
 
+        uint8 expected_ptr_type =
+            is_memory64 ? VALUE_TYPE_I64 : VALUE_TYPE_I32;
+
         if (core_param_index + 1 >= func_type->param_count
-            || func_type->types[core_param_index] != VALUE_TYPE_I32
-            || func_type->types[core_param_index + 1] != VALUE_TYPE_I32) {
+            || func_type->types[core_param_index] != expected_ptr_type
+            || func_type->types[core_param_index + 1] != expected_ptr_type) {
             if (call_args != stack_args)
                 wasm_runtime_free(call_args);
             wasm_runtime_set_exception(
