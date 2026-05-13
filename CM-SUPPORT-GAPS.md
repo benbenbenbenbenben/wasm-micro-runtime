@@ -441,7 +441,8 @@ Major Canonical ABI gaps remain:
   `list<record>`, `list<tuple>`, `list<option>`, `list<result>`,
   and `list<variant>` (scalar-payload defined types with flat ALBI
   layouts)
-- no non-UTF-8 string encodings (`utf16`, `latin1+utf16`)
+- non-UTF-8 string encodings (`utf16` and `latin1+utf16`) are now
+  supported across all marshal paths
 - no `memory64` memory-backed Canonical ABI support
 - no `error-context` value support
 - no async/callback canon options
