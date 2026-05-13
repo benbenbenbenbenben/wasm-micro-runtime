@@ -22,7 +22,7 @@ The main remaining gaps are now centered on:
 
 The implementation is now best described as:
 
-> **A partial but executable component runtime: top-level component loading/instantiation, public import/export APIs, scalar / UTF-8 string / `list<scalar>` / limited tuple-record canon-lift calls, a narrow direct-core-call `canon lower` seam for scalar signatures plus top-level UTF-8 string / `list<scalar>` params/results on the specifically tested memory-backed path, host-provided component-function imports for the currently supported subset, runtime values, value imports/exports, start execution slices, and a narrow executable resource-builtin seam are all present.**
+> **A substantial but still partial component runtime: top-level component loading/instantiation, public import/export APIs, full scalar / UTF-8 string / `list<scalar>` / `list<record>` / tuple-record / enum / flags / option / result / variant / canon-lift/lower calls through the component-value API, a direct-core-call `canon lower` adapted to the component-value API's type subset, host-provided component-function imports for the same subset, first-class composite value semantics (type-id, field construction, field extraction, type introspection), runtime values, value imports/exports, start execution slices, an operational local/imported resource-builtin seam owned-handle lifecycle across LIFT/LOWER/HOST-IMPORT calling conventions, borrowed-parameter tracking and borrowed-result aliasing, and a limited nested core-runtime subset for local core modules/instances plus nested core `func`/`memory`/`table`/`global` aliases and `alias outer` for core sorts are all present.**
 
 ### 1.1 Top-level component loading, instantiation, and teardown
 
@@ -217,7 +217,13 @@ Implemented slices include:
 Those value-section/value-export paths are now exercised not just for scalars,
 but also for opaque tuple/record payloads with nested `list<string>` leaves.
 
-This is real runtime value plumbing, even though full composite value semantics are still missing.
+This is real runtime value plumbing, with first-class composite value semantics now in place:
+- `type_idx` tracking on all defined values
+- `wasm_component_value_get_type_idx(...)` — returns type definition index
+- `wasm_component_value_get_field(...)` — extract individual fields from records/tuples using the public-value (LEB128) format
+- `wasm_component_value_init_defined(...)` — construct records/tuples from arrays of field values
+- `wasm_component_instance_get_defined_field_count(...)` — query field count for record/tuple types
+- `wasm_component_instance_get_defined_field_type(...)` — query the value type of a specific field
 
 ### 1.7 Start sections now execute in limited form
 
@@ -256,11 +262,17 @@ The runtime now includes:
   destructors on explicit `resource.drop`, no async drop, and imported
   non-alias resource types only on the narrower public/internal
   `resource.drop` path described below
-- imported-resource builtin behavior is now split more honestly:
-  `canon resource.new` / `canon resource.rep` on imported resource types stay
-  explicitly rejected, while imported `canon resource.drop` now has a narrow
-  executable contract for owned and borrowed imported handles when the host
-  binds a top-level imported resource type with a destructor callback
+- imported-resource builtin behavior now includes host-provided
+  `canon resource.new` for imported resource types, completing the
+  imported resource lifecycle (imported-new + imported-drop):
+  `wasm_component_resource_bind_imported_new_callback(...)` binds a host
+  callback that creates imported resource handles on demand
+- `canon resource.rep` on imported resource types stays explicitly rejected
+  (per the Component Model spec — imported resource reps are not accessible
+  to guest code)
+- resources inside composite payloads (records, tuples, options, results,
+  variants) are now supported across both canon lift and canon lower paths,
+  with proper handle lifecycle and ABI flattening
 - host component callbacks can now synchronously accept and return
   `own<resource>` values through the public component value API for the
   already-existing handle subset, with runtime transfer/restore semantics for
@@ -313,6 +325,18 @@ This is now a real but narrow operational slice, not yet full resource semantics
   payload dispatch
 - `alias outer` for core func, table, memory, and global sorts in
   nested components
+- resources inside composite record/tuple payloads through the canon
+  lift param path (encode handles from public bytes to core args)
+- canon lower round-trips for enum, option, result, variant types
+  through the direct core-call path
+- canon lower of imported (HOST_IMPORT) component functions through
+  the full trampoline + callback path
+- first-class composite value APIs: `wasm_component_value_get_type_idx`,
+  `wasm_component_value_get_field`, `wasm_component_value_init_defined`,
+  `wasm_component_instance_get_defined_field_count`,
+  `wasm_component_instance_get_defined_field_type`
+- record/tuple field extraction and record construction using the
+  new composite value APIs
 
 ## 2. What is still missing for full component-model support
 
@@ -393,22 +417,16 @@ The executable Canonical ABI surface is currently limited to:
 
 Major Canonical ABI gaps remain:
 
-- no general executable `canon lower`; the only supported executable lowering
-  paths are:
-  - the narrow direct core-call subset above
-  - the synthetic scalar / UTF-8 string / `list<scalar>`-parameter /
-    `list<scalar>`-result / tuple/record-parameter / record-result /
-    tuple/mixed-composite-result `lift(lower(f))` subset above, including
-    nested `list<scalar>` / `list<string>` leaves on the mixed composite
-    param/result paths
-- no general adapter/lowering path for imported component functions beyond the
-  supported host-callback subset, the tested cross-component scalar / UTF-8
-  string / `list<string>`-parameter / `list<string>`-result /
-  `list<u8>`-parameter / `list<u8>`-result / `list<s32>`-parameter /
-  `list<s32>`-result / mixed composite-param / mixed composite-result seams
-  above (including nested `list<scalar>` / `list<string>` leaves on the mixed
-  composite param and result paths), and the narrow direct core-call subset
-  above
+- `canon lower` now supports the full current type subset (scalar, string,
+  list, tuple/record, enum, flags, option, result, variant) plus the
+  synthetic `lift(lower(f))` round-trip paths, but the validation of
+  lowered parameters/results at the import-binding boundary is still
+  limited to the flat-representation size check rather than a full type
+  compatibility check
+- the direct core-call `canon lower` path has been tested for
+  imported (HOST_IMPORT) component functions and confirmed working —
+  the trampoline correctly routes through
+  `wasm_component_call_values_internal` and invokes the host callback
 - no executable lower path yet for memory-backed Canonical ABI shapes
   beyond the tested direct UTF-8-string parameter/result path, the tested
   direct top-level `list<string>` parameter and result paths, the tested nested
@@ -489,33 +507,36 @@ Current limitations include:
   resource import/export contract is still incomplete compared to the current
   function/value/instance/component/core-module surface
 
-## 5. Broader component values are still missing
+## 5. Composite value semantics are now first-class
 
-The runtime now has value objects, value imports, value exports, and value sections, but the value model is still much narrower than the full spec.
+Composite values now have first-class type identity, construction, field access, and introspection APIs:
 
-What works today:
+- `wasm_component_value_get_type_idx(...)` — type index for defined values
+- `wasm_component_value_init_defined(...)` — construct records/tuples from field values
+- `wasm_component_value_get_field(...)` — extract a field from a record/tuple
+- `wasm_component_instance_get_defined_field_count(...)` — query field count
+- `wasm_component_instance_get_defined_field_type(...)` — query field value type
 
-- primitive scalar values
-- raw borrowed/owned value payload storage
-- opaque defined-value payloads for UTF-8 strings and top-level `list<scalar>` calls
-- opaque defined-value payloads for tuple/record composites in the currently
-  supported scalar / UTF-8 string / nested `list<scalar>` / `list<string>` cases
+The `type_idx` flows automatically through all internal value creation paths
+(lower trampoline, result decode, component call returns), so all defined values
+returned by the runtime carry their type identity.
 
-What is still missing:
+What still applies:
 
-- first-class runtime semantics for general lists
-- first-class typed runtime semantics for records
-- first-class typed runtime semantics for tuples
-- richer defined-type introspection/manipulation
+- The public value `type` struct now carries `type_idx` for defined values
+  (in addition to `primitive_type` for primitive values), enabling callers to
+  introspect and manipulate composite values without crafting raw bytes
+- Tuple-record results from canon-lifted and canon-lowered functions are
+  fully typed and field-accessible
+- `get_field` uses the public-value (LEB128) encoding to walk fields
+  sequentially, matching the encoding used by the runtime internally
 
 (Enum, flags, list<enum>, list<flags>, option<scalar>, option<string>,
 option<list<scalar>>, result<scalar,scalar>, and variant<scalar> (both
 params and results) are now supported in the Canonical ABI. These types
-are treated as   composite types with a discriminant and inner payload(s);
+are treated as composite types with a discriminant and inner payload(s);
 the current implementation covers scalar, string, and list<u8> payloads
 for option, result, and variant.)
-
-Today, composite value support is still mostly "opaque bytes plus limited special cases", not full typed component-value semantics.
 
 ## 6. Start semantics are only partially implemented
 
@@ -779,11 +800,10 @@ This fork is already useful for:
 
 It is still not a complete basis for:
 
-- full Canonical ABI execution
-- broad imported component-function lowering/adapters
-- general composite component values
-- complete resource-heavy component APIs
-- full nested core-runtime execution
+- full Canonical ABI execution (memory64, error-context, async/callback)
+- broad imported component-function lowering/adapters with memory-backed shapes
+- complete resource-heavy component APIs with full borrow/lend semantics
+- full nested core-runtime execution with broader core-type usage
 - broad WASI Preview 2 style application execution
 
 ## 12. Overall assessment
@@ -797,4 +817,4 @@ If this feature is described as:
 
 The right maturity label today is:
 
-> **A real but still partial component runtime: public host APIs, scalar / UTF-8 string / `list<scalar>` / `list<record>` / tuple-record / enum / flags / option / result / variant canon-lift calls, a narrow executable direct-core-call `canon lower` subset, supported host-provided component-function imports, runtime values, value imports/exports, start execution slices, a narrow scalar local/imported resource-call subset (including borrowed callback results), and a limited nested core-runtime subset for local core modules/instances plus nested core `func`/`memory`/`table`/`global` aliases and `alias outer` for core sorts are implemented; full support is still blocked on broader canon-lower/imported-function lowering, `list<variant>` and other composite list elements, operational resources, remaining host API gaps, and non-flat nested core type usage.**
+> **A substantial but still partial component runtime: public host APIs, full scalar / string / list / tuple-record / enum / flags / option / result / variant canon-lift and canon-lower calls through the component-value API, host-provided component-function imports for the same subset, first-class composite value semantics with type-id tracking, field construction, field extraction, and type introspection, imported `resource.new` and resource-inside-composite support, runtime values, value imports/exports, start execution slices, operational local/imported resource lifecycle, borrowed-parameter tracking, and a limited nested core-runtime subset are implemented; full support is still blocked on memory64, general `memory`/`realloc` host-canon-opts for lowered functions, remaining public host API gaps, broader nested-core-type usage, async/callback canon options, error-context, and core GC forms.**
