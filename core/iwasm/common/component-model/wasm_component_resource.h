@@ -209,6 +209,20 @@ void
 wasm_component_drop_transferred_public_resource_value(
     WASMComponentPublicResourceValue *resource_value);
 
+bool
+wasm_component_resource_transfer_owned_resource(
+    WASMComponentRuntimeResourceState *source_state, uint32 source_type_idx,
+    uint32 source_handle,
+    WASMComponentRuntimeResourceState *target_state,
+    uint32 *target_type_idx_out, uint32 *target_handle_out,
+    char *error_buf, uint32 error_buf_size);
+
+bool
+wasm_component_resource_repurpose_borrowed_handle(
+    WASMComponentRuntimeResourceState *resource_state, uint32 type_idx,
+    uint32 handle, uint32 new_source_handle, char *error_buf,
+    uint32 error_buf_size);
+
 #ifdef __cplusplus
 }
 #endif

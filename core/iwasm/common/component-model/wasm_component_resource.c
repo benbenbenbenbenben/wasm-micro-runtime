@@ -1259,3 +1259,204 @@ wasm_component_resource_release_public_value(
 
     memset(resource_value, 0, sizeof(*resource_value));
 }
+
+bool
+wasm_component_resource_transfer_owned_resource(
+    WASMComponentRuntimeResourceState *source_state, uint32 source_type_idx,
+    uint32 source_handle,
+    WASMComponentRuntimeResourceState *target_state,
+    uint32 *target_type_idx_out, uint32 *target_handle_out,
+    char *error_buf, uint32 error_buf_size)
+{
+    WASMComponentRuntimeResourceType *source_type;
+    WASMComponentRuntimeResourceType *source_canonical;
+    WASMComponentRuntimeResourceType *target_type;
+    WASMComponentRuntimeResourceType *target_canonical;
+    WASMComponentResourceHandleEntry *entry;
+    uint32 target_type_idx;
+    uint32 target_handle;
+
+    if (!source_state || !target_state || !target_type_idx_out
+        || !target_handle_out || source_handle == 0)
+        return set_component_resource_error(
+            error_buf, error_buf_size,
+            "component resource transfer is invalid");
+
+    if (source_state == target_state) {
+        *target_type_idx_out = source_type_idx;
+        *target_handle_out = source_handle;
+        return true;
+    }
+
+    source_type = wasm_component_resource_lookup_runtime_type(
+        source_state, source_type_idx);
+    if (!source_type)
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "source type index %u is not a runtime resource type",
+            source_type_idx);
+
+    source_canonical = resolve_canonical_resource_type(
+        source_state, source_type->type_idx);
+    if (!source_canonical)
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "source type index %u is not a canonical resource type",
+            source_type_idx);
+
+    if (source_handle - 1 >= source_canonical->handle_table.entry_count)
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "source handle %u is out of bounds", source_handle);
+
+    entry = &source_canonical->handle_table.entries[source_handle - 1];
+    if (!entry->is_live || !entry->is_owned)
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "source handle %u is not an owned live handle", source_handle);
+    if (entry->borrow_count > 0)
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "source handle %u has outstanding borrowed handles", source_handle);
+
+    /* Map source type to target type. For imported resources, match by name.
+       For local resources, match by index if compatible. */
+    target_type_idx = source_type_idx;
+    if (source_type->kind == WASM_COMP_RUNTIME_RESOURCE_TYPE_IMPORTED
+        && source_type->import_name) {
+        bool found = false;
+        for (uint32 i = 0; i < target_state->type_count; i++) {
+            WASMComponentRuntimeResourceType *tt =
+                wasm_component_resource_lookup_runtime_type(target_state, i);
+            if (tt && tt->kind == WASM_COMP_RUNTIME_RESOURCE_TYPE_IMPORTED
+                && tt->import_name
+                && strcmp(tt->import_name, source_type->import_name) == 0) {
+                target_type_idx = i;
+                found = true;
+                break;
+            }
+        }
+        if (!found)
+            return set_component_resource_error_fmt(
+                error_buf, error_buf_size,
+                "imported resource type \"%s\" not found in target state",
+                source_type->import_name);
+    }
+
+    target_type = wasm_component_resource_lookup_runtime_type(
+        target_state, target_type_idx);
+    if (!target_type)
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "target type index %u is not a runtime resource type",
+            target_type_idx);
+
+    target_canonical = resolve_canonical_resource_type(
+        target_state, target_type->type_idx);
+    if (!target_canonical)
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "target type index %u is not a canonical resource type",
+            target_type_idx);
+
+    /* Create the owned handle in the target state */
+    if (target_canonical->kind == WASM_COMP_RUNTIME_RESOURCE_TYPE_LOCAL) {
+        if (!wasm_component_resource_create_owned_handle(
+                target_state, target_type_idx, entry->data, entry->finalizer,
+                entry->finalizer_ctx, &target_handle, error_buf, error_buf_size))
+            return false;
+    }
+    else if (target_canonical->kind
+             == WASM_COMP_RUNTIME_RESOURCE_TYPE_IMPORTED) {
+        if (!wasm_component_resource_create_imported_handle(
+                target_state, target_type_idx, entry->data, true,
+                &target_handle, error_buf, error_buf_size))
+            return false;
+    }
+    else
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "target resource type has unsupported kind for transfer");
+
+    /* Clear the source entry (like take_owned_handle does) */
+    {
+        uint32 generation = entry->generation;
+        memset(entry, 0, sizeof(*entry));
+        entry->generation = generation;
+    }
+    if (source_canonical->handle_table.live_handle_count > 0)
+        source_canonical->handle_table.live_handle_count--;
+    if (source_canonical->handle_table.owned_handle_count > 0)
+        source_canonical->handle_table.owned_handle_count--;
+    if (source_state->owned_handle_count > 0)
+        source_state->owned_handle_count--;
+
+    *target_type_idx_out = target_type_idx;
+    *target_handle_out = target_handle;
+    return true;
+}
+
+bool
+wasm_component_resource_repurpose_borrowed_handle(
+    WASMComponentRuntimeResourceState *resource_state, uint32 type_idx,
+    uint32 handle, uint32 new_source_handle, char *error_buf,
+    uint32 error_buf_size)
+{
+    WASMComponentRuntimeResourceType *resource_type;
+    WASMComponentRuntimeResourceType *canonical_type;
+    WASMComponentResourceHandleEntry *borrow_entry;
+    WASMComponentResourceHandleEntry *old_source;
+    WASMComponentResourceHandleEntry *new_source;
+
+    if (!resource_state || handle == 0 || new_source_handle == 0)
+        return set_component_resource_error(
+            error_buf, error_buf_size,
+            "component resource repurpose is invalid");
+
+    resource_type = wasm_component_resource_lookup_runtime_type(
+        resource_state, type_idx);
+    if (!resource_type)
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "type index %u is not a runtime resource type", type_idx);
+
+    canonical_type = resolve_canonical_resource_type(resource_state, type_idx);
+    if (!canonical_type)
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "type index %u is not a canonical resource type", type_idx);
+
+    if (handle - 1 >= canonical_type->handle_table.entry_count)
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "borrowed handle %u is out of bounds", handle);
+    if (new_source_handle - 1 >= canonical_type->handle_table.entry_count)
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "new source handle %u is out of bounds", new_source_handle);
+
+    borrow_entry = &canonical_type->handle_table.entries[handle - 1];
+    if (borrow_entry->is_owned || borrow_entry->borrowed_from_handle == 0)
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "handle %u is not a borrowed handle", handle);
+
+    old_source = &canonical_type->handle_table.entries[
+        borrow_entry->borrowed_from_handle - 1];
+    new_source = &canonical_type->handle_table.entries[new_source_handle - 1];
+
+    if (!new_source->is_live || !new_source->is_owned)
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "new source handle %u is not a live owned handle", new_source_handle);
+
+    /* Decrement old source's borrow_count */
+    if (old_source->borrow_count > 0)
+        old_source->borrow_count--;
+
+    /* Update borrow entry to point to new source */
+    borrow_entry->borrowed_from_handle = new_source_handle;
+    borrow_entry->borrowed_from_generation = new_source->generation;
+    new_source->borrow_count++;
+    return true;
+}

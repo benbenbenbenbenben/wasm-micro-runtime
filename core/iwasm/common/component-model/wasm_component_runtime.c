@@ -1672,8 +1672,35 @@ remap_resource_type_idx_for_state(
             wasm_component_resource_lookup_runtime_type_const(
                 target_resource_state, source_type_idx);
         if (target_type && target_type->kind == source_type->kind) {
-            *target_type_idx_out = source_type_idx;
-            return true;
+            /* Prefer matching by canonical type idx for eq-bound types */
+            if (source_type->canonical_type_idx != UINT32_MAX
+                && target_type->canonical_type_idx != UINT32_MAX
+                && source_type->canonical_type_idx
+                       == target_type->canonical_type_idx) {
+                *target_type_idx_out = source_type_idx;
+                return true;
+            }
+            /* Fallback: same kind at the same index */
+            if (target_type->kind == source_type->kind) {
+                *target_type_idx_out = source_type_idx;
+                return true;
+            }
+        }
+    }
+
+    /* Try finding target by scanning for matching canonical_type_idx */
+    if (source_type->canonical_type_idx != UINT32_MAX) {
+        for (i = 0; i < target_resource_state->type_count; i++) {
+            const WASMComponentRuntimeResourceType *target_type =
+                wasm_component_resource_lookup_runtime_type_const(
+                    target_resource_state, i);
+            if (target_type
+                && target_type->canonical_type_idx != UINT32_MAX
+                && target_type->canonical_type_idx
+                       == source_type->canonical_type_idx) {
+                *target_type_idx_out = i;
+                return true;
+            }
         }
     }
 
