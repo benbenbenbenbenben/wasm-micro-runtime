@@ -10601,12 +10601,11 @@ flatten_component_public_param_value(
 
             if (function->string_encoding == WASM_COMP_RUNTIME_STRING_ENCODING_UTF16
                 && payload_len > 0) {
-                /* Convert UTF-8 to UTF-16: each byte becomes 2 bytes */
+                /* Convert UTF-8 component value to UTF-16 in guest memory */
                 uint32 utf16_len = payload_len * 2;
                 if (!call_component_canon_realloc(inst, function, utf16_len,
                                                    &guest_ptr))
                     return false;
-                uint8 *guest_bytes = NULL;
                 if (!get_component_canon_memory_bytes(inst, function, guest_ptr,
                                                        utf16_len,
                                                        "utf16 string parameter",
@@ -10616,7 +10615,7 @@ flatten_component_public_param_value(
                     guest_bytes[i * 2] = payload[i];
                     guest_bytes[i * 2 + 1] = 0;
                 }
-                element_count = utf16_len;
+                goto string_marshal_common;
             }
             else {
                 if (!call_component_canon_realloc(inst, function, payload_len,
@@ -10690,9 +10689,11 @@ flatten_component_public_param_value(
                         : "list<scalar> parameter buffer",
                     &guest_bytes))
                 return false;
-            memcpy(guest_bytes, payload, payload_len);
+            if (function->string_encoding != WASM_COMP_RUNTIME_STRING_ENCODING_UTF16)
+                memcpy(guest_bytes, payload, payload_len);
         }
 
+string_marshal_common:
         if (core_type->types[*core_arg_index_io] != VALUE_TYPE_I32
             || core_type->types[*core_arg_index_io + 1] != VALUE_TYPE_I32)
             return set_component_call_error_fmt(
@@ -13059,6 +13060,66 @@ cleanup:
 }
 
 static bool
+convert_utf16_bytes_to_utf8(const uint8 *utf16_bytes, uint32 utf16_byte_len,
+                            uint8 **utf8_out, uint32 *utf8_len_out,
+                            WASMComponentInstance *inst)
+{
+    uint32 code_unit_count = utf16_byte_len / 2;
+    uint32 max_utf8_len = code_unit_count * 3;
+    uint8 *utf8_buf = wasm_runtime_malloc(max_utf8_len);
+    uint32 utf8_pos = 0;
+
+    if (!utf8_buf) {
+        wasm_runtime_set_exception((WASMModuleInstanceCommon *)inst,
+                                    "Failed to allocate memory for UTF-8 "
+                                    "conversion");
+        return false;
+    }
+
+    for (uint32 i = 0; i < code_unit_count; i++) {
+        uint32 code_point = (uint32)utf16_bytes[i * 2]
+                            | ((uint32)utf16_bytes[i * 2 + 1] << 8);
+
+        /* Handle surrogate pairs */
+        if (code_point >= 0xD800 && code_point <= 0xDBFF
+            && i + 1 < code_unit_count) {
+            uint32 low_surrogate = (uint32)utf16_bytes[(i + 1) * 2]
+                                   | ((uint32)utf16_bytes[(i + 1) * 2 + 1]
+                                      << 8);
+            if (low_surrogate >= 0xDC00 && low_surrogate <= 0xDFFF) {
+                code_point = 0x10000 + ((code_point - 0xD800) << 10)
+                             + (low_surrogate - 0xDC00);
+                i++;
+            }
+        }
+
+        /* Encode to UTF-8 */
+        if (code_point <= 0x7F) {
+            utf8_buf[utf8_pos++] = (uint8)code_point;
+        }
+        else if (code_point <= 0x7FF) {
+            utf8_buf[utf8_pos++] = 0xC0 | (uint8)(code_point >> 6);
+            utf8_buf[utf8_pos++] = 0x80 | (uint8)(code_point & 0x3F);
+        }
+        else if (code_point <= 0xFFFF) {
+            utf8_buf[utf8_pos++] = 0xE0 | (uint8)(code_point >> 12);
+            utf8_buf[utf8_pos++] = 0x80 | (uint8)((code_point >> 6) & 0x3F);
+            utf8_buf[utf8_pos++] = 0x80 | (uint8)(code_point & 0x3F);
+        }
+        else {
+            utf8_buf[utf8_pos++] = 0xF0 | (uint8)(code_point >> 18);
+            utf8_buf[utf8_pos++] = 0x80 | (uint8)((code_point >> 12) & 0x3F);
+            utf8_buf[utf8_pos++] = 0x80 | (uint8)((code_point >> 6) & 0x3F);
+            utf8_buf[utf8_pos++] = 0x80 | (uint8)(code_point & 0x3F);
+        }
+    }
+
+    *utf8_out = utf8_buf;
+    *utf8_len_out = utf8_pos;
+    return true;
+}
+
+static bool
 init_component_public_memory_sequence_result(
     WASMComponentInstance *inst, const WASMComponentRuntimeFunc *function,
     const WASMComponentCanonLiftValueInfo *result_info, uint32 result_area_ptr,
@@ -13121,11 +13182,29 @@ init_component_public_memory_sequence_result(
                                                   : "list<scalar> result payload",
                                               &payload_bytes))
             return false;
-        if (result_info->kind == WASM_COMP_CANON_LIFT_VALUE_STRING
-            && !wasm_component_validate_utf8(payload_bytes, byte_count))
-            return set_component_call_error(
-                inst, "component canon lift function result does not "
-                      "contain valid UTF-8");
+        if (result_info->kind == WASM_COMP_CANON_LIFT_VALUE_STRING) {
+            if (function->string_encoding == WASM_COMP_RUNTIME_STRING_ENCODING_UTF16
+                && byte_count > 0) {
+                /* Convert UTF-16 bytes to UTF-8 */
+                uint8 *utf8_bytes = NULL;
+                uint32 utf8_len = 0;
+                if (!convert_utf16_bytes_to_utf8(payload_bytes, byte_count,
+                                                  &utf8_bytes, &utf8_len,
+                                                  inst))
+                    return false;
+                if (payload_copy)
+                    wasm_runtime_free(payload_copy);
+                payload_copy = utf8_bytes;
+                byte_count = utf8_len;
+            }
+            if (!wasm_component_validate_utf8(payload_copy
+                                                  ? payload_copy
+                                                  : payload_bytes,
+                                              byte_count))
+                return set_component_call_error(
+                    inst, "component canon lift function result does not "
+                          "contain valid UTF-8");
+        }
 
         if (!copy_component_memory_payload(inst, payload_bytes, byte_count,
                                            result_desc, &payload_copy))
