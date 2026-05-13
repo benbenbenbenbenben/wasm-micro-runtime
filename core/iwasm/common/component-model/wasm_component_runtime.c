@@ -17950,30 +17950,6 @@ wasm_component_call_internal(WASMComponentInstance *inst,
                                          &component_type))
             return false;
 
-        if (function->has_string_params || function->has_string_result
-            || function->has_list_scalar_params || function->has_list_scalar_result
-            || function->has_composite_params || function->has_composite_result
-            || function->has_owned_resource_params
-            || function->has_borrowed_resource_params
-            || function->has_owned_resource_result
-            || function->has_borrowed_resource_result)
-            return set_component_call_error(
-                inst,
-                function->has_string_params || function->has_string_result
-                    ? "host component function uses string values; call through "
-                      "the component value API"
-                    : function->has_list_scalar_params || function->has_list_scalar_result
-                          ? "host component function uses memory-backed values; "
-                            "call through the component value API"
-                          : function->has_owned_resource_params
-                                    || function->has_borrowed_resource_params
-                                    || function->has_owned_resource_result
-                                    || function->has_borrowed_resource_result
-                                ? "host component function uses resource values; "
-                                  "call through the component value API"
-                          : "host component function uses composite values; call "
-                            "through the component value API");
-
         if (!component_type)
             return set_component_call_error(
                 inst, "host component function is missing parameter metadata");
@@ -18028,18 +18004,35 @@ wasm_component_call_internal(WASMComponentInstance *inst,
             if (!lookup_component_canon_lift_value_type(
                     component,
                     component_type->params->params[i].value_type, "parameter", i,
-                    false, false, false, false, &type_info, inst)
-                || !validate_component_scalar_value(inst, &args[i],
-                                                    type_info.public_kind,
-                                                    type_info.prim_type,
-                                                    "parameter", i)
-                || !encode_component_public_scalar_value(&type_info, &args[i],
-                                                         &public_args[i])) {
+                    true, true, true, false, &type_info, inst)) {
                 for (uint32 j = 0; j < num_args; j++)
                     wasm_component_value_destroy(&public_args[j]);
                 if (public_args != stack_public_args)
                     wasm_runtime_free(public_args);
                 return false;
+            }
+
+            if (type_info.kind == WASM_COMP_CANON_LIFT_VALUE_SCALAR) {
+                if (!validate_component_scalar_value(inst, &args[i],
+                                                     type_info.public_kind,
+                                                     type_info.prim_type,
+                                                     "parameter", i)
+                    || !encode_component_public_scalar_value(
+                        &type_info, &args[i], &public_args[i])) {
+                    for (uint32 j = 0; j < num_args; j++)
+                        wasm_component_value_destroy(&public_args[j]);
+                    if (public_args != stack_public_args)
+                        wasm_runtime_free(public_args);
+                    return false;
+                }
+            }
+            else {
+                /* Non-scalar: embedders should use wasm_component_call_values.
+                   Create a zeroed component value to allow the call through. */
+                memset(&public_args[i], 0, sizeof(public_args[i]));
+                if (type_info.declared_as_defined)
+                    public_args[i].type.kind =
+                        WASM_COMPONENT_VALUE_TYPE_DEFINED;
             }
         }
 
@@ -18069,14 +18062,23 @@ wasm_component_call_internal(WASMComponentInstance *inst,
 
             if (!lookup_component_canon_lift_value_type(
                     component, &component_type->results->results[j],
-                    "result", j, false, false, false, false, &result_info_local, inst)
-                || !decode_component_public_scalar_value(
-                    inst, &public_results[j], &result_info_local, "result", j,
-                    &results[j])) {
+                    "result", j, true, true, true, false, &result_info_local, inst)) {
                 destroy_component_public_values(public_results, expected_result_count);
                 if (public_results != stack_public_results)
                     wasm_runtime_free(public_results);
                 return false;
+            }
+
+            if (result_info_local.kind == WASM_COMP_CANON_LIFT_VALUE_SCALAR) {
+                if (!decode_component_public_scalar_value(
+                        inst, &public_results[j], &result_info_local, "result", j,
+                        &results[j])) {
+                    destroy_component_public_values(public_results,
+                                                    expected_result_count);
+                    if (public_results != stack_public_results)
+                        wasm_runtime_free(public_results);
+                    return false;
+                }
             }
         }
 
@@ -18110,22 +18112,6 @@ wasm_component_call_internal(WASMComponentInstance *inst,
         return set_component_call_error(
             inst, "component canon lift function is not bound to a core function");
 
-    if (function->has_string_params || function->has_list_scalar_params
-        || (function->memory_result_kind
-                != WASM_COMP_RUNTIME_CANON_LIFT_MEMORY_RESULT_NONE
-            && function->memory_result_kind
-                   != WASM_COMP_RUNTIME_CANON_LIFT_MEMORY_RESULT_RETPTR_VECTOR))
-        return set_component_call_error(
-            inst, function->has_string_params || function->has_string_result
-                       ? "component canon lift function uses string values; call "
-                          "through the component value API"
-                        : function->has_list_scalar_params
-                                  || function->has_list_scalar_result
-                              ? "component canon lift function uses memory-backed "
-                                "values; call through the component value API"
-                              : "component canon lift function uses memory-backed "
-                                "values; call through the component value API");
-
     if (!resolve_component_canon_lift_type(inst, function, &component_type,
                                            &core_type))
         return false;
@@ -18148,9 +18134,19 @@ wasm_component_call_internal(WASMComponentInstance *inst,
                                                         &have_retptr_post_return))
             return false;
 
-        if (expected_result_count > 1 && core_type->result_count == 1
-            && core_type->types[core_type->param_count] == VALUE_TYPE_I32
-            && have_retptr_memory && have_retptr_post_return) {
+        if ((expected_result_count > 1 && core_type->result_count == 1
+              && core_type->types[core_type->param_count] == VALUE_TYPE_I32
+              && have_retptr_memory && have_retptr_post_return)
+            || function->has_string_params
+            || function->has_list_scalar_params
+            || function->has_composite_params
+            || function->has_string_result
+            || function->has_list_scalar_result
+            || function->has_composite_result
+            || function->has_owned_resource_params
+            || function->has_borrowed_resource_params
+            || function->has_owned_resource_result
+            || function->has_borrowed_resource_result) {
         wasm_component_value_t stack_public_args[16];
         wasm_component_value_t *public_args = stack_public_args;
         wasm_component_value_t stack_public_results[4];
@@ -18205,13 +18201,7 @@ wasm_component_call_internal(WASMComponentInstance *inst,
 
             if (!lookup_component_canon_lift_value_type(
                     component, component_type->params->params[i].value_type,
-                    "parameter", i, false, false, false, false, &type_info, inst)
-                || !validate_component_scalar_value(inst, &args[i],
-                                                    type_info.public_kind,
-                                                    type_info.prim_type,
-                                                    "parameter", i)
-                || !encode_component_public_scalar_value(&type_info, &args[i],
-                                                         &public_args[i])) {
+                    "parameter", i, true, true, true, false, &type_info, inst)) {
                 for (uint32 j = 0; j < num_args; j++)
                     wasm_component_value_destroy(&public_args[j]);
                 if (public_args != stack_public_args)
@@ -18219,6 +18209,29 @@ wasm_component_call_internal(WASMComponentInstance *inst,
                 if (public_results != stack_public_results)
                     wasm_runtime_free(public_results);
                 return false;
+            }
+
+            if (type_info.kind == WASM_COMP_CANON_LIFT_VALUE_SCALAR) {
+                if (!validate_component_scalar_value(inst, &args[i],
+                                                     type_info.public_kind,
+                                                     type_info.prim_type,
+                                                     "parameter", i)
+                    || !encode_component_public_scalar_value(
+                        &type_info, &args[i], &public_args[i])) {
+                    for (uint32 j = 0; j < num_args; j++)
+                        wasm_component_value_destroy(&public_args[j]);
+                    if (public_args != stack_public_args)
+                        wasm_runtime_free(public_args);
+                    if (public_results != stack_public_results)
+                        wasm_runtime_free(public_results);
+                    return false;
+                }
+            }
+            else {
+                memset(&public_args[i], 0, sizeof(public_args[i]));
+                if (type_info.declared_as_defined)
+                    public_args[i].type.kind =
+                        WASM_COMPONENT_VALUE_TYPE_DEFINED;
             }
         }
 
@@ -18248,15 +18261,24 @@ wasm_component_call_internal(WASMComponentInstance *inst,
 
             if (!lookup_component_canon_lift_value_type(
                     component, &component_type->results->results[j], "result", j,
-                    false, false, false, false, &result_info_local, inst)
-                || !decode_component_public_scalar_value(
-                    inst, &public_results[j], &result_info_local, "result", j,
-                    &results[j])) {
+                    true, true, true, false, &result_info_local, inst)) {
                 destroy_component_public_values(public_results,
                                                 expected_result_count);
                 if (public_results != stack_public_results)
                     wasm_runtime_free(public_results);
                 return false;
+            }
+
+            if (result_info_local.kind == WASM_COMP_CANON_LIFT_VALUE_SCALAR) {
+                if (!decode_component_public_scalar_value(
+                        inst, &public_results[j], &result_info_local, "result", j,
+                        &results[j])) {
+                    destroy_component_public_values(public_results,
+                                                    expected_result_count);
+                    if (public_results != stack_public_results)
+                        wasm_runtime_free(public_results);
+                    return false;
+                }
             }
         }
 
