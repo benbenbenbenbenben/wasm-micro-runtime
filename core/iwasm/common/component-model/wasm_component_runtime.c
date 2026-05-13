@@ -23417,3 +23417,55 @@ wasm_component_instance_get_defined_field_type(
 
     return false;
 }
+
+wasm_component_resource_type_kind_t
+wasm_component_resource_type_get_kind(
+    wasm_component_resource_type_t resource_type)
+{
+    if (!resource_type)
+        return WASM_COMPONENT_RESOURCE_TYPE_KIND_LOCAL;
+
+    switch (resource_type->kind) {
+        case WASM_COMP_RUNTIME_RESOURCE_TYPE_IMPORTED:
+            return WASM_COMPONENT_RESOURCE_TYPE_KIND_IMPORTED;
+        case WASM_COMP_RUNTIME_RESOURCE_TYPE_ALIAS:
+            return WASM_COMPONENT_RESOURCE_TYPE_KIND_ALIAS;
+        default:
+            return WASM_COMPONENT_RESOURCE_TYPE_KIND_LOCAL;
+    }
+}
+
+wasm_component_resource_type_t
+wasm_runtime_get_component_export_resource_type(
+    wasm_module_inst_t module_inst, int32_t export_index)
+{
+    WASMComponentInstance *inst = (WASMComponentInstance *)module_inst;
+    uint32 section_idx, export_idx;
+    uint32 current_export = 0;
+
+    if (!inst)
+        return NULL;
+
+    for (section_idx = 0; section_idx < inst->module->component.section_count;
+         section_idx++) {
+        WASMComponentSection *section =
+            &inst->module->component.sections[section_idx];
+        if (section->id != WASM_COMP_SECTION_EXPORTS
+            || !section->parsed.export_section)
+            continue;
+        for (export_idx = 0; export_idx < section->parsed.export_section->count;
+             export_idx++, current_export++) {
+            WASMComponentExport *exp =
+                &section->parsed.export_section->exports[export_idx];
+            if ((int32)current_export != export_index)
+                continue;
+            if (!exp->sort_idx || !exp->sort_idx->sort
+                || exp->sort_idx->sort->sort != WASM_COMP_SORT_TYPE)
+                return NULL;
+            if (exp->sort_idx->idx >= inst->resource_state->type_count)
+                return NULL;
+            return &inst->resource_state->types[exp->sort_idx->idx];
+        }
+    }
+    return NULL;
+}

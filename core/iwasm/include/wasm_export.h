@@ -193,6 +193,12 @@ typedef const struct WASMComponentRuntimeResourceType *
     wasm_component_resource_type_t;
 
 typedef enum {
+    WASM_COMPONENT_RESOURCE_TYPE_KIND_LOCAL = 0,
+    WASM_COMPONENT_RESOURCE_TYPE_KIND_IMPORTED,
+    WASM_COMPONENT_RESOURCE_TYPE_KIND_ALIAS
+} wasm_component_resource_type_kind_t;
+
+typedef enum {
     WASM_COMPONENT_EXTERN_KIND_FUNC = 0,
     WASM_COMPONENT_EXTERN_KIND_VALUE,
     WASM_COMPONENT_EXTERN_KIND_INSTANCE,
@@ -1886,13 +1892,17 @@ wasm_component_value_init_owned_imported_resource_result(
     wasm_component_resource_value_finalizer_t finalizer, void *finalizer_ctx);
 
 WASM_RUNTIME_API_EXTERN bool
-wasm_component_value_init_owned_local_resource_result(
-    wasm_component_value_t *value, void *data,
-    wasm_component_resource_value_finalizer_t finalizer, void *finalizer_ctx);
-
-WASM_RUNTIME_API_EXTERN bool
 wasm_component_value_init_borrowed_resource_result(
-    wasm_component_value_t *value, const wasm_component_value_t *borrowed_value);
+    wasm_component_value_t *value,
+    const wasm_component_value_t *borrowed_value);
+
+WASM_RUNTIME_API_EXTERN wasm_component_resource_type_kind_t
+wasm_component_resource_type_get_kind(
+    wasm_component_resource_type_t resource_type);
+
+WASM_RUNTIME_API_EXTERN wasm_component_resource_type_t
+wasm_runtime_get_component_export_resource_type(
+    wasm_module_inst_t module_inst, int32_t export_index);
 
 WASM_RUNTIME_API_EXTERN void
 wasm_component_value_destroy(wasm_component_value_t *value);
