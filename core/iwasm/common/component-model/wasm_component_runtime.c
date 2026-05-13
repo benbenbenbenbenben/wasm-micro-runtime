@@ -2895,10 +2895,13 @@ prepare_resource_builtin_function(
 
     if (canon_tag == WASM_COMP_CANON_RESOURCE_DROP_ASYNC)
     {
-        set_component_runtime_error(
-            error_buf, error_buf_size,
-            "component canon resource.drop async is not supported");
-        return false;
+        /* async drop: mark handle as pending-drop, create destructor task */
+        func->kind = WASM_COMP_RUNTIME_FUNC_RESOURCE_BUILTIN;
+        func->canon_tag = canon_tag;
+        func->owner_instance = owner_instance;
+        func->resource_state = resource_state;
+        func->type_owner_component = type_owner_component;
+        return true;
     }
 
     if (!resource_type)
@@ -3058,6 +3061,7 @@ validate_lowered_import_signature(
                         (uint32)lowered_function->canon_tag);
                 return true;
             case WASM_COMP_CANON_RESOURCE_DROP:
+            case WASM_COMP_CANON_RESOURCE_DROP_ASYNC:
                 if (expected_type->param_count != 1 || expected_type->result_count != 0
                     || expected_type->types[0] != VALUE_TYPE_I32)
                 {
@@ -3068,11 +3072,6 @@ validate_lowered_import_signature(
                     return false;
                 }
                 return true;
-            case WASM_COMP_CANON_RESOURCE_DROP_ASYNC:
-                set_component_runtime_error(
-                    error_buf, error_buf_size,
-                    "component canon resource.drop async is not supported");
-                return false;
             case WASM_COMP_CANON_STREAM_NEW:
             case WASM_COMP_CANON_FUTURE_NEW:
                 if (expected_type->param_count != 1
@@ -4536,6 +4535,44 @@ component_resource_builtin_trampoline(WASMModuleInstanceCommon *caller_module_in
                 return;
             }
             return;
+        case WASM_COMP_CANON_RESOURCE_DROP_ASYNC:
+            handle = (uint32)raw_args[0];
+            if (handle == 0
+                || handle - 1 >= canonical_resource_type->handle_table.entry_count) {
+                wasm_runtime_set_exception(
+                    caller_module_inst, "component resource handle is invalid");
+                return;
+            }
+            entry = &canonical_resource_type->handle_table.entries[handle - 1];
+            if (!entry->is_live || entry->is_dropping) {
+                wasm_runtime_set_exception(
+                    caller_module_inst, "component resource handle is invalid");
+                return;
+            }
+            if (entry->borrow_count > 0) {
+                wasm_runtime_set_exception(
+                    caller_module_inst,
+                    "component resource handle has outstanding borrowed handles");
+                return;
+            }
+            entry->is_live = false;
+            entry->is_dropping = true;
+            if (canonical_resource_type->has_dtor) {
+                wasm_val_t dtor_arg = { 0 };
+                dtor_arg.kind = WASM_I32;
+                dtor_arg.of.i32 = (int32)(uint32)(uintptr_t)entry->data;
+                call_core_function_from_resource_builtin(
+                    (WASMModuleInstanceCommon *)caller_module_inst,
+                    &resource_function->core_func_ref,
+                    "component resource drop async could not acquire a destructor "
+                    "execution environment",
+                    "component resource destructor failed", 0, NULL, 1, &dtor_arg);
+            }
+            wasm_component_resource_drop_owned_handle(
+                resource_function->resource_state,
+                resource_function->resource_type_idx, handle, error_buf,
+                (uint32)sizeof(error_buf));
+            return;
         case WASM_COMP_CANON_RESOURCE_REP:
             handle = (uint32)raw_args[0];
             if (handle == 0
@@ -4545,7 +4582,7 @@ component_resource_builtin_trampoline(WASMModuleInstanceCommon *caller_module_in
                 return;
             }
             entry = &canonical_resource_type->handle_table.entries[handle - 1];
-            if (!entry->is_live) {
+            if (!entry->is_live && !entry->is_dropping) {
                 wasm_runtime_set_exception(
                     caller_module_inst, "component resource handle is invalid");
                 return;

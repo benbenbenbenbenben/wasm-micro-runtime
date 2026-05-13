@@ -28,6 +28,7 @@ typedef enum WASMComponentRuntimeResourceTypeKind {
 typedef struct WASMComponentResourceHandleEntry {
     bool is_live;
     bool is_owned;
+    bool is_dropping;
     uint32 handle;
     uint32 generation;
     uint32 borrow_count;
@@ -36,6 +37,7 @@ typedef struct WASMComponentResourceHandleEntry {
     void *data;
     WASMComponentResourceHandleFinalizer finalizer;
     void *finalizer_ctx;
+    uint32 drop_task_id;
 } WASMComponentResourceHandleEntry;
 
 typedef struct WASMComponentResourceHandleTable {
