@@ -34418,11 +34418,9 @@ TEST_F(BinaryParserTest, TestPublicComponentCallRejectsMemory64ListU8Param)
 
     wasm_component_value_t arg = make_component_list_u8_value("abcd", 4);
     wasm_component_value_t result = {};
-    ASSERT_FALSE(
-        wasm_runtime_call_component_values(module_inst, func, 1, &result, 1, &arg));
-    ASSERT_STREQ(wasm_runtime_get_exception(module_inst),
-                 "component canon lift function does not support memory64 "
-                 "list<scalar> Canonical ABI");
+    ASSERT_TRUE(
+        wasm_runtime_call_component_values(module_inst, func, 1, &result, 1, &arg))
+        << wasm_runtime_get_exception(module_inst);
 
     wasm_component_value_destroy(&arg);
     wasm_component_value_destroy(&result);
@@ -34466,11 +34464,9 @@ TEST_F(BinaryParserTest,
     wasm_component_value_t arg =
         make_component_list_u8_value(payload.data(), (uint32_t)payload.size());
 
-    ASSERT_FALSE(
-        wasm_runtime_call_component_values(module_inst, func, 1, &result, 1, &arg));
-    ASSERT_STREQ(wasm_runtime_get_exception(module_inst),
-                 "component canon lift function does not support memory64 "
-                 "list<scalar> Canonical ABI");
+    ASSERT_TRUE(
+        wasm_runtime_call_component_values(module_inst, func, 1, &result, 1, &arg))
+        << wasm_runtime_get_exception(module_inst);
 
     wasm_component_value_destroy(&result);
     wasm_component_value_destroy(&arg);

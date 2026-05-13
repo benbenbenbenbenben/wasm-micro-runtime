@@ -1290,13 +1290,15 @@ typedef enum WASMComponentCanonOptTag {
     WASM_COMP_CANON_OPT_REALLOC = 0x04,     // (realloc f)
     WASM_COMP_CANON_OPT_POST_RETURN = 0x05, // (post-return f)
     WASM_COMP_CANON_OPT_ASYNC = 0x06,       // async
-    WASM_COMP_CANON_OPT_CALLBACK = 0x07     // (callback f)
+    WASM_COMP_CANON_OPT_CALLBACK = 0x07,    // (callback f)
+    WASM_COMP_CANON_OPT_MEMORY64 = 0x08     // (memory m (memory64))
 } WASMComponentCanonOptTag;
 
 // Canon option with payload, opts := vec<canonopt> where some options carry an
 // immediate:
 //  - 0x03 (memory m)       -> core:memidx (u32)
 //  - 0x04 (realloc f)      -> core:funcidx (u32)
+//  - 0x08 (memory64 m)     -> core:memidx (u32)
 //  - 0x05 (post-return f)  -> core:funcidx (u32)
 //  - 0x07 (callback f)     -> core:funcidx (u32)
 //  Others (string-encoding, async) carry no immediates.
@@ -1312,6 +1314,9 @@ typedef struct WASMComponentCanonOpt {
         struct {
             uint32_t mem_idx;
         } memory; /* 0x03 */
+        struct {
+            uint32_t mem_idx;
+        } memory64; /* 0x08 */
         struct {
             uint32_t func_idx;
         } realloc_opt; /* 0x04 */

@@ -123,6 +123,16 @@ parse_canon_opt(const uint8_t **payload, const uint8_t *end,
             out->payload.memory.mem_idx = (uint32_t)core_mem_idx;
             break;
         }
+        case WASM_COMP_CANON_OPT_MEMORY64:
+        { // (memory m (memory64)) - 0x08
+            uint64_t core_mem_idx = 0;
+            if (!read_leb((uint8_t **)&p, end, 32, false, &core_mem_idx,
+                          error_buf, error_buf_size)) {
+                return false;
+            }
+            out->payload.memory64.mem_idx = (uint32_t)core_mem_idx;
+            break;
+        }
         case WASM_COMP_CANON_OPT_REALLOC:
         { // (realloc f) - 0x04
             uint64_t core_func_idx = 0;

@@ -3058,6 +3058,7 @@ validate_lowered_import_signature(
 
             switch (opt->tag) {
                 case WASM_COMP_CANON_OPT_MEMORY:
+                case WASM_COMP_CANON_OPT_MEMORY64:
                     has_memory_opt = true;
                     continue;
                 case WASM_COMP_CANON_OPT_STRING_UTF8:
@@ -6120,7 +6121,8 @@ resolve_lowered_import_canon_memory(const WASMComponentRuntimeFunc *lowered_func
         const WASMComponentCanonOpt *opt =
             &lowered_function->canon_opts->canon_opts[i];
 
-        if (opt->tag != WASM_COMP_CANON_OPT_MEMORY)
+        if (opt->tag != WASM_COMP_CANON_OPT_MEMORY
+            && opt->tag != WASM_COMP_CANON_OPT_MEMORY64)
             continue;
 
         out_memory_ref->type = WASM_COMP_CORE_RUNTIME_REF_MEMORY;
@@ -8932,21 +8934,27 @@ resolve_component_canon_lift_abi(WASMComponentInstance *inst,
                     WASM_COMP_RUNTIME_STRING_ENCODING_LATIN1_UTF16;
                 break;
             case WASM_COMP_CANON_OPT_MEMORY:
-                if (opt->payload.memory.mem_idx >= inst->core_memory_count)
+            case WASM_COMP_CANON_OPT_MEMORY64:
+            {
+                uint32 mem_idx = opt->tag == WASM_COMP_CANON_OPT_MEMORY64
+                                     ? opt->payload.memory64.mem_idx
+                                     : opt->payload.memory.mem_idx;
+                if (mem_idx >= inst->core_memory_count)
                     return set_component_runtime_error_fmt(
                         error_buf, error_buf_size,
                         "canon lift memory index %u is out of bounds",
-                        opt->payload.memory.mem_idx);
+                        mem_idx);
                 function->canon_memory_ref =
-                    inst->core_memories[opt->payload.memory.mem_idx];
+                    inst->core_memories[mem_idx];
                 if (function->canon_memory_ref.type
                         != WASM_COMP_CORE_RUNTIME_REF_MEMORY
                     || !function->canon_memory_ref.of.memory)
                     return set_component_runtime_error_fmt(
                         error_buf, error_buf_size,
                         "canon lift memory index %u does not resolve to memory",
-                        opt->payload.memory.mem_idx);
+                        mem_idx);
                 break;
+            }
             case WASM_COMP_CANON_OPT_REALLOC:
                 if (opt->payload.realloc_opt.func_idx >= inst->core_func_count)
                     return set_component_runtime_error_fmt(
@@ -9020,19 +9028,6 @@ validate_required_opts:
                             "list<scalar> Canonical ABI"
                           : "component canon lift function requires memory for "
                             "memory-backed Canonical ABI");
-
-    if (function->canon_memory_ref.of.memory->is_memory64)
-        return set_component_runtime_error_fmt(
-            error_buf, error_buf_size,
-            function->has_string_params || function->has_string_result
-                    ? "component canon lift function does not support memory64 "
-                      "string Canonical ABI"
-                    : function->has_list_scalar_params
-                              || function->has_list_scalar_result
-                          ? "component canon lift function does not support "
-                            "memory64 list<scalar> Canonical ABI"
-                          : "component canon lift function does not support "
-                            "memory64 Canonical ABI");
 
     if (!function->core_func_ref.owner_instance
         || !function->core_func_ref.owner_instance->module_inst
@@ -15370,25 +15365,31 @@ resolve_component_canon_memory_ref(WASMComponentInstance *inst,
     for (uint32 i = 0; i < function->canon_opts->canon_opts_count; i++) {
         const WASMComponentCanonOpt *opt = &function->canon_opts->canon_opts[i];
 
-        if (opt->tag != WASM_COMP_CANON_OPT_MEMORY)
+        if (opt->tag != WASM_COMP_CANON_OPT_MEMORY
+            && opt->tag != WASM_COMP_CANON_OPT_MEMORY64)
             continue;
-        if (opt->payload.memory.mem_idx >= inst->core_memory_count)
+        uint32 mem_idx = opt->tag == WASM_COMP_CANON_OPT_MEMORY64
+                             ? opt->payload.memory64.mem_idx
+                             : opt->payload.memory.mem_idx;
+        if (mem_idx >= inst->core_memory_count)
             return set_component_call_error_fmt(
                 inst, "component canon lift memory index %u is out of bounds",
-                opt->payload.memory.mem_idx);
+                mem_idx);
 
-        if (inst->core_memories[opt->payload.memory.mem_idx].type
+        if (inst->core_memories[mem_idx].type
                 != WASM_COMP_CORE_RUNTIME_REF_MEMORY
-            || !inst->core_memories[opt->payload.memory.mem_idx].of.memory)
+            || !inst->core_memories[mem_idx].of.memory)
+
             return set_component_call_error_fmt(
-                inst, "component canon lift memory index %u does not resolve to "
-                      "memory",
-                opt->payload.memory.mem_idx);
+                inst,
+                "component canon lift memory index %u does not resolve to "
+                "memory",
+                mem_idx);
 
         if (found_out)
             *found_out = true;
         if (out_ref)
-            *out_ref = inst->core_memories[opt->payload.memory.mem_idx];
+            *out_ref = inst->core_memories[mem_idx];
         return true;
     }
 
@@ -16664,28 +16665,6 @@ host_import_cleanup_fail:
         return set_component_call_error(
             inst, "component canon lift function only supports UTF-8 string "
             "encoding");
-
-    if ((function->has_string_params || function->has_list_scalar_params
-         || function->memory_result_kind
-                != WASM_COMP_RUNTIME_CANON_LIFT_MEMORY_RESULT_NONE
-         || composite_result_needs_memory || multi_result_retptr_vector)
-        && function->canon_memory_ref.of.memory
-        && function->canon_memory_ref.of.memory->is_memory64)
-        return set_component_call_error(
-            inst, function->has_string_params || composite_result_has_string
-                          || composite_result_has_list_string
-                          || function->has_string_result
-                          || multi_result_retptr_has_string
-                        ? "component canon lift function does not support memory64 "
-                          "string Canonical ABI"
-                        : function->has_list_scalar_params
-                                  || composite_result_has_list_u8
-                                  || function->has_list_scalar_result
-                                  || multi_result_retptr_has_list_scalar
-                              ? "component canon lift function does not support "
-                                "memory64 list<scalar> Canonical ABI"
-                               : "component canon lift function does not support "
-                                "memory64 Canonical ABI");
 
     {
         uint32 param_count = component_type->params ? component_type->params->count : 0;

@@ -2122,6 +2122,19 @@ validate_canon_opts(WASMComponentValidationContext *ctx,
                 }
                 has_memory = true;
                 break;
+            case WASM_COMP_CANON_OPT_MEMORY64:
+                if (has_memory) {
+                    set_error_buf_ex(error_buf, error_buf_size,
+                                     "duplicate memory in canonopt");
+                    return false;
+                }
+                if (opt->payload.memory64.mem_idx >= ctx->core_memory_count) {
+                    set_error_buf_ex(error_buf, error_buf_size,
+                                     "canonopt memory idx out of bounds");
+                    return false;
+                }
+                has_memory = true;
+                break;
             case WASM_COMP_CANON_OPT_REALLOC:
                 if (has_realloc) {
                     set_error_buf_ex(error_buf, error_buf_size,
