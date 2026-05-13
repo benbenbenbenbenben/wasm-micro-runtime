@@ -65748,6 +65748,80 @@ TEST_F(BinaryParserTest,
 }
 
 TEST_F(BinaryParserTest,
+       TestRuntimeSupportsErrorContextParam)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "component-error-context-param";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    /* Configure first canon lift for error-context param -> s32 result */
+    WASMComponentCanon *canon = find_first_canon_lift(
+        (WASMComponentModule *)module);
+    ASSERT_NE(canon, nullptr);
+    WASMComponentFuncType *func_type = lookup_local_component_func_type(
+        (WASMComponentModule *)module, canon->canon_data.lift.type_idx);
+    ASSERT_NE(func_type, nullptr);
+    ASSERT_NE(func_type->params, nullptr);
+    ASSERT_GE(func_type->params->count, 1u);
+    ASSERT_NE(func_type->params->params[0].value_type, nullptr);
+    ASSERT_NE(func_type->results, nullptr);
+    ASSERT_EQ(func_type->results->tag, WASM_COMP_RESULT_LIST_WITH_TYPE);
+    ASSERT_NE(func_type->results->results, nullptr);
+
+    /* Set param type to error-context */
+    func_type->params->count = 1;
+    func_type->params->params[0].value_type->type = WASM_COMP_VAL_TYPE_PRIMVAL;
+    func_type->params->params[0].value_type->type_specific.primval_type =
+        WASM_COMP_PRIMVAL_ERROR_CONTEXT;
+
+    /* Set result type to s32 */
+    func_type->results->results->type = WASM_COMP_VAL_TYPE_PRIMVAL;
+    func_type->results->results->type_specific.primval_type =
+        WASM_COMP_PRIMVAL_S32;
+
+    /* Add canon opts (memory + string encoding + realloc) */
+    canon->canon_data.lift.canon_opts =
+        (WASMComponentCanonOpts *)wasm_runtime_malloc(
+            sizeof(WASMComponentCanonOpts));
+    ASSERT_NE(canon->canon_data.lift.canon_opts, nullptr);
+    memset(canon->canon_data.lift.canon_opts, 0,
+           sizeof(WASMComponentCanonOpts));
+    canon->canon_data.lift.canon_opts->canon_opts_count = 3;
+    canon->canon_data.lift.canon_opts->canon_opts =
+        (WASMComponentCanonOpt *)wasm_runtime_malloc(
+            sizeof(WASMComponentCanonOpt) * 3);
+    ASSERT_NE(canon->canon_data.lift.canon_opts->canon_opts, nullptr);
+    memset(canon->canon_data.lift.canon_opts->canon_opts, 0,
+           sizeof(WASMComponentCanonOpt) * 3);
+    canon->canon_data.lift.canon_opts->canon_opts[0].tag =
+        WASM_COMP_CANON_OPT_STRING_UTF8;
+    canon->canon_data.lift.canon_opts->canon_opts[1].tag =
+        WASM_COMP_CANON_OPT_MEMORY;
+    canon->canon_data.lift.canon_opts->canon_opts[1].payload.memory.mem_idx = 0;
+    canon->canon_data.lift.canon_opts->canon_opts[2].tag =
+        WASM_COMP_CANON_OPT_REALLOC;
+    canon->canon_data.lift.canon_opts->canon_opts[2].payload.realloc_opt.func_idx = 2;
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    /* Verify instantiation succeeds — error-context type no longer rejected */
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
        TestPublicApiCanGetResourceTypeExportKind)
 {
     bool ret = helper->read_wasm_file("add.wasm");

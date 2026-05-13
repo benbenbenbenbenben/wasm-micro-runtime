@@ -7137,10 +7137,16 @@ lookup_component_canon_lift_value_type(const WASMComponent *component,
                     position, index);
             }
             if (prim_type == WASM_COMP_PRIMVAL_ERROR_CONTEXT)
+                if (allow_string) {
+                    memset(out_info, 0, sizeof(*out_info));
+                    out_info->kind = WASM_COMP_CANON_LIFT_VALUE_STRING;
+                    out_info->prim_type = prim_type;
+                    return true;
+                }
                 return set_component_call_error_fmt(
                     inst,
-                    "component canon lift function %s %u uses unsupported "
-                    "component scalar type error-context",
+                    "component canon lift function %s %u requires memory-backed "
+                    "Canonical ABI for error-context",
                     position, index);
             return set_component_call_error_fmt(
                 inst, "component canon lift function %s %u uses unsupported "
@@ -7190,10 +7196,16 @@ lookup_component_canon_lift_value_type(const WASMComponent *component,
                     position, index);
             }
             if (prim_type == WASM_COMP_PRIMVAL_ERROR_CONTEXT)
+                if (allow_string) {
+                    memset(out_info, 0, sizeof(*out_info));
+                    out_info->kind = WASM_COMP_CANON_LIFT_VALUE_STRING;
+                    out_info->prim_type = prim_type;
+                    return true;
+                }
                 return set_component_call_error_fmt(
                     inst,
-                    "component canon lift function %s %u uses unsupported "
-                    "component scalar type error-context",
+                    "component canon lift function %s %u requires memory-backed "
+                    "Canonical ABI for error-context",
                     position, index);
             return set_component_call_error_fmt(
                 inst, "component canon lift function %s %u uses unsupported "
@@ -7989,12 +8001,10 @@ validate_component_host_import_value_type(
             *is_string_out = true;
             return true;
         }
-        if (prim_type == WASM_COMP_PRIMVAL_ERROR_CONTEXT)
-            return set_component_runtime_error_fmt(
-                error_buf, error_buf_size,
-                "host component import \"%s\" %s %u uses unsupported component "
-                "scalar type error-context",
-                import_name, position, index);
+        if (prim_type == WASM_COMP_PRIMVAL_ERROR_CONTEXT) {
+            *is_string_out = true;
+            return true;
+        }
         return set_component_runtime_error_fmt(
             error_buf, error_buf_size,
             "host component import \"%s\" %s %u uses unsupported component "
@@ -8026,12 +8036,10 @@ validate_component_host_import_value_type(
             *is_string_out = true;
             return true;
         }
-        if (prim_type == WASM_COMP_PRIMVAL_ERROR_CONTEXT)
-            return set_component_runtime_error_fmt(
-                error_buf, error_buf_size,
-                "host component import \"%s\" %s %u uses unsupported component "
-                "scalar type error-context",
-                import_name, position, index);
+        if (prim_type == WASM_COMP_PRIMVAL_ERROR_CONTEXT) {
+            *is_string_out = true;
+            return true;
+        }
         return set_component_runtime_error_fmt(
             error_buf, error_buf_size,
             "host component import \"%s\" %s %u uses unsupported component "
@@ -11668,6 +11676,10 @@ lookup_component_canon_abi_scalar_size_align(uint8 prim_type, uint32 *size_out,
         case WASM_COMP_PRIMVAL_F64:
             *size_out = 8;
             *align_out = 8;
+            return true;
+        case WASM_COMP_PRIMVAL_ERROR_CONTEXT:
+            *size_out = 8;
+            *align_out = 4;
             return true;
         default:
             return false;
