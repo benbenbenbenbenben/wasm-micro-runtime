@@ -1147,8 +1147,14 @@ wasm_component_resource_create_borrowed_handle(
     init_live_handle_entry(entry, false, handle, source_entry->data, NULL, NULL);
     entry->borrowed_from_handle = source_handle;
     entry->borrowed_from_generation = source_entry->generation;
+    if (source_entry->borrow_count >= UINT16_MAX)
+        return set_component_resource_error_fmt(
+            error_buf, error_buf_size,
+            "component resource handle %u has too many outstanding borrows",
+            source_handle);
     source_entry->borrow_count++;
     canonical_type->handle_table.live_handle_count++;
+    canonical_type->handle_table.borrowed_handle_count++;
 
     *out_handle = handle;
     return true;
@@ -1210,6 +1216,8 @@ wasm_component_resource_release_borrowed_handle(
     release_handle_entry(entry);
     if (canonical_type->handle_table.live_handle_count > 0)
         canonical_type->handle_table.live_handle_count--;
+    if (canonical_type->handle_table.borrowed_handle_count > 0)
+        canonical_type->handle_table.borrowed_handle_count--;
     return true;
 }
 

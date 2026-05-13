@@ -42,6 +42,7 @@ typedef struct WASMComponentResourceHandleTable {
     uint32 entry_count;
     uint32 live_handle_count;
     uint32 owned_handle_count;
+    uint32 borrowed_handle_count;
     uint32 next_handle;
     WASMComponentResourceHandleEntry *entries;
 } WASMComponentResourceHandleTable;
