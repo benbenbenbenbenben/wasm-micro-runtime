@@ -192,7 +192,11 @@ Current supported execution envelope is intentionally narrow:
   the narrow lowered-import path above
 - scalar signatures work through the `wasm_val_t` API
 - UTF-8 string / `list<scalar>` / tuple-record signatures work through the component-value API
-- raw `wasm_runtime_call_component(...)` stays scalar-only
+- `wasm_runtime_call_component(...)` now accepts non-scalar functions (string, list,
+  composite, resource), routing through `wasm_component_call_values_internal` for
+  proper flattening; non-scalar params receive zeroed component values since
+  `wasm_val_t` cannot carry string/list data — embedders should use
+  `wasm_runtime_call_component_values` for full control over non-scalar arguments
 
 ### 1.6 Runtime values and value sections are implemented
 
@@ -516,7 +520,11 @@ Current limitations include:
   component functions whose signatures stay within the generic scalar
   `wasm_val_t` shape; string / `list<scalar>` / tuple-record component functions
   still require the component-specific lookup/call APIs
-- `wasm_runtime_call_component(...)` remains scalar-only even for nested handles
+- `wasm_runtime_call_component(...)` no longer rejects non-scalar functions;
+  non-scalar params/results are handled by `wasm_component_call_values_internal`
+  with zeroed component values for params and skipped decode for results;
+  embedders should use `wasm_runtime_call_component_values` for full control
+  over non-scalar arguments
 - `wasm_runtime_call_component_values(...)` still only supports the current
   string / `list<scalar>` / `list<string>` / limited tuple-record subset
 - lowered core-function execution can now be invoked directly through the

@@ -38,6 +38,9 @@ typedef struct WASMComponentAsyncTask {
     uint32 num_results;
     bool owns_args;
     bool owns_results;
+    uint32 *context_values;
+    uint32 context_count;
+    bool cancellation_requested;
 } WASMComponentAsyncTask;
 
 typedef struct WASMComponentAsyncStream {
@@ -103,6 +106,8 @@ typedef struct WASMComponentAsyncEngine {
     uint32 waitable_set_count;
     uint32 next_waitable_set_id;
     bool dispatching_callback;
+    bool backpressure_enabled;
+    uint32 current_task_id;
 } WASMComponentAsyncEngine;
 
 bool
@@ -151,6 +156,21 @@ wasm_component_async_dispatch_callback(
     WASMComponentAsyncEngine *engine,
     WASMComponentInstance *inst,
     WASMComponentAsyncTask *task);
+
+uint32
+wasm_component_async_get_context_value(
+    WASMComponentAsyncEngine *engine,
+    uint32 ctx_idx);
+
+void
+wasm_component_async_set_context_value(
+    WASMComponentAsyncEngine *engine,
+    uint32 ctx_idx,
+    uint32 value);
+
+bool
+wasm_component_async_is_task_cancelled(
+    WASMComponentAsyncEngine *engine);
 
 /* Stream operations */
 

@@ -133,6 +133,8 @@ wasm_component_async_engine_destroy(
                 wasm_component_value_destroy(&task->results[j]);
             wasm_runtime_free(task->results);
         }
+        if (task->context_values)
+            wasm_runtime_free(task->context_values);
     }
 
     if (engine->tasks)
@@ -262,6 +264,12 @@ wasm_component_async_create_task(
     task->num_args = num_args;
     task->num_results = num_results;
 
+    task->context_values = wasm_runtime_malloc(sizeof(uint32) * 4);
+    if (task->context_values) {
+        memset(task->context_values, 0, sizeof(uint32) * 4);
+        task->context_count = 4;
+    }
+
     if (args && num_args > 0) {
         task->args = wasm_runtime_malloc(
             sizeof(wasm_component_value_t) * num_args);
@@ -309,11 +317,14 @@ wasm_component_async_poll_task(
 
     task = &engine->tasks[task_idx];
     task->state = WASM_COMP_ASYNC_TASK_RUNNING;
+    engine->current_task_id = task_id;
 
     call_ok = wasm_runtime_call_component_values(
         (wasm_module_inst_t)inst, (wasm_component_func_t)task->function,
         task->num_results, task->results,
         task->num_args, task->args);
+
+    engine->current_task_id = UINT32_MAX;
 
     task->state = call_ok ? WASM_COMP_ASYNC_TASK_COMPLETED
                           : WASM_COMP_ASYNC_TASK_FAILED;
@@ -375,8 +386,15 @@ wasm_component_async_cancel_task(
     if (task_idx < 0)
         return false;
 
-    if (engine->tasks[task_idx].state != WASM_COMP_ASYNC_TASK_PENDING)
+    if (engine->tasks[task_idx].state == WASM_COMP_ASYNC_TASK_COMPLETED
+        || engine->tasks[task_idx].state == WASM_COMP_ASYNC_TASK_CANCELLED
+        || engine->tasks[task_idx].state == WASM_COMP_ASYNC_TASK_FAILED)
         return false;
+
+    if (engine->tasks[task_idx].state == WASM_COMP_ASYNC_TASK_RUNNING) {
+        engine->tasks[task_idx].cancellation_requested = true;
+        return true;
+    }
 
     engine->tasks[task_idx].state = WASM_COMP_ASYNC_TASK_CANCELLED;
     return true;
@@ -987,4 +1005,56 @@ wasm_component_async_dispatch_callback(
     }
 
     return ok;
+}
+
+uint32
+wasm_component_async_get_context_value(
+    WASMComponentAsyncEngine *engine,
+    uint32 ctx_idx)
+{
+    if (!engine || engine->current_task_id == 0)
+        return 0;
+    int32 idx = find_task_index(engine, engine->current_task_id);
+    if (idx < 0) return 0;
+    WASMComponentAsyncTask *task = &engine->tasks[idx];
+    if (ctx_idx < task->context_count)
+        return task->context_values[ctx_idx];
+    return 0;
+}
+
+void
+wasm_component_async_set_context_value(
+    WASMComponentAsyncEngine *engine,
+    uint32 ctx_idx,
+    uint32 value)
+{
+    if (!engine || engine->current_task_id == 0)
+        return;
+    int32 idx = find_task_index(engine, engine->current_task_id);
+    if (idx < 0) return;
+    WASMComponentAsyncTask *task = &engine->tasks[idx];
+    if (ctx_idx >= task->context_count) {
+        uint32 new_count = task->context_count;
+        while (new_count <= ctx_idx)
+            new_count = new_count ? new_count * 2 : 4;
+        uint32 *new_vals = wasm_runtime_realloc(
+            task->context_values, sizeof(uint32) * new_count);
+        if (!new_vals) return;
+        memset(new_vals + task->context_count, 0,
+               sizeof(uint32) * (new_count - task->context_count));
+        task->context_values = new_vals;
+        task->context_count = new_count;
+    }
+    task->context_values[ctx_idx] = value;
+}
+
+bool
+wasm_component_async_is_task_cancelled(
+    WASMComponentAsyncEngine *engine)
+{
+    if (!engine || engine->current_task_id == 0)
+        return false;
+    int32 idx = find_task_index(engine, engine->current_task_id);
+    if (idx < 0) return false;
+    return engine->tasks[idx].cancellation_requested;
 }

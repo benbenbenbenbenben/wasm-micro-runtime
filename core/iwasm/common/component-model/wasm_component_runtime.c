@@ -4043,7 +4043,11 @@ component_async_builtin_trampoline(WASMModuleInstanceCommon *caller_module_inst,
         }
         case WASM_COMP_CANON_BACKPRESSURE_SET:
         {
-            /* Stub: backpressure tracking is a no-op in sync execution */
+            uint32 new_val = (uint32)raw_args[0];
+            uint32 old_val = engine->backpressure_enabled ? 1 : 0;
+            engine->backpressure_enabled = (new_val != 0);
+            if (func_type->result_count > 0)
+                raw_args[0] = old_val;
             break;
         }
         case WASM_COMP_CANON_TASK_RETURN:
@@ -4055,19 +4059,28 @@ component_async_builtin_trampoline(WASMModuleInstanceCommon *caller_module_inst,
         }
         case WASM_COMP_CANON_CONTEXT_GET:
         {
-            /* Stub: context is not yet implemented — return 0 */
+            uint32 ctx_idx = (uint32)raw_args[0];
+            uint32 value = wasm_component_async_get_context_value(
+                engine, ctx_idx);
             if (func_type->result_count > 0)
-                raw_args[0] = 0;
+                raw_args[0] = value;
             break;
         }
         case WASM_COMP_CANON_CONTEXT_SET:
         {
-            /* Stub: context storage not yet implemented */
+            uint32 ctx_idx = (uint32)raw_args[0];
+            uint32 value = (uint32)raw_args[1];
+            wasm_component_async_set_context_value(engine, ctx_idx, value);
             break;
         }
         case WASM_COMP_CANON_YIELD:
         {
-            /* Stub: in synchronous execution, yield is a no-op */
+            if (wasm_component_async_is_task_cancelled(engine)) {
+                wasm_runtime_set_exception(
+                    caller_module_inst,
+                    "task cancelled at yield point");
+                return;
+            }
             break;
         }
         case WASM_COMP_CANON_SUBTASK_DROP:
@@ -4292,24 +4305,53 @@ component_async_builtin_trampoline(WASMModuleInstanceCommon *caller_module_inst,
         case WASM_COMP_CANON_THREAD_SPAWN_REF:
         {
             /* thread.spawn-ref(func_idx) -> thread_handle */
-            /* Stub: returns 0 (threading not yet supported) */
+            uint32 func_idx = (uint32)raw_args[0];
+            uint32 task_id = WASM_COMPONENT_ASYNC_INVALID_TASK_ID;
+            if (func_idx < component_inst->core_func_count) {
+                WASMComponentCoreRuntimeRef *ref =
+                    &component_inst->core_funcs[func_idx];
+                if (ref->type == WASM_COMP_CORE_RUNTIME_REF_LOWERED_FUNC
+                    && ref->of.lowered_function) {
+                    task_id = wasm_component_async_create_task(
+                        engine, ref->of.lowered_function, NULL, 0, 0);
+                }
+            }
             if (func_type->result_count > 0)
-                raw_args[0] = 0;
+                raw_args[0] = task_id;
             break;
         }
         case WASM_COMP_CANON_THREAD_SPAWN_INDIRECT:
         {
             /* thread.spawn-indirect(func_table_idx) -> thread_handle */
-            /* Stub: returns 0 */
+            uint32 table_idx = (uint32)raw_args[0];
+            uint32 task_id = WASM_COMPONENT_ASYNC_INVALID_TASK_ID;
+            if (table_idx < component_inst->core_func_count) {
+                WASMComponentCoreRuntimeRef *ref =
+                    &component_inst->core_funcs[table_idx];
+                if (ref->type == WASM_COMP_CORE_RUNTIME_REF_LOWERED_FUNC
+                    && ref->of.lowered_function) {
+                    task_id = wasm_component_async_create_task(
+                        engine, ref->of.lowered_function, NULL, 0, 0);
+                }
+            }
             if (func_type->result_count > 0)
-                raw_args[0] = 0;
+                raw_args[0] = task_id;
             break;
         }
         case WASM_COMP_CANON_THREAD_AVAILABLE_PAR:
         {
-            /* thread.available-par() -> count */
+            uint32 count = 1;
+#if defined(_WIN32)
+            SYSTEM_INFO sysinfo;
+            GetSystemInfo(&sysinfo);
+            count = sysinfo.dwNumberOfProcessors;
+#elif defined(_SC_NPROCESSORS_ONLN)
+            long n = sysconf(_SC_NPROCESSORS_ONLN);
+            if (n > 0)
+                count = (uint32)n;
+#endif
             if (func_type->result_count > 0)
-                raw_args[0] = 1;
+                raw_args[0] = count > 0 ? count : 1;
             break;
         }
         fail:

@@ -113,6 +113,7 @@ typedef struct WASMComponentRuntimeFunc {
     bool is_top_level_export;
     bool is_async;
     uint32 callback_func_idx;
+    bool yield_cancellable;
     wasm_component_host_func_callback_t host_callback;
     void *host_user_data;
 } WASMComponentRuntimeFunc;
