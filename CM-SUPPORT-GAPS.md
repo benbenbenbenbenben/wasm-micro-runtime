@@ -483,7 +483,11 @@ Major Canonical ABI gaps remain:
   - Core arg type checks accept `VALUE_TYPE_I64` for string/list params when memory64
   - Signature validation accepts both `VALUE_TYPE_I32` and `VALUE_TYPE_I64`
   - Acceptance test verifies the full path with memory64 canon opt
-- no `error-context` value support
+- `error-context` value support is now implemented: error-context (`0x64`)
+  is accepted as a valid primitive type in canon lift and host import paths,
+  using the same memory-backed (i32,i32) ABI as string; the size/align
+  lookup now returns 8 bytes / 4 align; a test verifies that a canon lift
+  function with `(error-context) -> s32` instantiates successfully
 - no async/callback canon options
 
 So "Canonical ABI execution" is now **partially true**, but only for a small supported subset.
