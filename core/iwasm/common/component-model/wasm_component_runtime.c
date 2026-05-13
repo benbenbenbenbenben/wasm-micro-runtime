@@ -20998,6 +20998,12 @@ validate_component_import_binding_type(const WASMComponent *component,
                     error_buf, error_buf_size,
                     "component import \"%s\" bound to the wrong runtime sort",
                     import_name);
+            if (!ref.of.resource_type)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "component import \"%s\" resource type is null",
+                    import_name);
+            (void)import_name;
             return true;
         default:
             return set_component_runtime_error_fmt(
