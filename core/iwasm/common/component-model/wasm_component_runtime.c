@@ -467,6 +467,11 @@ append_component_result_list_string_leaf(
     const uint8 *payload, uint32 payload_len);
 
 static bool
+convert_utf16_bytes_to_utf8(const uint8 *utf16_bytes, uint32 utf16_byte_len,
+                            uint8 **out_utf8, uint32 *out_utf8_len,
+                            WASMComponentInstance *inst);
+
+static bool
 append_component_result_owned_resource_leaf(
     WASMComponentInstance *inst, WASMComponentResultPayloadBuilder *builder,
     const WASMComponentRuntimeResourceState *resource_state, uint32 resource_type_idx,
@@ -4945,6 +4950,27 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
 
                     caller_bytes = wasm_runtime_addr_app_to_native(
                         caller_module_inst, arg_ptr);
+                    if (lower_string_encoding
+                            == WASM_COMP_RUNTIME_STRING_ENCODING_UTF16
+                        && byte_count > 0) {
+                        uint8 *utf8_bytes = NULL;
+                        uint32 utf8_len = 0;
+                        if (!convert_utf16_bytes_to_utf8(
+                                caller_bytes, byte_count, &utf8_bytes,
+                                &utf8_len,
+                                (WASMComponentInstance *)caller_module_inst)) {
+                            wasm_runtime_free(storage);
+                            if (call_args != stack_args)
+                                wasm_runtime_free(call_args);
+                            wasm_runtime_set_exception(
+                                caller_module_inst,
+                                "component lowered core-call trampoline could "
+                                "not convert UTF-16 string parameter to UTF-8");
+                            return;
+                        }
+                        caller_bytes = utf8_bytes;
+                        byte_count = utf8_len;
+                    }
                     if (!wasm_component_validate_utf8(caller_bytes, byte_count)) {
                         wasm_runtime_free(storage);
                         if (call_args != stack_args)
@@ -5079,6 +5105,26 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
                                    ? wasm_runtime_addr_app_to_native(
                                          caller_module_inst, string_ptr)
                                    : NULL;
+                if (lower_string_encoding
+                        == WASM_COMP_RUNTIME_STRING_ENCODING_UTF16
+                    && string_len > 0) {
+                    uint8 *utf8_bytes = NULL;
+                    uint32 utf8_len = 0;
+                    if (!convert_utf16_bytes_to_utf8(
+                            string_bytes, string_len, &utf8_bytes, &utf8_len,
+                            (WASMComponentInstance *)caller_module_inst)) {
+                        destroy_component_result_payload_builder(&builder);
+                        if (call_args != stack_args)
+                            wasm_runtime_free(call_args);
+                        wasm_runtime_set_exception(
+                            caller_module_inst,
+                            "component lowered core-call trampoline could not "
+                            "convert UTF-16 list<string> parameter to UTF-8");
+                        return;
+                    }
+                    string_bytes = utf8_bytes;
+                    string_len = utf8_len;
+                }
                 if (string_len > 0
                     && !wasm_component_validate_utf8(string_bytes, string_len)) {
                     destroy_component_result_payload_builder(&builder);
@@ -11736,6 +11782,22 @@ build_lowered_import_composite_param_payload(
                 }
                 payload =
                     wasm_runtime_addr_app_to_native(caller_module_inst, payload_ptr);
+                if (string_encoding == WASM_COMP_RUNTIME_STRING_ENCODING_UTF16
+                    && payload_len > 0) {
+                    uint8 *utf8_bytes = NULL;
+                    uint32 utf8_len = 0;
+                    if (!convert_utf16_bytes_to_utf8(
+                            payload, payload_len, &utf8_bytes, &utf8_len,
+                            (WASMComponentInstance *)caller_module_inst)) {
+                        wasm_runtime_set_exception(
+                            caller_module_inst,
+                            "component lowered core-call trampoline could not "
+                            "convert UTF-16 string parameter to UTF-8");
+                        return false;
+                    }
+                    payload = utf8_bytes;
+                    payload_len = utf8_len;
+                }
                 if (!wasm_component_validate_utf8(payload, payload_len)) {
                     wasm_runtime_set_exception(
                         caller_module_inst,
@@ -11989,6 +12051,25 @@ build_lowered_import_composite_param_payload(
                             ? wasm_runtime_addr_app_to_native(caller_module_inst,
                                                               string_ptr)
                             : NULL;
+                    if (string_encoding
+                            == WASM_COMP_RUNTIME_STRING_ENCODING_UTF16
+                        && string_len > 0) {
+                        uint8 *utf8_bytes = NULL;
+                        uint32 utf8_len = 0;
+                        if (!convert_utf16_bytes_to_utf8(
+                                string_bytes, string_len, &utf8_bytes,
+                                &utf8_len,
+                                (WASMComponentInstance *)caller_module_inst)) {
+                            wasm_runtime_set_exception(
+                                caller_module_inst,
+                                "component lowered core-call trampoline could "
+                                "not convert UTF-16 list<string> parameter "
+                                "to UTF-8");
+                            return false;
+                        }
+                        string_bytes = utf8_bytes;
+                        string_len = utf8_len;
+                    }
                     if (string_len > 0
                         && !wasm_component_validate_utf8(string_bytes,
                                                          string_len)) {
@@ -12581,6 +12662,23 @@ decode_component_canon_composite_result_value(
                             "composite list<string> result payload",
                             &payload_bytes))
                         return false;
+                    if (function->string_encoding
+                            == WASM_COMP_RUNTIME_STRING_ENCODING_UTF16
+                        && string_len > 0) {
+                        uint8 *utf8_bytes = NULL;
+                        uint32 utf8_len = 0;
+                        if (!convert_utf16_bytes_to_utf8(
+                                payload_bytes, string_len, &utf8_bytes,
+                                &utf8_len, inst)) {
+                            return set_component_call_error_fmt(
+                                inst,
+                                "component canon lift function result %u could "
+                                "not convert UTF-16 to UTF-8",
+                                result_index);
+                        }
+                        payload_bytes = utf8_bytes;
+                        string_len = utf8_len;
+                    }
                     if (string_len > 0
                         && !wasm_component_validate_utf8(payload_bytes,
                                                          string_len))
@@ -13082,6 +13180,25 @@ init_component_public_memory_list_string_result(
                 destroy_component_result_payload_builder(&builder);
                 ok = false;
                 goto cleanup;
+            }
+            if (function->string_encoding
+                    == WASM_COMP_RUNTIME_STRING_ENCODING_UTF16
+                && payload_len > 0) {
+                uint8 *utf8_bytes = NULL;
+                uint32 utf8_len = 0;
+                if (!convert_utf16_bytes_to_utf8(
+                        payload_bytes, payload_len, &utf8_bytes, &utf8_len,
+                        inst)) {
+                    set_component_call_error(
+                        inst,
+                        "component canon lift function result could not "
+                        "convert UTF-16 to UTF-8");
+                    destroy_component_result_payload_builder(&builder);
+                    ok = false;
+                    goto cleanup;
+                }
+                payload_bytes = utf8_bytes;
+                payload_len = utf8_len;
             }
             if (!wasm_component_validate_utf8(payload_bytes, payload_len)) {
                 set_component_call_error(
