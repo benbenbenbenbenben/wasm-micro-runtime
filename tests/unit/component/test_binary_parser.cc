@@ -65748,6 +65748,64 @@ TEST_F(BinaryParserTest,
 }
 
 TEST_F(BinaryParserTest,
+       TestRuntimeSupportsAsyncCanonOpt)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "component-async-canon-opt";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    /* Set up a canon lift with async opt */
+    ASSERT_TRUE(
+        append_component_export_alias_sections((WASMComponentModule *)module));
+    const int32_t list_u8_type_idx = append_component_list_type(
+        (WASMComponentModule *)module, WASM_COMP_PRIMVAL_U8, false, 0);
+    ASSERT_GE(list_u8_type_idx, 0);
+    ASSERT_TRUE(configure_first_canon_lift_for_list_u8_param(
+        (WASMComponentModule *)module, (uint32_t)list_u8_type_idx));
+
+    /* Add async canon opt to the lift */
+    {
+        WASMComponentCanon *canon = find_first_canon_lift(
+            (WASMComponentModule *)module);
+        ASSERT_NE(canon, nullptr);
+        ASSERT_NE(canon->canon_data.lift.canon_opts, nullptr);
+        uint32_t old_count =
+            canon->canon_data.lift.canon_opts->canon_opts_count;
+        auto *new_opts = (WASMComponentCanonOpt *)wasm_runtime_malloc(
+            sizeof(WASMComponentCanonOpt) * (old_count + 1));
+        ASSERT_NE(new_opts, nullptr);
+        memcpy(new_opts, canon->canon_data.lift.canon_opts->canon_opts,
+               sizeof(WASMComponentCanonOpt) * old_count);
+        wasm_runtime_free(canon->canon_data.lift.canon_opts->canon_opts);
+        new_opts[old_count].tag = WASM_COMP_CANON_OPT_ASYNC;
+        canon->canon_data.lift.canon_opts->canon_opts = new_opts;
+        canon->canon_data.lift.canon_opts->canon_opts_count = old_count + 1;
+    }
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func =
+        wasm_runtime_lookup_component_function(module_inst, "aliased-add");
+    ASSERT_NE(func, nullptr);
+    ASSERT_TRUE(func->is_async);
+
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
        TestRuntimeSupportsErrorContextParam)
 {
     bool ret = helper->read_wasm_file("add.wasm");
