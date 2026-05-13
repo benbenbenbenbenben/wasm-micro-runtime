@@ -3835,6 +3835,248 @@ component_async_builtin_trampoline(WASMModuleInstanceCommon *caller_module_inst,
             /* Stub: subtask references not yet tracked */
             break;
         }
+        case WASM_COMP_CANON_STREAM_NEW:
+        {
+            /* stream.new(element_size) -> stream_id */
+            uint32 sid = wasm_component_async_stream_create(engine);
+            if (func_type->result_count > 0)
+                raw_args[0] = sid;
+            break;
+        }
+        case WASM_COMP_CANON_STREAM_READ:
+        {
+            /* stream.read(stream_id, dest_ptr, dest_len) -> bytes_read */
+            uint32 sid = (uint32)raw_args[0];
+            uint32 dest_ptr = (uint32)raw_args[1];
+            uint32 dest_len = (uint32)raw_args[2];
+            uint8 *dest;
+            if (!wasm_runtime_validate_app_addr((WASMModuleInstanceCommon *)component_inst,
+                                                dest_ptr, dest_len))
+                goto fail;
+            dest = wasm_runtime_addr_app_to_native((WASMModuleInstanceCommon *)component_inst,
+                                                   dest_ptr);
+            uint32 nread = wasm_component_async_stream_read(engine, sid, dest, dest_len);
+            if (func_type->result_count > 0)
+                raw_args[0] = nread;
+            break;
+        }
+        case WASM_COMP_CANON_STREAM_WRITE:
+        {
+            /* stream.write(stream_id, src_ptr, src_len) */
+            uint32 sid = (uint32)raw_args[0];
+            uint32 src_ptr = (uint32)raw_args[1];
+            uint32 src_len = (uint32)raw_args[2];
+            uint8 *src;
+            if (!wasm_runtime_validate_app_addr((WASMModuleInstanceCommon *)component_inst,
+                                                src_ptr, src_len))
+                goto fail;
+            src = wasm_runtime_addr_app_to_native((WASMModuleInstanceCommon *)component_inst,
+                                                  src_ptr);
+            wasm_component_async_stream_write(engine, sid, src, src_len);
+            break;
+        }
+        case WASM_COMP_CANON_STREAM_CANCEL_READ:
+        {
+            uint32 sid = (uint32)raw_args[0];
+            wasm_component_async_stream_cancel_read(engine, sid);
+            break;
+        }
+        case WASM_COMP_CANON_STREAM_CANCEL_WRITE:
+        {
+            uint32 sid = (uint32)raw_args[0];
+            wasm_component_async_stream_cancel_write(engine, sid);
+            break;
+        }
+        case WASM_COMP_CANON_STREAM_DROP_READABLE:
+        {
+            uint32 sid = (uint32)raw_args[0];
+            wasm_component_async_stream_drop_readable(engine, sid);
+            break;
+        }
+        case WASM_COMP_CANON_STREAM_DROP_WRITABLE:
+        {
+            uint32 sid = (uint32)raw_args[0];
+            wasm_component_async_stream_drop_writable(engine, sid);
+            break;
+        }
+        case WASM_COMP_CANON_FUTURE_NEW:
+        {
+            /* future.new(element_size) -> future_id */
+            uint32 fid = wasm_component_async_future_create(engine);
+            if (func_type->result_count > 0)
+                raw_args[0] = fid;
+            break;
+        }
+        case WASM_COMP_CANON_FUTURE_READ:
+        {
+            /* future.read(future_id, dest_ptr, dest_len) -> bytes_read */
+            uint32 fid = (uint32)raw_args[0];
+            uint32 dest_ptr = (uint32)raw_args[1];
+            uint32 dest_len = (uint32)raw_args[2];
+            uint8 *dest;
+            if (!wasm_runtime_validate_app_addr((WASMModuleInstanceCommon *)component_inst,
+                                                dest_ptr, dest_len))
+                goto fail;
+            dest = wasm_runtime_addr_app_to_native((WASMModuleInstanceCommon *)component_inst,
+                                                   dest_ptr);
+            uint32 nread = wasm_component_async_future_read(engine, fid, dest, dest_len);
+            if (func_type->result_count > 0)
+                raw_args[0] = nread;
+            break;
+        }
+        case WASM_COMP_CANON_FUTURE_WRITE:
+        {
+            /* future.write(future_id, src_ptr, src_len) */
+            uint32 fid = (uint32)raw_args[0];
+            uint32 src_ptr = (uint32)raw_args[1];
+            uint32 src_len = (uint32)raw_args[2];
+            uint8 *src;
+            if (!wasm_runtime_validate_app_addr((WASMModuleInstanceCommon *)component_inst,
+                                                src_ptr, src_len))
+                goto fail;
+            src = wasm_runtime_addr_app_to_native((WASMModuleInstanceCommon *)component_inst,
+                                                  src_ptr);
+            wasm_component_async_future_write(engine, fid, src, src_len);
+            break;
+        }
+        case WASM_COMP_CANON_FUTURE_CANCEL_READ:
+        {
+            uint32 fid = (uint32)raw_args[0];
+            wasm_component_async_future_cancel_read(engine, fid);
+            break;
+        }
+        case WASM_COMP_CANON_FUTURE_CANCEL_WRITE:
+        {
+            uint32 fid = (uint32)raw_args[0];
+            wasm_component_async_future_cancel_write(engine, fid);
+            break;
+        }
+        case WASM_COMP_CANON_FUTURE_DROP_READABLE:
+        {
+            uint32 fid = (uint32)raw_args[0];
+            wasm_component_async_future_drop_readable(engine, fid);
+            break;
+        }
+        case WASM_COMP_CANON_FUTURE_DROP_WRITABLE:
+        {
+            uint32 fid = (uint32)raw_args[0];
+            wasm_component_async_future_drop_writable(engine, fid);
+            break;
+        }
+        case WASM_COMP_CANON_ERROR_CONTEXT_NEW:
+        {
+            /* error-context.new(ptr, len) - memory-backed string copy */
+            uint32 ptr = (uint32)raw_args[0];
+            uint32 len = (uint32)raw_args[1];
+            uint32 handle;
+            uint8 *src;
+            if (len > 0 && !wasm_runtime_validate_app_addr(
+                               (WASMModuleInstanceCommon *)component_inst,
+                               ptr, len))
+                goto fail;
+            /* Store as an owned string in a new resource handle */
+            src = len > 0 ? wasm_runtime_addr_app_to_native(
+                                (WASMModuleInstanceCommon *)component_inst, ptr)
+                          : NULL;
+            handle = wasm_component_resource_create_error_context_handle(
+                engine, src, len);
+            if (func_type->result_count > 0)
+                raw_args[0] = handle;
+            break;
+        }
+        case WASM_COMP_CANON_ERROR_CONTEXT_DEBUG:
+        {
+            /* error-context.debug(handle, dest_ptr, dest_len) ->(ok, written) */
+            uint32 handle = (uint32)raw_args[0];
+            uint32 dest_ptr = (uint32)raw_args[1];
+            uint32 dest_len = (uint32)raw_args[2];
+            uint32 written = wasm_component_resource_read_error_context(
+                engine, handle, NULL, 0);
+            if (func_type->result_count > 0)
+                raw_args[0] = written;
+            break;
+        }
+        case WASM_COMP_CANON_ERROR_CONTEXT_DROP:
+        {
+            uint32 handle = (uint32)raw_args[0];
+            wasm_component_resource_drop_error_context(engine, handle);
+            break;
+        }
+        case WASM_COMP_CANON_WAITABLE_SET_NEW:
+        {
+            /* waitable-set.new() -> set_id */
+            uint32 ws_id = wasm_component_async_waitable_set_create(engine);
+            if (func_type->result_count > 0)
+                raw_args[0] = ws_id;
+            break;
+        }
+        case WASM_COMP_CANON_WAITABLE_SET_WAIT:
+        {
+            /* waitable-set.wait(set_id, timeout_ms) */
+            uint32 ws_id = (uint32)raw_args[0];
+            uint32 timeout_ms = (uint32)raw_args[1];
+            uint32 ready = wasm_component_async_waitable_set_wait(
+                engine, ws_id, timeout_ms);
+            if (func_type->result_count > 0)
+                raw_args[0] = ready;
+            break;
+        }
+        case WASM_COMP_CANON_WAITABLE_SET_POLL:
+        {
+            /* waitable-set.poll(set_id) -> first_ready_index */
+            uint32 ws_id = (uint32)raw_args[0];
+            uint32 ready = wasm_component_async_waitable_set_poll(engine, ws_id);
+            if (func_type->result_count > 0)
+                raw_args[0] = ready;
+            break;
+        }
+        case WASM_COMP_CANON_WAITABLE_SET_DROP:
+        {
+            uint32 ws_id = (uint32)raw_args[0];
+            wasm_component_async_waitable_set_drop(engine, ws_id);
+            break;
+        }
+        case WASM_COMP_CANON_WAITABLE_JOIN:
+        {
+            /* waitable.join(set_id, waitable_idx, task_id)
+               Attaches the task to the waitable set */
+            uint32 ws_id = (uint32)raw_args[0];
+            uint32 waitable_idx = (uint32)raw_args[1];
+            uint32 task_id = (uint32)raw_args[2];
+            bool ok = wasm_component_async_waitable_join(
+                engine, ws_id, waitable_idx, task_id);
+            if (func_type->result_count > 0)
+                raw_args[0] = ok ? 1 : 0;
+            break;
+        }
+        case WASM_COMP_CANON_THREAD_SPAWN_REF:
+        {
+            /* thread.spawn-ref(func_idx) -> thread_handle */
+            /* Stub: returns 0 (threading not yet supported) */
+            if (func_type->result_count > 0)
+                raw_args[0] = 0;
+            break;
+        }
+        case WASM_COMP_CANON_THREAD_SPAWN_INDIRECT:
+        {
+            /* thread.spawn-indirect(func_table_idx) -> thread_handle */
+            /* Stub: returns 0 */
+            if (func_type->result_count > 0)
+                raw_args[0] = 0;
+            break;
+        }
+        case WASM_COMP_CANON_THREAD_AVAILABLE_PAR:
+        {
+            /* thread.available-par() -> count */
+            if (func_type->result_count > 0)
+                raw_args[0] = 1;
+            break;
+        }
+        fail:
+            wasm_runtime_set_exception(
+                caller_module_inst,
+                "component async builtin: invalid memory access");
+            break;
         default:
             wasm_runtime_set_exception(
                 caller_module_inst,
@@ -4717,7 +4959,20 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
         || lowered_function->canon_tag == WASM_COMP_CANON_CONTEXT_GET
         || lowered_function->canon_tag == WASM_COMP_CANON_CONTEXT_SET
         || lowered_function->canon_tag == WASM_COMP_CANON_YIELD
-        || lowered_function->canon_tag == WASM_COMP_CANON_SUBTASK_DROP) {
+        || lowered_function->canon_tag == WASM_COMP_CANON_SUBTASK_DROP
+        || lowered_function->canon_tag == WASM_COMP_CANON_ERROR_CONTEXT_NEW
+        || lowered_function->canon_tag == WASM_COMP_CANON_ERROR_CONTEXT_DEBUG
+        || lowered_function->canon_tag == WASM_COMP_CANON_ERROR_CONTEXT_DROP
+        || (lowered_function->canon_tag >= WASM_COMP_CANON_STREAM_NEW
+            && lowered_function->canon_tag <= WASM_COMP_CANON_STREAM_DROP_WRITABLE)
+        || (lowered_function->canon_tag >= WASM_COMP_CANON_FUTURE_NEW
+            && lowered_function->canon_tag <= WASM_COMP_CANON_FUTURE_DROP_WRITABLE)
+        || (lowered_function->canon_tag >= WASM_COMP_CANON_WAITABLE_SET_NEW
+            && lowered_function->canon_tag <= WASM_COMP_CANON_WAITABLE_SET_DROP)
+        || lowered_function->canon_tag == WASM_COMP_CANON_WAITABLE_JOIN
+        || lowered_function->canon_tag == WASM_COMP_CANON_THREAD_SPAWN_REF
+        || lowered_function->canon_tag == WASM_COMP_CANON_THREAD_SPAWN_INDIRECT
+        || lowered_function->canon_tag == WASM_COMP_CANON_THREAD_AVAILABLE_PAR) {
         component_async_builtin_trampoline(caller_module_inst, lowered_function,
                                            func_type, raw_args);
         return;

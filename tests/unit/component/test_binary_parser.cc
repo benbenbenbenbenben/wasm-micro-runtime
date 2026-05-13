@@ -13,6 +13,7 @@
 #include <string>
 #include "bh_read_file.h"
 #include "wasm_component_runtime.h"
+#include "wasm_component_async.h"
 
 static std::vector<std::string> component_files = {
      "add.wasm",
@@ -65984,4 +65985,255 @@ TEST_F(BinaryParserTest,
 
     wasm_runtime_deinstantiate(module_inst);
     wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest, TestAsyncEngineStreamReadWrite)
+{
+    WASMComponentAsyncEngine *engine = nullptr;
+    ASSERT_TRUE(wasm_component_async_engine_create(&engine, 4));
+    ASSERT_NE(engine, nullptr);
+
+    uint32 sid = wasm_component_async_stream_create(engine);
+    ASSERT_NE(sid, WASM_COMPONENT_ASYNC_INVALID_STREAM_ID);
+
+    const uint8 write_data[] = { 0x01, 0x02, 0x03, 0x04, 0x05 };
+    ASSERT_TRUE(wasm_component_async_stream_write(engine, sid, write_data, 5));
+
+    uint8 read_buf[10];
+    uint32 nread = wasm_component_async_stream_read(engine, sid, read_buf, 10);
+    ASSERT_EQ(nread, 5);
+    ASSERT_EQ(memcmp(read_buf, write_data, 5), 0);
+
+    wasm_component_async_engine_destroy(engine);
+}
+
+TEST_F(BinaryParserTest, TestAsyncEngineStreamMultiReadWrites)
+{
+    WASMComponentAsyncEngine *engine = nullptr;
+    ASSERT_TRUE(wasm_component_async_engine_create(&engine, 4));
+    ASSERT_NE(engine, nullptr);
+
+    uint32 sid = wasm_component_async_stream_create(engine);
+    ASSERT_NE(sid, WASM_COMPONENT_ASYNC_INVALID_STREAM_ID);
+
+    const uint8 data1[] = { 0x0a, 0x0b };
+    const uint8 data2[] = { 0x0c, 0x0d, 0x0e };
+    ASSERT_TRUE(wasm_component_async_stream_write(engine, sid, data1, 2));
+    ASSERT_TRUE(wasm_component_async_stream_write(engine, sid, data2, 3));
+
+    uint8 buf[10];
+    ASSERT_EQ(wasm_component_async_stream_read(engine, sid, buf, 10), 5);
+    ASSERT_EQ(buf[0], 0x0a);
+    ASSERT_EQ(buf[4], 0x0e);
+
+    wasm_component_async_engine_destroy(engine);
+}
+
+TEST_F(BinaryParserTest, TestAsyncEngineStreamDropReadableWritable)
+{
+    WASMComponentAsyncEngine *engine = nullptr;
+    ASSERT_TRUE(wasm_component_async_engine_create(&engine, 4));
+    ASSERT_NE(engine, nullptr);
+
+    uint32 sid = wasm_component_async_stream_create(engine);
+    ASSERT_NE(sid, WASM_COMPONENT_ASYNC_INVALID_STREAM_ID);
+
+    ASSERT_TRUE(wasm_component_async_stream_drop_readable(engine, sid));
+    ASSERT_TRUE(wasm_component_async_stream_drop_writable(engine, sid));
+
+    uint8 buf[4];
+    ASSERT_FALSE(wasm_component_async_stream_write(engine, sid, buf, 4));
+    ASSERT_EQ(wasm_component_async_stream_read(engine, sid, buf, 4), 0);
+
+    wasm_component_async_engine_destroy(engine);
+}
+
+TEST_F(BinaryParserTest, TestAsyncEngineFutureReadWrite)
+{
+    WASMComponentAsyncEngine *engine = nullptr;
+    ASSERT_TRUE(wasm_component_async_engine_create(&engine, 4));
+    ASSERT_NE(engine, nullptr);
+
+    uint32 fid = wasm_component_async_future_create(engine);
+    ASSERT_NE(fid, WASM_COMPONENT_ASYNC_INVALID_FUTURE_ID);
+
+    const uint8 write_data[] = { 0x11, 0x22, 0x33 };
+    ASSERT_TRUE(wasm_component_async_future_write(engine, fid, write_data, 3));
+
+    uint8 read_buf[10];
+    uint32 nread = wasm_component_async_future_read(engine, fid, read_buf, 10);
+    ASSERT_EQ(nread, 3);
+    ASSERT_EQ(memcmp(read_buf, write_data, 3), 0);
+
+    wasm_component_async_engine_destroy(engine);
+}
+
+TEST_F(BinaryParserTest, TestAsyncEngineFutureDropReadableWritable)
+{
+    WASMComponentAsyncEngine *engine = nullptr;
+    ASSERT_TRUE(wasm_component_async_engine_create(&engine, 4));
+    ASSERT_NE(engine, nullptr);
+
+    uint32 fid = wasm_component_async_future_create(engine);
+    ASSERT_NE(fid, WASM_COMPONENT_ASYNC_INVALID_FUTURE_ID);
+
+    ASSERT_TRUE(wasm_component_async_future_drop_readable(engine, fid));
+    ASSERT_TRUE(wasm_component_async_future_drop_writable(engine, fid));
+
+    uint8 buf[4];
+    ASSERT_FALSE(wasm_component_async_future_write(engine, fid, buf, 4));
+    ASSERT_EQ(wasm_component_async_future_read(engine, fid, buf, 4), 0);
+
+    wasm_component_async_engine_destroy(engine);
+}
+
+TEST_F(BinaryParserTest, TestAsyncEngineErrorContext)
+{
+    WASMComponentAsyncEngine *engine = nullptr;
+    ASSERT_TRUE(wasm_component_async_engine_create(&engine, 4));
+    ASSERT_NE(engine, nullptr);
+
+    const uint8 msg[] = "test error message";
+    uint32 handle = wasm_component_resource_create_error_context_handle(
+        engine, msg, (uint32)sizeof(msg) - 1);
+    ASSERT_NE(handle, WASM_COMPONENT_ASYNC_INVALID_ERROR_CONTEXT_HANDLE);
+
+    uint32 msg_len = wasm_component_resource_read_error_context(
+        engine, handle, nullptr, 0);
+    ASSERT_EQ(msg_len, sizeof(msg) - 1);
+
+    uint8 buf[64];
+    msg_len = wasm_component_resource_read_error_context(
+        engine, handle, buf, (uint32)sizeof(buf));
+    ASSERT_EQ(msg_len, sizeof(msg) - 1);
+    ASSERT_EQ(memcmp(buf, msg, sizeof(msg) - 1), 0);
+
+    wasm_component_resource_drop_error_context(engine, handle);
+
+    uint32 after_drop = wasm_component_resource_read_error_context(
+        engine, handle, buf, (uint32)sizeof(buf));
+    ASSERT_EQ(after_drop, 0);
+
+    wasm_component_async_engine_destroy(engine);
+}
+
+TEST_F(BinaryParserTest, TestAsyncEngineWaitableSet)
+{
+    WASMComponentAsyncEngine *engine = nullptr;
+    ASSERT_TRUE(wasm_component_async_engine_create(&engine, 8));
+    ASSERT_NE(engine, nullptr);
+
+    uint32 ws_id = wasm_component_async_waitable_set_create(engine);
+    ASSERT_NE(ws_id, WASM_COMPONENT_ASYNC_INVALID_WAITABLE_SET_ID);
+
+    uint32 sid = wasm_component_async_stream_create(engine);
+    ASSERT_NE(sid, WASM_COMPONENT_ASYNC_INVALID_STREAM_ID);
+
+    ASSERT_TRUE(wasm_component_async_waitable_join(engine, ws_id, 0, sid));
+
+    uint8 data[] = { 0x41 };
+    ASSERT_TRUE(wasm_component_async_stream_write(engine, sid, data, 1));
+
+    uint32 ready = wasm_component_async_waitable_set_poll(engine, ws_id);
+    ASSERT_NE(ready, 0);
+
+    wasm_component_async_waitable_set_drop(engine, ws_id);
+
+    wasm_component_async_engine_destroy(engine);
+}
+
+TEST_F(BinaryParserTest, TestAsyncEngineMultiStreamsAndFutures)
+{
+    WASMComponentAsyncEngine *engine = nullptr;
+    ASSERT_TRUE(wasm_component_async_engine_create(&engine, 8));
+    ASSERT_NE(engine, nullptr);
+
+    uint32 s1 = wasm_component_async_stream_create(engine);
+    uint32 s2 = wasm_component_async_stream_create(engine);
+    uint32 f1 = wasm_component_async_future_create(engine);
+
+    ASSERT_NE(s1, WASM_COMPONENT_ASYNC_INVALID_STREAM_ID);
+    ASSERT_NE(s2, WASM_COMPONENT_ASYNC_INVALID_STREAM_ID);
+    ASSERT_NE(f1, WASM_COMPONENT_ASYNC_INVALID_FUTURE_ID);
+
+    uint8 hello[] = "hello";
+    ASSERT_TRUE(wasm_component_async_stream_write(engine, s1, hello, 5));
+    ASSERT_TRUE(wasm_component_async_stream_write(engine, s2, hello, 5));
+
+    uint8 fut_data[] = { 0x99 };
+    ASSERT_TRUE(wasm_component_async_future_write(engine, f1, fut_data, 1));
+
+    uint8 buf[16];
+    ASSERT_EQ(wasm_component_async_stream_read(engine, s1, buf, 16), 5);
+    ASSERT_EQ(memcmp(buf, "hello", 5), 0);
+
+    ASSERT_EQ(wasm_component_async_stream_read(engine, s2, buf, 16), 5);
+    ASSERT_EQ(memcmp(buf, "hello", 5), 0);
+
+    ASSERT_EQ(wasm_component_async_future_read(engine, f1, buf, 16), 1);
+    ASSERT_EQ(buf[0], 0x99);
+
+    wasm_component_async_engine_destroy(engine);
+}
+
+TEST_F(BinaryParserTest, TestAsyncEngineCancelReadWrite)
+{
+    WASMComponentAsyncEngine *engine = nullptr;
+    ASSERT_TRUE(wasm_component_async_engine_create(&engine, 4));
+    ASSERT_NE(engine, nullptr);
+
+    uint32 sid = wasm_component_async_stream_create(engine);
+    ASSERT_NE(sid, WASM_COMPONENT_ASYNC_INVALID_STREAM_ID);
+
+    ASSERT_TRUE(wasm_component_async_stream_cancel_read(engine, sid));
+    ASSERT_TRUE(wasm_component_async_stream_cancel_write(engine, sid));
+
+    uint32 fid = wasm_component_async_future_create(engine);
+    ASSERT_NE(fid, WASM_COMPONENT_ASYNC_INVALID_FUTURE_ID);
+
+    ASSERT_TRUE(wasm_component_async_future_cancel_read(engine, fid));
+    ASSERT_TRUE(wasm_component_async_future_cancel_write(engine, fid));
+
+    wasm_component_async_engine_destroy(engine);
+}
+
+TEST_F(BinaryParserTest, TestAsyncEngineEmptyErrorContext)
+{
+    WASMComponentAsyncEngine *engine = nullptr;
+    ASSERT_TRUE(wasm_component_async_engine_create(&engine, 4));
+    ASSERT_NE(engine, nullptr);
+
+    uint32 handle = wasm_component_resource_create_error_context_handle(
+        engine, nullptr, 0);
+    ASSERT_NE(handle, WASM_COMPONENT_ASYNC_INVALID_ERROR_CONTEXT_HANDLE);
+
+    uint32 msg_len = wasm_component_resource_read_error_context(
+        engine, handle, nullptr, 0);
+    ASSERT_EQ(msg_len, 0);
+
+    wasm_component_resource_drop_error_context(engine, handle);
+
+    wasm_component_async_engine_destroy(engine);
+}
+
+TEST_F(BinaryParserTest, TestAsyncEngineStreamLargeWrites)
+{
+    WASMComponentAsyncEngine *engine = nullptr;
+    ASSERT_TRUE(wasm_component_async_engine_create(&engine, 4));
+    ASSERT_NE(engine, nullptr);
+
+    uint32 sid = wasm_component_async_stream_create(engine);
+    ASSERT_NE(sid, WASM_COMPONENT_ASYNC_INVALID_STREAM_ID);
+
+    uint8 large_data[8192];
+    for (uint32 i = 0; i < sizeof(large_data); i++)
+        large_data[i] = (uint8)(i & 0xff);
+    ASSERT_TRUE(wasm_component_async_stream_write(engine, sid, large_data, sizeof(large_data)));
+
+    uint8 read_buf[8192];
+    uint32 nread = wasm_component_async_stream_read(engine, sid, read_buf, sizeof(read_buf));
+    ASSERT_EQ(nread, sizeof(large_data));
+    ASSERT_EQ(memcmp(read_buf, large_data, sizeof(large_data)), 0);
+
+    wasm_component_async_engine_destroy(engine);
 }
