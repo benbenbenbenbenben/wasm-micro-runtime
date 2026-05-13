@@ -6885,6 +6885,53 @@ ensure_canon_lift_memory_opt(WASMComponentCanon *canon, uint32_t mem_idx)
 }
 
 static bool
+ensure_canon_lift_memory64_opt(WASMComponentCanon *canon, uint32_t mem_idx)
+{
+    if (!canon || canon->tag != WASM_COMP_CANON_LIFT)
+        return false;
+
+    if (!canon->canon_data.lift.canon_opts) {
+        canon->canon_data.lift.canon_opts =
+            (WASMComponentCanonOpts *)wasm_runtime_malloc(
+                sizeof(WASMComponentCanonOpts));
+        if (!canon->canon_data.lift.canon_opts)
+            return false;
+        memset(canon->canon_data.lift.canon_opts, 0,
+               sizeof(WASMComponentCanonOpts));
+    }
+
+    for (uint32_t i = 0; i < canon->canon_data.lift.canon_opts->canon_opts_count;
+         i++) {
+        if (canon->canon_data.lift.canon_opts->canon_opts[i].tag
+            == WASM_COMP_CANON_OPT_MEMORY64) {
+            canon->canon_data.lift.canon_opts->canon_opts[i]
+                .payload.memory64.mem_idx = mem_idx;
+            return true;
+        }
+    }
+
+    const uint32_t old_count =
+        canon->canon_data.lift.canon_opts->canon_opts_count;
+    auto *new_opts = (WASMComponentCanonOpt *)wasm_runtime_malloc(
+        sizeof(WASMComponentCanonOpt) * (old_count + 1));
+    if (!new_opts)
+        return false;
+
+    memset(new_opts, 0, sizeof(WASMComponentCanonOpt) * (old_count + 1));
+    if (old_count > 0 && canon->canon_data.lift.canon_opts->canon_opts) {
+        memcpy(new_opts, canon->canon_data.lift.canon_opts->canon_opts,
+               sizeof(WASMComponentCanonOpt) * old_count);
+        wasm_runtime_free(canon->canon_data.lift.canon_opts->canon_opts);
+    }
+
+    new_opts[old_count].tag = WASM_COMP_CANON_OPT_MEMORY64;
+    new_opts[old_count].payload.memory64.mem_idx = mem_idx;
+    canon->canon_data.lift.canon_opts->canon_opts = new_opts;
+    canon->canon_data.lift.canon_opts->canon_opts_count = old_count + 1;
+    return true;
+}
+
+static bool
 ensure_canon_lower_memory_opt(WASMComponentCanon *canon, uint32_t mem_idx)
 {
     if (!canon || canon->tag != WASM_COMP_CANON_LOWER) {
@@ -34420,6 +34467,74 @@ TEST_F(BinaryParserTest, TestPublicComponentCallRejectsMemory64ListU8Param)
     wasm_component_value_t result = {};
     ASSERT_TRUE(
         wasm_runtime_call_component_values(module_inst, func, 1, &result, 1, &arg))
+        << wasm_runtime_get_exception(module_inst);
+
+    wasm_component_value_destroy(&arg);
+    wasm_component_value_destroy(&result);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestPublicComponentCallAcceptsMemory64CanonOpt)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "public-component-call-memory64-canon-opt";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+    ASSERT_TRUE(
+        append_component_export_alias_sections((WASMComponentModule *)module));
+
+    /* Set up a memory64 canon lift for list<u8> param */
+    const int32_t list_u8_type_idx = append_component_list_type(
+        (WASMComponentModule *)module, WASM_COMP_PRIMVAL_U8, false, 0);
+    ASSERT_GE(list_u8_type_idx, 0);
+    ASSERT_TRUE(configure_first_canon_lift_for_list_u8_param(
+        (WASMComponentModule *)module, (uint32_t)list_u8_type_idx));
+
+    /* Replace the memory opt with memory64 */
+    {
+        WASMComponentCanon *canon = find_first_canon_lift(
+            (WASMComponentModule *)module);
+        ASSERT_NE(canon, nullptr);
+        ASSERT_NE(canon->canon_data.lift.canon_opts, nullptr);
+        ASSERT_GT(canon->canon_data.lift.canon_opts->canon_opts_count, 0u);
+        bool replaced = false;
+        for (uint32_t i = 0;
+             i < canon->canon_data.lift.canon_opts->canon_opts_count; i++) {
+            if (canon->canon_data.lift.canon_opts->canon_opts[i].tag
+                == WASM_COMP_CANON_OPT_MEMORY) {
+                canon->canon_data.lift.canon_opts->canon_opts[i].tag =
+                    WASM_COMP_CANON_OPT_MEMORY64;
+                replaced = true;
+                break;
+            }
+        }
+        ASSERT_TRUE(replaced);
+    }
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func =
+        wasm_runtime_lookup_component_function(module_inst, "aliased-add");
+    ASSERT_NE(func, nullptr);
+
+    /* Verify memory64 is accepted — call succeeds instead of rejecting */
+    wasm_component_value_t arg = make_component_list_u8_value("abcd", 4);
+    wasm_component_value_t result = {};
+    ASSERT_TRUE(wasm_runtime_call_component_values(module_inst, func, 1, &result,
+                                                    1, &arg))
         << wasm_runtime_get_exception(module_inst);
 
     wasm_component_value_destroy(&arg);
