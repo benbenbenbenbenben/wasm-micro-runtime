@@ -717,9 +717,11 @@ What is still missing:
    `instance`/`component` imports plus nested component-type matching with the
    current abstract-`type` / metadata-eq-bound subset), and host-callback
    imported own-result subset
-- resource-type identity/rebinding beyond the current name/sort plus the
-  current abstract-`type` / metadata-eq-bound / runtime-eq-bound matching
-  subset is still unsupported
+- resource-type identity/rebinding now includes runtime eq-bound resource
+  type matching: `validate_component_runtime_resource_type_against_bound`
+  checks that the runtime resource type's type_idx/source_type_idx matches
+  the eq-bound expected type index; broader rebinding beyond the current
+  metadata-eq-bound / runtime-eq-bound subset is still unsupported
 - borrowed resource values and the rest of general own/borrow public value
   transport beyond the current supported subset (host-callback borrowed
   parameters, host-callback round-tripping of existing owned handles, public
