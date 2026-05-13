@@ -318,6 +318,15 @@ wasm_component_async_poll_task(
     task->state = call_ok ? WASM_COMP_ASYNC_TASK_COMPLETED
                           : WASM_COMP_ASYNC_TASK_FAILED;
 
+    if (call_ok && !engine->dispatching_callback
+        && task->function
+        && task->function->callback_func_idx != UINT32_MAX
+        && task->function->callback_func_idx < inst->core_func_count) {
+        engine->dispatching_callback = true;
+        wasm_component_async_dispatch_callback(engine, inst, task);
+        engine->dispatching_callback = false;
+    }
+
     if (completed_task_id_out)
         *completed_task_id_out = task_id;
 
@@ -914,4 +923,68 @@ wasm_component_async_waitable_join(
     }
 join_done:
     return true;
+}
+
+bool
+wasm_component_async_dispatch_callback(
+    WASMComponentAsyncEngine *engine,
+    WASMComponentInstance *inst,
+    WASMComponentAsyncTask *task)
+{
+    WASMComponentCoreRuntimeRef *cb_ref;
+    WASMModuleInstanceCommon *target_module_inst;
+    WASMExecEnv *exec_env;
+    wasm_val_t cb_args[16];
+    uint32 num_cb_args = 0;
+    bool ok;
+
+    (void)engine;
+
+    if (!inst || !task || !task->function)
+        return false;
+
+    if (task->function->callback_func_idx == UINT32_MAX
+        || task->function->callback_func_idx >= inst->core_func_count)
+        return false;
+
+    cb_ref = &inst->core_funcs[task->function->callback_func_idx];
+    if (cb_ref->type != WASM_COMP_CORE_RUNTIME_REF_FUNC || !cb_ref->of.function)
+        return false;
+
+    cb_args[num_cb_args].kind = WASM_I32;
+    cb_args[num_cb_args].of.i32 = (int32)task->task_id;
+    num_cb_args++;
+
+    for (uint32 i = 0; i < task->num_results && num_cb_args < 16; i++) {
+        const uint8 *data =
+            wasm_component_value_get_data(&task->results[i]);
+        if (data
+            && task->results[i].type.kind
+                   == WASM_COMPONENT_VALUE_TYPE_PRIMITIVE) {
+            cb_args[num_cb_args].kind = WASM_I32;
+            cb_args[num_cb_args].of.i32 = (int32) * (const uint32 *)data;
+            num_cb_args++;
+        }
+    }
+
+    target_module_inst =
+        (WASMModuleInstanceCommon *)cb_ref->owner_instance->module_inst;
+    exec_env = wasm_runtime_get_exec_env_tls();
+    if (!exec_env)
+        exec_env = wasm_runtime_get_exec_env_singleton(target_module_inst);
+    if (!exec_env)
+        return false;
+
+    wasm_runtime_clear_exception(target_module_inst);
+    ok = wasm_runtime_call_wasm_a(exec_env, cb_ref->of.function,
+                                  0, NULL, num_cb_args, cb_args);
+    if (!ok) {
+        const char *cb_exception =
+            wasm_runtime_get_exception(target_module_inst);
+        if (cb_exception)
+            wasm_runtime_set_exception(
+                (WASMModuleInstanceCommon *)inst, cb_exception);
+    }
+
+    return ok;
 }

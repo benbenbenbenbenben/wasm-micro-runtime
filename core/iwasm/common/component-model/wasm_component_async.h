@@ -102,6 +102,7 @@ typedef struct WASMComponentAsyncEngine {
     uint32 waitable_set_capacity;
     uint32 waitable_set_count;
     uint32 next_waitable_set_id;
+    bool dispatching_callback;
 } WASMComponentAsyncEngine;
 
 bool
@@ -144,6 +145,12 @@ wasm_component_async_get_result(
     uint32 task_id,
     wasm_component_value_t *results,
     uint32 num_results);
+
+bool
+wasm_component_async_dispatch_callback(
+    WASMComponentAsyncEngine *engine,
+    WASMComponentInstance *inst,
+    WASMComponentAsyncTask *task);
 
 /* Stream operations */
 

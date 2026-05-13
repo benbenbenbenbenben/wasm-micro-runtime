@@ -9040,6 +9040,7 @@ resolve_component_canon_lift_abi(WASMComponentInstance *inst,
     function->memory_result_kind = WASM_COMP_RUNTIME_CANON_LIFT_MEMORY_RESULT_NONE;
     function->has_string_params = false;
     function->has_list_scalar_params = false;
+    function->callback_func_idx = UINT32_MAX;
 
     type_entry = wasm_component_lookup_type(component, function->type_idx);
     if (!type_entry)
