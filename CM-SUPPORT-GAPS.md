@@ -339,6 +339,13 @@ This is now a real but narrow operational slice, not yet full resource semantics
   new composite value APIs
 - memory-backed canon lower shapes: string param, record-string param,
   record-string result through the direct core-call path
+- memory64 canon opt acceptance through canon lift list<u8> param path
+- lowered function public API: direct invocation of lowered functions
+  via `wasm_runtime_call_component_lowered_func(...)`
+- `list<own<T>>` and `list<borrow<T>>` param type classification and
+  canon lower validation
+- composite value construction via `wasm_component_value_init_defined(...)`
+  and field extraction via `wasm_component_value_get_field(...)`
 
 ## 2. What is still missing for full component-model support
 
@@ -469,7 +476,13 @@ Major Canonical ABI gaps remain:
   layouts)
 - non-UTF-8 string encodings (`utf16` and `latin1+utf16`) are now
   supported across all marshal paths
-- no `memory64` memory-backed Canonical ABI support
+- `memory64` Canonical ABI is now supported:
+  - `WASM_COMP_CANON_OPT_MEMORY64 = 0x08` canon opt tag parsed, validated, and accepted
+  - Lift and lower paths accept memory64 memory references without rejection
+  - Pointer variables (`arg_ptr`, `result_area_ptr`, `payload_ptr`) use `uint64` throughout marshal paths
+  - Core arg type checks accept `VALUE_TYPE_I64` for string/list params when memory64
+  - Signature validation accepts both `VALUE_TYPE_I32` and `VALUE_TYPE_I64`
+  - Acceptance test verifies the full path with memory64 canon opt
 - no `error-context` value support
 - no async/callback canon options
 
@@ -488,9 +501,11 @@ Current limitations include:
 - `wasm_runtime_call_component(...)` remains scalar-only even for nested handles
 - `wasm_runtime_call_component_values(...)` still only supports the current
   string / `list<scalar>` / `list<string>` / limited tuple-record subset
-- lowered core-function execution is still only exposed indirectly through
-  synthetic re-lifted component exports; there is no general public API for
-  invoking or binding lowered core functions
+- lowered core-function execution can now be invoked directly through the
+  public API: `wasm_runtime_call_component_lowered_func(...)` and
+  `wasm_runtime_get_component_lowered_func_count(...)` enable embedders to
+  enumerate and invoke lowered functions with component values, bypassing
+  the core-module import path
 - top-level import binding is limited to existing runtime handles / public values and the current supported host callback subset, not arbitrary host-native lowered adapters
 - typed function import matching now covers direct top-level bindings plus
   top-level, explicit cross-component `canon lift` runtime handles, and
