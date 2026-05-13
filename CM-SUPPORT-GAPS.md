@@ -337,6 +337,8 @@ This is now a real but narrow operational slice, not yet full resource semantics
   `wasm_component_instance_get_defined_field_type`
 - record/tuple field extraction and record construction using the
   new composite value APIs
+- memory-backed canon lower shapes: string param, record-string param,
+  record-string result through the direct core-call path
 
 ## 2. What is still missing for full component-model support
 
@@ -441,10 +443,16 @@ Major Canonical ABI gaps remain:
   mixed composite-result paths, and the synthetic `list<scalar>`-parameter /
   `list<scalar>`-result / tuple/record-parameter / record-result /
   tuple/mixed-composite-result synthetic re-lifts above
-- no executable lower path yet for direct tuple/record results beyond the tested
-  top-level and nested return-area path over the current scalar / UTF-8 string /
-  nested variable-length `list<scalar>` / `list<string>` leaf subset, including
-  the newer pure-scalar tuple/record result path
+- the direct core-call `canon lower` path now covers memory-backed shapes for
+  string params, record-string params, and record-string results — the tested
+  subset now includes:
+  - string param through the lowered `(string) -> s32` path with UTF-8 encoding
+  - record with string-leaf param through the lowered
+    `(record{s32,string}) -> s32` path
+  - record with string-leaf result through the lowered
+    `() -> record{s32,string}` result-area path
+  - the existing `list<u8>`/`list<s32>`/`list<string>` param and list-scalar
+    result paths remain tested
 - no executable lower path yet for broader nested lowered-consumer coverage beyond
   the tested nested child-core UTF-8 string / `list<string>`-parameter /
   `list<string>`-result / `list<u8>`- and `list<s32>`-parameter /
