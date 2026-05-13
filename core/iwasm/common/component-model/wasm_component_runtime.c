@@ -812,6 +812,42 @@ collect_component_runtime_alloc_counts(const WASMComponent *component,
                             counts->core_func_count++;
                             counts->lowered_func_count++;
                             break;
+                        case WASM_COMP_CANON_TASK_CANCEL:
+                        case WASM_COMP_CANON_SUBTASK_CANCEL:
+                        case WASM_COMP_CANON_BACKPRESSURE_SET:
+                        case WASM_COMP_CANON_TASK_RETURN:
+                        case WASM_COMP_CANON_CONTEXT_GET:
+                        case WASM_COMP_CANON_CONTEXT_SET:
+                        case WASM_COMP_CANON_YIELD:
+                        case WASM_COMP_CANON_SUBTASK_DROP:
+                        case WASM_COMP_CANON_STREAM_NEW:
+                        case WASM_COMP_CANON_STREAM_READ:
+                        case WASM_COMP_CANON_STREAM_WRITE:
+                        case WASM_COMP_CANON_STREAM_CANCEL_READ:
+                        case WASM_COMP_CANON_STREAM_CANCEL_WRITE:
+                        case WASM_COMP_CANON_STREAM_DROP_READABLE:
+                        case WASM_COMP_CANON_STREAM_DROP_WRITABLE:
+                        case WASM_COMP_CANON_FUTURE_NEW:
+                        case WASM_COMP_CANON_FUTURE_READ:
+                        case WASM_COMP_CANON_FUTURE_WRITE:
+                        case WASM_COMP_CANON_FUTURE_CANCEL_READ:
+                        case WASM_COMP_CANON_FUTURE_CANCEL_WRITE:
+                        case WASM_COMP_CANON_FUTURE_DROP_READABLE:
+                        case WASM_COMP_CANON_FUTURE_DROP_WRITABLE:
+                        case WASM_COMP_CANON_ERROR_CONTEXT_NEW:
+                        case WASM_COMP_CANON_ERROR_CONTEXT_DEBUG:
+                        case WASM_COMP_CANON_ERROR_CONTEXT_DROP:
+                        case WASM_COMP_CANON_WAITABLE_SET_NEW:
+                        case WASM_COMP_CANON_WAITABLE_SET_WAIT:
+                        case WASM_COMP_CANON_WAITABLE_SET_POLL:
+                        case WASM_COMP_CANON_WAITABLE_SET_DROP:
+                        case WASM_COMP_CANON_WAITABLE_JOIN:
+                        case WASM_COMP_CANON_THREAD_SPAWN_REF:
+                        case WASM_COMP_CANON_THREAD_SPAWN_INDIRECT:
+                        case WASM_COMP_CANON_THREAD_AVAILABLE_PAR:
+                            counts->core_func_count++;
+                            counts->lowered_func_count++;
+                            break;
                         default:
                             break;
                     }
@@ -3037,6 +3073,200 @@ validate_lowered_import_signature(
                     error_buf, error_buf_size,
                     "component canon resource.drop async is not supported");
                 return false;
+            case WASM_COMP_CANON_STREAM_NEW:
+            case WASM_COMP_CANON_FUTURE_NEW:
+                if (expected_type->param_count != 1
+                    || expected_type->result_count != 1
+                    || expected_type->types[0] != VALUE_TYPE_I32
+                    || expected_type->types[1] != VALUE_TYPE_I32)
+                    return set_component_runtime_error_fmt(
+                        error_buf, error_buf_size,
+                        "component canon stream/future.new requires an "
+                        "i32 -> i32 core import signature");
+                return true;
+            case WASM_COMP_CANON_STREAM_READ:
+            case WASM_COMP_CANON_STREAM_WRITE:
+            case WASM_COMP_CANON_FUTURE_READ:
+            case WASM_COMP_CANON_FUTURE_WRITE:
+                if (expected_type->param_count != 3
+                    || expected_type->result_count != 1
+                    || expected_type->types[0] != VALUE_TYPE_I32
+                    || expected_type->types[1] != VALUE_TYPE_I32
+                    || expected_type->types[2] != VALUE_TYPE_I32
+                    || expected_type->types[3] != VALUE_TYPE_I32)
+                    return set_component_runtime_error_fmt(
+                        error_buf, error_buf_size,
+                        "component canon stream/future read/write requires "
+                        "an (i32 i32 i32) -> i32 core import signature");
+                return true;
+            case WASM_COMP_CANON_STREAM_CANCEL_READ:
+            case WASM_COMP_CANON_STREAM_CANCEL_WRITE:
+            case WASM_COMP_CANON_STREAM_DROP_READABLE:
+            case WASM_COMP_CANON_STREAM_DROP_WRITABLE:
+            case WASM_COMP_CANON_FUTURE_CANCEL_READ:
+            case WASM_COMP_CANON_FUTURE_CANCEL_WRITE:
+            case WASM_COMP_CANON_FUTURE_DROP_READABLE:
+            case WASM_COMP_CANON_FUTURE_DROP_WRITABLE:
+                if (expected_type->param_count != 1
+                    || expected_type->result_count != 0
+                    || expected_type->types[0] != VALUE_TYPE_I32)
+                    return set_component_runtime_error_fmt(
+                        error_buf, error_buf_size,
+                        "component canon stream/future cancel/drop requires "
+                        "an i32 -> () core import signature");
+                return true;
+            case WASM_COMP_CANON_ERROR_CONTEXT_NEW:
+                if (expected_type->param_count != 2
+                    || expected_type->result_count != 1
+                    || expected_type->types[0] != VALUE_TYPE_I32
+                    || expected_type->types[1] != VALUE_TYPE_I32
+                    || expected_type->types[2] != VALUE_TYPE_I32)
+                    return set_component_runtime_error_fmt(
+                        error_buf, error_buf_size,
+                        "component canon error-context.new requires "
+                        "an (i32 i32) -> i32 core import signature");
+                return true;
+            case WASM_COMP_CANON_ERROR_CONTEXT_DEBUG:
+                if (expected_type->param_count != 3
+                    || expected_type->result_count != 1
+                    || expected_type->types[0] != VALUE_TYPE_I32
+                    || expected_type->types[1] != VALUE_TYPE_I32
+                    || expected_type->types[2] != VALUE_TYPE_I32
+                    || expected_type->types[3] != VALUE_TYPE_I32)
+                    return set_component_runtime_error_fmt(
+                        error_buf, error_buf_size,
+                        "component canon error-context.debug requires "
+                        "an (i32 i32 i32) -> i32 core import signature");
+                return true;
+            case WASM_COMP_CANON_ERROR_CONTEXT_DROP:
+                if (expected_type->param_count != 1
+                    || expected_type->result_count != 0
+                    || expected_type->types[0] != VALUE_TYPE_I32)
+                    return set_component_runtime_error_fmt(
+                        error_buf, error_buf_size,
+                        "component canon error-context.drop requires "
+                        "an i32 -> () core import signature");
+                return true;
+            case WASM_COMP_CANON_TASK_CANCEL:
+            case WASM_COMP_CANON_SUBTASK_CANCEL:
+            case WASM_COMP_CANON_BACKPRESSURE_SET:
+            case WASM_COMP_CANON_SUBTASK_DROP:
+                if (expected_type->param_count != 1
+                    || expected_type->result_count != 1
+                    || expected_type->types[0] != VALUE_TYPE_I32
+                    || expected_type->types[1] != VALUE_TYPE_I32)
+                    return set_component_runtime_error_fmt(
+                        error_buf, error_buf_size,
+                        "component canon task/subtask operations require "
+                        "an i32 -> i32 core import signature");
+                return true;
+            case WASM_COMP_CANON_TASK_RETURN:
+                if (expected_type->param_count != 0
+                    || expected_type->result_count != 0)
+                    return set_component_runtime_error_fmt(
+                        error_buf, error_buf_size,
+                        "component canon task.return requires "
+                        "a () -> () core import signature");
+                return true;
+            case WASM_COMP_CANON_CONTEXT_GET:
+                if (expected_type->param_count != 1
+                    || expected_type->result_count != 1
+                    || expected_type->types[0] != VALUE_TYPE_I32
+                    || expected_type->types[1] != VALUE_TYPE_I32)
+                    return set_component_runtime_error_fmt(
+                        error_buf, error_buf_size,
+                        "component canon context.get requires "
+                        "an i32 -> i32 core import signature");
+                return true;
+            case WASM_COMP_CANON_CONTEXT_SET:
+                if (expected_type->param_count != 2
+                    || expected_type->result_count != 0
+                    || expected_type->types[0] != VALUE_TYPE_I32
+                    || expected_type->types[1] != VALUE_TYPE_I32)
+                    return set_component_runtime_error_fmt(
+                        error_buf, error_buf_size,
+                        "component canon context.set requires "
+                        "an (i32 i32) -> () core import signature");
+                return true;
+            case WASM_COMP_CANON_YIELD:
+                if (expected_type->param_count != 0
+                    || expected_type->result_count != 0)
+                    return set_component_runtime_error_fmt(
+                        error_buf, error_buf_size,
+                        "component canon yield requires "
+                        "a () -> () core import signature");
+                return true;
+            case WASM_COMP_CANON_WAITABLE_SET_NEW:
+                if (expected_type->param_count != 0
+                    || expected_type->result_count != 1
+                    || expected_type->types[0] != VALUE_TYPE_I32)
+                    return set_component_runtime_error_fmt(
+                        error_buf, error_buf_size,
+                        "component canon waitable-set.new requires "
+                        "a () -> i32 core import signature");
+                return true;
+            case WASM_COMP_CANON_WAITABLE_SET_WAIT:
+                if (expected_type->param_count != 2
+                    || expected_type->result_count != 1
+                    || expected_type->types[0] != VALUE_TYPE_I32
+                    || expected_type->types[1] != VALUE_TYPE_I32
+                    || expected_type->types[2] != VALUE_TYPE_I32)
+                    return set_component_runtime_error_fmt(
+                        error_buf, error_buf_size,
+                        "component canon waitable-set.wait requires "
+                        "an (i32 i32) -> i32 core import signature");
+                return true;
+            case WASM_COMP_CANON_WAITABLE_SET_POLL:
+                if (expected_type->param_count != 1
+                    || expected_type->result_count != 1
+                    || expected_type->types[0] != VALUE_TYPE_I32
+                    || expected_type->types[1] != VALUE_TYPE_I32)
+                    return set_component_runtime_error_fmt(
+                        error_buf, error_buf_size,
+                        "component canon waitable-set.poll requires "
+                        "an i32 -> i32 core import signature");
+                return true;
+            case WASM_COMP_CANON_WAITABLE_SET_DROP:
+                if (expected_type->param_count != 1
+                    || expected_type->result_count != 0
+                    || expected_type->types[0] != VALUE_TYPE_I32)
+                    return set_component_runtime_error_fmt(
+                        error_buf, error_buf_size,
+                        "component canon waitable-set.drop requires "
+                        "an i32 -> () core import signature");
+                return true;
+            case WASM_COMP_CANON_WAITABLE_JOIN:
+                if (expected_type->param_count != 3
+                    || expected_type->result_count != 1
+                    || expected_type->types[0] != VALUE_TYPE_I32
+                    || expected_type->types[1] != VALUE_TYPE_I32
+                    || expected_type->types[2] != VALUE_TYPE_I32
+                    || expected_type->types[3] != VALUE_TYPE_I32)
+                    return set_component_runtime_error_fmt(
+                        error_buf, error_buf_size,
+                        "component canon waitable.join requires "
+                        "an (i32 i32 i32) -> i32 core import signature");
+                return true;
+            case WASM_COMP_CANON_THREAD_SPAWN_REF:
+            case WASM_COMP_CANON_THREAD_SPAWN_INDIRECT:
+                if (expected_type->param_count != 1
+                    || expected_type->result_count != 1
+                    || expected_type->types[0] != VALUE_TYPE_I32
+                    || expected_type->types[1] != VALUE_TYPE_I32)
+                    return set_component_runtime_error_fmt(
+                        error_buf, error_buf_size,
+                        "component canon thread.spawn requires "
+                        "an i32 -> i32 core import signature");
+                return true;
+            case WASM_COMP_CANON_THREAD_AVAILABLE_PAR:
+                if (expected_type->param_count != 0
+                    || expected_type->result_count != 1
+                    || expected_type->types[0] != VALUE_TYPE_I32)
+                    return set_component_runtime_error_fmt(
+                        error_buf, error_buf_size,
+                        "component canon thread.available-par requires "
+                        "a () -> i32 core import signature");
+                return true;
             default:
                 return set_component_runtime_error_fmt(
                     error_buf, error_buf_size,
@@ -3787,7 +4017,7 @@ component_async_builtin_trampoline(WASMModuleInstanceCommon *caller_module_inst,
                                     uint64 *raw_args)
 {
     WASMComponentInstance *component_inst =
-        (WASMComponentInstance *)caller_module_inst;
+        async_func ? async_func->owner_instance : NULL;
     WASMComponentAsyncEngine *engine;
 
     if (!component_inst)
@@ -4958,33 +5188,37 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
         return;
     }
     if (lowered_function->kind == WASM_COMP_RUNTIME_FUNC_RESOURCE_BUILTIN) {
+        if (lowered_function->canon_tag == WASM_COMP_CANON_TASK_CANCEL
+            || lowered_function->canon_tag == WASM_COMP_CANON_SUBTASK_CANCEL
+            || lowered_function->canon_tag == WASM_COMP_CANON_BACKPRESSURE_SET
+            || lowered_function->canon_tag == WASM_COMP_CANON_TASK_RETURN
+            || lowered_function->canon_tag == WASM_COMP_CANON_CONTEXT_GET
+            || lowered_function->canon_tag == WASM_COMP_CANON_CONTEXT_SET
+            || lowered_function->canon_tag == WASM_COMP_CANON_YIELD
+            || lowered_function->canon_tag == WASM_COMP_CANON_SUBTASK_DROP
+            || lowered_function->canon_tag == WASM_COMP_CANON_ERROR_CONTEXT_NEW
+            || lowered_function->canon_tag == WASM_COMP_CANON_ERROR_CONTEXT_DEBUG
+            || lowered_function->canon_tag == WASM_COMP_CANON_ERROR_CONTEXT_DROP
+            || (lowered_function->canon_tag >= WASM_COMP_CANON_STREAM_NEW
+                && lowered_function->canon_tag
+                       <= WASM_COMP_CANON_STREAM_DROP_WRITABLE)
+            || (lowered_function->canon_tag >= WASM_COMP_CANON_FUTURE_NEW
+                && lowered_function->canon_tag
+                       <= WASM_COMP_CANON_FUTURE_DROP_WRITABLE)
+            || (lowered_function->canon_tag >= WASM_COMP_CANON_WAITABLE_SET_NEW
+                && lowered_function->canon_tag
+                       <= WASM_COMP_CANON_WAITABLE_SET_DROP)
+            || lowered_function->canon_tag == WASM_COMP_CANON_WAITABLE_JOIN
+            || lowered_function->canon_tag == WASM_COMP_CANON_THREAD_SPAWN_REF
+            || lowered_function->canon_tag == WASM_COMP_CANON_THREAD_SPAWN_INDIRECT
+            || lowered_function->canon_tag
+                   == WASM_COMP_CANON_THREAD_AVAILABLE_PAR) {
+            component_async_builtin_trampoline(
+                caller_module_inst, lowered_function, func_type, raw_args);
+            return;
+        }
         component_resource_builtin_trampoline(caller_module_inst, lowered_function,
-                                             func_type, raw_args);
-        return;
-    }
-    if (lowered_function->canon_tag == WASM_COMP_CANON_TASK_CANCEL
-        || lowered_function->canon_tag == WASM_COMP_CANON_SUBTASK_CANCEL
-        || lowered_function->canon_tag == WASM_COMP_CANON_BACKPRESSURE_SET
-        || lowered_function->canon_tag == WASM_COMP_CANON_TASK_RETURN
-        || lowered_function->canon_tag == WASM_COMP_CANON_CONTEXT_GET
-        || lowered_function->canon_tag == WASM_COMP_CANON_CONTEXT_SET
-        || lowered_function->canon_tag == WASM_COMP_CANON_YIELD
-        || lowered_function->canon_tag == WASM_COMP_CANON_SUBTASK_DROP
-        || lowered_function->canon_tag == WASM_COMP_CANON_ERROR_CONTEXT_NEW
-        || lowered_function->canon_tag == WASM_COMP_CANON_ERROR_CONTEXT_DEBUG
-        || lowered_function->canon_tag == WASM_COMP_CANON_ERROR_CONTEXT_DROP
-        || (lowered_function->canon_tag >= WASM_COMP_CANON_STREAM_NEW
-            && lowered_function->canon_tag <= WASM_COMP_CANON_STREAM_DROP_WRITABLE)
-        || (lowered_function->canon_tag >= WASM_COMP_CANON_FUTURE_NEW
-            && lowered_function->canon_tag <= WASM_COMP_CANON_FUTURE_DROP_WRITABLE)
-        || (lowered_function->canon_tag >= WASM_COMP_CANON_WAITABLE_SET_NEW
-            && lowered_function->canon_tag <= WASM_COMP_CANON_WAITABLE_SET_DROP)
-        || lowered_function->canon_tag == WASM_COMP_CANON_WAITABLE_JOIN
-        || lowered_function->canon_tag == WASM_COMP_CANON_THREAD_SPAWN_REF
-        || lowered_function->canon_tag == WASM_COMP_CANON_THREAD_SPAWN_INDIRECT
-        || lowered_function->canon_tag == WASM_COMP_CANON_THREAD_AVAILABLE_PAR) {
-        component_async_builtin_trampoline(caller_module_inst, lowered_function,
-                                           func_type, raw_args);
+                                              func_type, raw_args);
         return;
     }
     if (!lowered_function->lowered_target)
@@ -19668,6 +19902,42 @@ count_nested_component_local_bindings(const WASMComponent *nested_component,
                         case WASM_COMP_CANON_RESOURCE_DROP:
                         case WASM_COMP_CANON_RESOURCE_DROP_ASYNC:
                         case WASM_COMP_CANON_RESOURCE_REP:
+                            (*core_func_count)++;
+                            (*owned_lowered_func_count)++;
+                            break;
+                        case WASM_COMP_CANON_TASK_CANCEL:
+                        case WASM_COMP_CANON_SUBTASK_CANCEL:
+                        case WASM_COMP_CANON_BACKPRESSURE_SET:
+                        case WASM_COMP_CANON_TASK_RETURN:
+                        case WASM_COMP_CANON_CONTEXT_GET:
+                        case WASM_COMP_CANON_CONTEXT_SET:
+                        case WASM_COMP_CANON_YIELD:
+                        case WASM_COMP_CANON_SUBTASK_DROP:
+                        case WASM_COMP_CANON_STREAM_NEW:
+                        case WASM_COMP_CANON_STREAM_READ:
+                        case WASM_COMP_CANON_STREAM_WRITE:
+                        case WASM_COMP_CANON_STREAM_CANCEL_READ:
+                        case WASM_COMP_CANON_STREAM_CANCEL_WRITE:
+                        case WASM_COMP_CANON_STREAM_DROP_READABLE:
+                        case WASM_COMP_CANON_STREAM_DROP_WRITABLE:
+                        case WASM_COMP_CANON_FUTURE_NEW:
+                        case WASM_COMP_CANON_FUTURE_READ:
+                        case WASM_COMP_CANON_FUTURE_WRITE:
+                        case WASM_COMP_CANON_FUTURE_CANCEL_READ:
+                        case WASM_COMP_CANON_FUTURE_CANCEL_WRITE:
+                        case WASM_COMP_CANON_FUTURE_DROP_READABLE:
+                        case WASM_COMP_CANON_FUTURE_DROP_WRITABLE:
+                        case WASM_COMP_CANON_ERROR_CONTEXT_NEW:
+                        case WASM_COMP_CANON_ERROR_CONTEXT_DEBUG:
+                        case WASM_COMP_CANON_ERROR_CONTEXT_DROP:
+                        case WASM_COMP_CANON_WAITABLE_SET_NEW:
+                        case WASM_COMP_CANON_WAITABLE_SET_WAIT:
+                        case WASM_COMP_CANON_WAITABLE_SET_POLL:
+                        case WASM_COMP_CANON_WAITABLE_SET_DROP:
+                        case WASM_COMP_CANON_WAITABLE_JOIN:
+                        case WASM_COMP_CANON_THREAD_SPAWN_REF:
+                        case WASM_COMP_CANON_THREAD_SPAWN_INDIRECT:
+                        case WASM_COMP_CANON_THREAD_AVAILABLE_PAR:
                             (*core_func_count)++;
                             (*owned_lowered_func_count)++;
                             break;

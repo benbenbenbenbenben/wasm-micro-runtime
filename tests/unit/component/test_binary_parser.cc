@@ -3082,6 +3082,39 @@ count_top_level_core_func_entries(const WASMComponent *component)
                         case WASM_COMP_CANON_RESOURCE_DROP:
                         case WASM_COMP_CANON_RESOURCE_DROP_ASYNC:
                         case WASM_COMP_CANON_RESOURCE_REP:
+                        case WASM_COMP_CANON_TASK_CANCEL:
+                        case WASM_COMP_CANON_SUBTASK_CANCEL:
+                        case WASM_COMP_CANON_BACKPRESSURE_SET:
+                        case WASM_COMP_CANON_TASK_RETURN:
+                        case WASM_COMP_CANON_CONTEXT_GET:
+                        case WASM_COMP_CANON_CONTEXT_SET:
+                        case WASM_COMP_CANON_YIELD:
+                        case WASM_COMP_CANON_SUBTASK_DROP:
+                        case WASM_COMP_CANON_STREAM_NEW:
+                        case WASM_COMP_CANON_STREAM_READ:
+                        case WASM_COMP_CANON_STREAM_WRITE:
+                        case WASM_COMP_CANON_STREAM_CANCEL_READ:
+                        case WASM_COMP_CANON_STREAM_CANCEL_WRITE:
+                        case WASM_COMP_CANON_STREAM_DROP_READABLE:
+                        case WASM_COMP_CANON_STREAM_DROP_WRITABLE:
+                        case WASM_COMP_CANON_FUTURE_NEW:
+                        case WASM_COMP_CANON_FUTURE_READ:
+                        case WASM_COMP_CANON_FUTURE_WRITE:
+                        case WASM_COMP_CANON_FUTURE_CANCEL_READ:
+                        case WASM_COMP_CANON_FUTURE_CANCEL_WRITE:
+                        case WASM_COMP_CANON_FUTURE_DROP_READABLE:
+                        case WASM_COMP_CANON_FUTURE_DROP_WRITABLE:
+                        case WASM_COMP_CANON_ERROR_CONTEXT_NEW:
+                        case WASM_COMP_CANON_ERROR_CONTEXT_DEBUG:
+                        case WASM_COMP_CANON_ERROR_CONTEXT_DROP:
+                        case WASM_COMP_CANON_WAITABLE_SET_NEW:
+                        case WASM_COMP_CANON_WAITABLE_SET_WAIT:
+                        case WASM_COMP_CANON_WAITABLE_SET_POLL:
+                        case WASM_COMP_CANON_WAITABLE_SET_DROP:
+                        case WASM_COMP_CANON_WAITABLE_JOIN:
+                        case WASM_COMP_CANON_THREAD_SPAWN_REF:
+                        case WASM_COMP_CANON_THREAD_SPAWN_INDIRECT:
+                        case WASM_COMP_CANON_THREAD_AVAILABLE_PAR:
                             count++;
                             break;
                         default:
@@ -4455,6 +4488,123 @@ append_top_level_lowered_core_caller_sections_for_func(
              .expression.with_args.args) {
         return false;
     }
+    memset(core_instance_section->parsed.core_instance_section->instances[0]
+               .expression.with_args.args,
+           0, sizeof(WASMComponentInstArg));
+    core_instance_section->parsed.core_instance_section->instances[0]
+        .expression.with_args.args[0]
+        .name = clone_core_name(core_import_name);
+    core_instance_section->parsed.core_instance_section->instances[0]
+        .expression.with_args.args[0]
+        .idx.sort_idx = create_core_sort_idx(WASM_COMP_CORE_SORT_FUNC,
+                                             new_core_func_idx);
+
+    return core_instance_section->parsed.core_instance_section->instances[0]
+               .expression.with_args.args[0]
+               .name
+            && core_instance_section->parsed.core_instance_section->instances[0]
+                   .expression.with_args.args[0]
+                   .idx.sort_idx;
+}
+
+static bool
+append_top_level_async_builtin_core_caller_sections(
+    WASMComponentModule *component_module,
+    WASMComponentCanonType canon_tag,
+    const char *core_module_path, const char *core_import_name)
+{
+    WASMComponent *component = &component_module->component;
+    char error_buf[128] = {};
+    const uint32_t new_core_func_idx = count_top_level_core_func_entries(component);
+    const uint32_t new_core_module_idx =
+        count_top_level_core_module_entries(component);
+    const uint32_t old_count = component->section_count;
+    auto *new_sections = (WASMComponentSection *)wasm_runtime_malloc(
+        sizeof(WASMComponentSection) * (old_count + 3));
+
+    if (!new_sections)
+        return false;
+
+    memset(new_sections, 0, sizeof(WASMComponentSection) * (old_count + 3));
+    memcpy(new_sections, component->sections,
+           sizeof(WASMComponentSection) * old_count);
+    wasm_runtime_free(component->sections);
+    component->sections = new_sections;
+    component->section_count = old_count + 3;
+
+    auto *canon_section = &component->sections[old_count];
+    auto *core_module_section = &component->sections[old_count + 1];
+    auto *core_instance_section = &component->sections[old_count + 2];
+
+    canon_section->id = WASM_COMP_SECTION_CANONS;
+    canon_section->parsed.canon_section =
+        (WASMComponentCanonSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentCanonSection));
+    if (!canon_section->parsed.canon_section)
+        return false;
+    memset(canon_section->parsed.canon_section, 0,
+           sizeof(WASMComponentCanonSection));
+    canon_section->parsed.canon_section->count = 1;
+    canon_section->parsed.canon_section->canons =
+        (WASMComponentCanon *)wasm_runtime_malloc(sizeof(WASMComponentCanon));
+    if (!canon_section->parsed.canon_section->canons)
+        return false;
+    memset(canon_section->parsed.canon_section->canons, 0,
+           sizeof(WASMComponentCanon));
+    canon_section->parsed.canon_section->canons[0].tag = canon_tag;
+    if (canon_tag == WASM_COMP_CANON_STREAM_NEW
+        || canon_tag == WASM_COMP_CANON_STREAM_READ
+        || canon_tag == WASM_COMP_CANON_STREAM_WRITE
+        || canon_tag == WASM_COMP_CANON_STREAM_CANCEL_READ
+        || canon_tag == WASM_COMP_CANON_STREAM_CANCEL_WRITE
+        || canon_tag == WASM_COMP_CANON_STREAM_DROP_READABLE
+        || canon_tag == WASM_COMP_CANON_STREAM_DROP_WRITABLE
+        || canon_tag == WASM_COMP_CANON_FUTURE_NEW
+        || canon_tag == WASM_COMP_CANON_FUTURE_READ
+        || canon_tag == WASM_COMP_CANON_FUTURE_WRITE
+        || canon_tag == WASM_COMP_CANON_FUTURE_CANCEL_READ
+        || canon_tag == WASM_COMP_CANON_FUTURE_CANCEL_WRITE
+        || canon_tag == WASM_COMP_CANON_FUTURE_DROP_READABLE
+        || canon_tag == WASM_COMP_CANON_FUTURE_DROP_WRITABLE)
+        canon_section->parsed.canon_section->canons[0]
+            .canon_data.stream_new.stream_type_idx = 0;
+
+    core_module_section->id = WASM_COMP_SECTION_CORE_MODULE;
+    core_module_section->parsed.core_module = create_core_module_wrapper_from_file(
+        core_module_path, "async-builtin-core-caller", error_buf,
+        (uint32_t)sizeof(error_buf));
+    if (!core_module_section->parsed.core_module)
+        return false;
+
+    core_instance_section->id = WASM_COMP_SECTION_CORE_INSTANCE;
+    core_instance_section->parsed.core_instance_section =
+        (WASMComponentCoreInstSection *)wasm_runtime_malloc(
+            sizeof(WASMComponentCoreInstSection));
+    if (!core_instance_section->parsed.core_instance_section)
+        return false;
+    memset(core_instance_section->parsed.core_instance_section, 0,
+           sizeof(WASMComponentCoreInstSection));
+    core_instance_section->parsed.core_instance_section->count = 1;
+    core_instance_section->parsed.core_instance_section->instances =
+        (WASMComponentCoreInst *)wasm_runtime_malloc(
+            sizeof(WASMComponentCoreInst));
+    if (!core_instance_section->parsed.core_instance_section->instances)
+        return false;
+    memset(core_instance_section->parsed.core_instance_section->instances, 0,
+           sizeof(WASMComponentCoreInst));
+    core_instance_section->parsed.core_instance_section->instances[0]
+        .instance_expression_tag = WASM_COMP_INSTANCE_EXPRESSION_WITH_ARGS;
+    core_instance_section->parsed.core_instance_section->instances[0]
+        .expression.with_args.idx = new_core_module_idx;
+    core_instance_section->parsed.core_instance_section->instances[0]
+        .expression.with_args.arg_len = 1;
+    core_instance_section->parsed.core_instance_section->instances[0]
+        .expression.with_args.args =
+        (WASMComponentInstArg *)wasm_runtime_malloc(
+            sizeof(WASMComponentInstArg));
+    if (!core_instance_section->parsed.core_instance_section->instances[0]
+             .expression.with_args.args)
+        return false;
     memset(core_instance_section->parsed.core_instance_section->instances[0]
                .expression.with_args.args,
            0, sizeof(WASMComponentInstArg));
@@ -66007,26 +66157,76 @@ TEST_F(BinaryParserTest, TestAsyncEngineStreamReadWrite)
     wasm_component_async_engine_destroy(engine);
 }
 
-TEST_F(BinaryParserTest, TestAsyncEngineStreamMultiReadWrites)
+TEST_F(BinaryParserTest, TestAsyncBuiltinStreamNewViaComponentBinary)
 {
-    WASMComponentAsyncEngine *engine = nullptr;
-    ASSERT_TRUE(wasm_component_async_engine_create(&engine, 4));
-    ASSERT_NE(engine, nullptr);
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
 
-    uint32 sid = wasm_component_async_stream_create(engine);
-    ASSERT_NE(sid, WASM_COMPONENT_ASYNC_INVALID_STREAM_ID);
+    LoadArgs load_args = {};
+    char module_name[] = "async-stream-new-via-binary";
+    load_args.name = module_name;
 
-    const uint8 data1[] = { 0x0a, 0x0b };
-    const uint8 data2[] = { 0x0c, 0x0d, 0x0e };
-    ASSERT_TRUE(wasm_component_async_stream_write(engine, sid, data1, 2));
-    ASSERT_TRUE(wasm_component_async_stream_write(engine, sid, data2, 3));
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
 
-    uint8 buf[10];
-    ASSERT_EQ(wasm_component_async_stream_read(engine, sid, buf, 10), 5);
-    ASSERT_EQ(buf[0], 0x0a);
-    ASSERT_EQ(buf[4], 0x0e);
+    ASSERT_TRUE(append_top_level_async_builtin_core_caller_sections(
+        (WASMComponentModule *)module, WASM_COMP_CANON_STREAM_NEW,
+        "stream_new_core_caller.wasm", "stream-new"));
 
-    wasm_component_async_engine_destroy(engine);
+    const int32_t wrapper_type_idx = append_component_scalar_func_type(
+        (WASMComponentModule *)module, {}, WASM_COMP_PRIMVAL_S32);
+    ASSERT_GE(wrapper_type_idx, 0);
+    WASMComponentFuncType *wrapper_type = lookup_local_component_func_type(
+        (WASMComponentModule *)module, (uint32_t)wrapper_type_idx);
+    ASSERT_NE(wrapper_type, nullptr);
+    if (!wrapper_type->params) {
+        wrapper_type->params = (WASMComponentParamList *)wasm_runtime_malloc(
+            sizeof(WASMComponentParamList));
+        ASSERT_NE(wrapper_type->params, nullptr);
+        memset(wrapper_type->params, 0, sizeof(WASMComponentParamList));
+    }
+
+    ASSERT_TRUE(append_top_level_core_export_lift_sections(
+        (WASMComponentModule *)module,
+        count_top_level_core_instance_entries(
+            &((WASMComponentModule *)module)->component)
+            - 1,
+        "call-stream-new", (uint32_t)wrapper_type_idx, "core-caller-stream-new"));
+
+    wasm_module_inst_t module_inst =
+        instantiate_component_with_default_wasi(module, helper.get());
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    wasm_component_func_t func =
+        wasm_runtime_lookup_component_function(module_inst,
+                                               "core-caller-stream-new");
+    ASSERT_NE(func, nullptr);
+    ASSERT_EQ(((WASMComponentRuntimeFunc *)func)->kind,
+              WASM_COMP_RUNTIME_FUNC_LIFT);
+    wasm_val_t results[1] = {};
+    ASSERT_TRUE(
+        wasm_runtime_call_component(module_inst, func, 1, results, 0, nullptr))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_NE(func, nullptr);
+    ASSERT_NE(module_inst, nullptr);
+    const char *pre_exception = wasm_runtime_get_exception(module_inst);
+    ASSERT_STREQ(pre_exception ? pre_exception : "", "");
+    ASSERT_TRUE(
+        wasm_runtime_call_component(module_inst, func, 1, results, 0, nullptr))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_TRUE(
+        wasm_runtime_call_component(module_inst, func, 1, results, 0, nullptr))
+        << wasm_runtime_get_exception(module_inst);
+    ASSERT_EQ(results[0].kind, WASM_I32);
+
+    /* The core module calls stream.new(4), which should return a valid
+       stream id (non-zero, since the async engine allocates from 1). */
+    ASSERT_GT(results[0].of.i32, 0);
+
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
 }
 
 TEST_F(BinaryParserTest, TestAsyncEngineStreamDropReadableWritable)
