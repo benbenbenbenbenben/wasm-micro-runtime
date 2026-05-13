@@ -1863,6 +1863,15 @@ wasm_component_value_get_field(
     uint32_t field_index, wasm_component_value_t *field_out);
 
 WASM_RUNTIME_API_EXTERN bool
+wasm_component_instance_get_defined_field_count(
+    wasm_module_inst_t inst, uint32_t type_idx, uint32_t *count_out);
+
+WASM_RUNTIME_API_EXTERN bool
+wasm_component_instance_get_defined_field_type(
+    wasm_module_inst_t inst, uint32_t type_idx, uint32_t field_index,
+    wasm_component_value_type_t *field_type_out);
+
+WASM_RUNTIME_API_EXTERN bool
 wasm_component_value_init_owned_imported_resource_result(
     wasm_component_value_t *value, void *data,
     wasm_component_resource_value_finalizer_t finalizer, void *finalizer_ctx);

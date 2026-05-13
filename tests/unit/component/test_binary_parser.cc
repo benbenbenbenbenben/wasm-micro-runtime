@@ -30246,6 +30246,23 @@ TEST_F(BinaryParserTest, TestPublicComponentCallInvokesLowerReliftedTupleHandle)
     /* Verify type_idx API: defined values should have a valid type_idx.
        The multivalue_record_tuple component has tuple as type index 1. */
     ASSERT_NE(wasm_component_value_get_type_idx(&result), UINT32_MAX);
+    /* Verify introspection APIs */
+    {
+        uint32_t field_count = 0;
+        ASSERT_TRUE(wasm_component_instance_get_defined_field_count(
+            module_inst, wasm_component_value_get_type_idx(&result),
+            &field_count));
+        ASSERT_EQ(field_count, 3u);
+    }
+    {
+        wasm_component_value_type_t field_type = {};
+        ASSERT_TRUE(wasm_component_instance_get_defined_field_type(
+            module_inst, wasm_component_value_get_type_idx(&result),
+            0, &field_type));
+        ASSERT_EQ(field_type.kind, WASM_COMPONENT_VALUE_TYPE_PRIMITIVE);
+        ASSERT_EQ(field_type.type.primitive_type,
+                  WASM_COMPONENT_PRIMITIVE_VALUE_S32);
+    }
     /* Verify get_field API: extract first field (s32=42) */
     {
         wasm_component_value_t field = {};
@@ -64777,6 +64794,93 @@ TEST_F(BinaryParserTest,
 
     wasm_component_value_destroy(&record_value);
     wasm_component_value_destroy(&result);
+    wasm_runtime_deinstantiate(module_inst);
+    wasm_runtime_unload(module);
+}
+
+TEST_F(BinaryParserTest,
+       TestCompositeValueInitDefinedAndGetField)
+{
+    bool ret = helper->read_wasm_file("add.wasm");
+    ASSERT_TRUE(ret);
+
+    LoadArgs load_args = {};
+    char module_name[] = "composite-value-init-defined";
+    load_args.name = module_name;
+
+    wasm_module_t module = wasm_runtime_load_ex(
+        helper->component_raw, helper->wasm_file_size, &load_args,
+        helper->error_buf, (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module, nullptr) << helper->error_buf;
+
+    /* Create record type { a: s32, b: s32 } */
+    const int32_t record_type_idx = append_component_record_type(
+        (WASMComponentModule *)module,
+        { { "a", make_component_primitive_value_type(WASM_COMP_PRIMVAL_S32) },
+          { "b", make_component_primitive_value_type(WASM_COMP_PRIMVAL_S32) } });
+    ASSERT_GE(record_type_idx, 0);
+
+    /* Need at least one function type so the type section is kept */
+    const int32_t func_type_idx = append_component_func_type(
+        (WASMComponentModule *)module,
+        { { "r",
+            make_component_type_index_value_type((uint32_t)record_type_idx) } },
+        make_component_primitive_value_type(WASM_COMP_PRIMVAL_S32));
+    ASSERT_GE(func_type_idx, 0);
+
+    wasm_module_inst_t module_inst =
+        wasm_runtime_instantiate(module, helper->stack_size, helper->heap_size,
+                                 helper->error_buf,
+                                 (uint32_t)sizeof(helper->error_buf));
+    ASSERT_NE(module_inst, nullptr) << helper->error_buf;
+
+    /* Create field values for the record */
+    wasm_component_value_t fields[2] = { make_component_s32_value(17),
+                                         make_component_s32_value(25) };
+    wasm_component_value_t record_value = {};
+
+    /* Use init_defined to construct the record */
+    ASSERT_TRUE(wasm_component_value_init_defined(
+        module_inst, &record_value, (uint32_t)record_type_idx, 2, fields));
+
+    /* Verify type */
+    ASSERT_EQ(record_value.type.kind, WASM_COMPONENT_VALUE_TYPE_DEFINED);
+    ASSERT_EQ(wasm_component_value_get_type_idx(&record_value),
+              (uint32_t)record_type_idx);
+
+    /* Verify field count */
+    {
+        uint32_t count = 0;
+        ASSERT_TRUE(wasm_component_instance_get_defined_field_count(
+            module_inst, (uint32_t)record_type_idx, &count));
+        ASSERT_EQ(count, 2u);
+    }
+
+    /* Extract field 0 (s32=17) */
+    {
+        wasm_component_value_t field = {};
+        ASSERT_TRUE(wasm_component_value_get_field(
+            module_inst, &record_value, 0, &field));
+        ASSERT_EQ(field.type.kind, WASM_COMPONENT_VALUE_TYPE_PRIMITIVE);
+        ASSERT_EQ(field.type.type.primitive_type,
+                  WASM_COMPONENT_PRIMITIVE_VALUE_S32);
+        { auto *d = (const int32 *)wasm_component_value_get_data(&field);
+          ASSERT_NE(d, nullptr); ASSERT_EQ(*d, 17); }
+        wasm_component_value_destroy(&field);
+    }
+    /* Extract field 1 (s32=25) */
+    {
+        wasm_component_value_t field = {};
+        ASSERT_TRUE(wasm_component_value_get_field(
+            module_inst, &record_value, 1, &field));
+        auto *d = (const int32 *)wasm_component_value_get_data(&field);
+        ASSERT_NE(d, nullptr); ASSERT_EQ(*d, 25);
+        wasm_component_value_destroy(&field);
+    }
+
+    wasm_component_value_destroy(&fields[0]);
+    wasm_component_value_destroy(&fields[1]);
+    wasm_component_value_destroy(&record_value);
     wasm_runtime_deinstantiate(module_inst);
     wasm_runtime_unload(module);
 }
