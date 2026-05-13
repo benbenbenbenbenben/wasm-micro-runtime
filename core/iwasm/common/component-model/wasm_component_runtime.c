@@ -3033,6 +3033,9 @@ validate_lowered_import_signature(
                     string_encoding = WASM_COMP_RUNTIME_STRING_ENCODING_UTF8;
                     continue;
                 case WASM_COMP_CANON_OPT_STRING_UTF16:
+                    string_encoding =
+                        WASM_COMP_RUNTIME_STRING_ENCODING_UTF16;
+                    continue;
                 case WASM_COMP_CANON_OPT_STRING_LATIN1_UTF16:
                     return set_component_runtime_error_fmt(
                         error_buf, error_buf_size,
@@ -3375,7 +3378,8 @@ validate_lowered_import_signature(
 
 validate_lowered_result_done:
     if (needs_string
-        && string_encoding != WASM_COMP_RUNTIME_STRING_ENCODING_UTF8)
+        && string_encoding != WASM_COMP_RUNTIME_STRING_ENCODING_UTF8
+        && string_encoding != WASM_COMP_RUNTIME_STRING_ENCODING_UTF16)
         return set_component_runtime_error_fmt(
             error_buf, error_buf_size,
             "component canon lower direct core-call bindings require UTF-8 "
@@ -4025,7 +4029,8 @@ materialize_lowered_import_multi_results(
                 break;
 
             case WASM_COMP_CANON_LIFT_VALUE_STRING:
-                if (lower_string_encoding != WASM_COMP_RUNTIME_STRING_ENCODING_UTF8
+                if ((lower_string_encoding != WASM_COMP_RUNTIME_STRING_ENCODING_UTF8
+                     && lower_string_encoding != WASM_COMP_RUNTIME_STRING_ENCODING_UTF16)
                     || !decode_component_public_string_value(
                         component_inst, &results[i], &type_infos[i], "result", i,
                         &decoded[i].result_bytes, &decoded[i].result_length)) {
@@ -4077,7 +4082,8 @@ materialize_lowered_import_multi_results(
                 size_t count_len = 0;
                 bh_leb_read_status_t status;
 
-                if (lower_string_encoding != WASM_COMP_RUNTIME_STRING_ENCODING_UTF8
+                if ((lower_string_encoding != WASM_COMP_RUNTIME_STRING_ENCODING_UTF8
+                     && lower_string_encoding != WASM_COMP_RUNTIME_STRING_ENCODING_UTF16)
                     || !decode_component_public_list_string_value(
                         component_inst, &results[i], &type_infos[i], "result", i,
                         &decoded[i].result_bytes, &decoded[i].byte_count,
@@ -4879,7 +4885,8 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
                 return;
             }
 
-            if (lower_string_encoding != WASM_COMP_RUNTIME_STRING_ENCODING_UTF8) {
+            if (lower_string_encoding != WASM_COMP_RUNTIME_STRING_ENCODING_UTF8
+                && lower_string_encoding != WASM_COMP_RUNTIME_STRING_ENCODING_UTF16) {
                 if (call_args != stack_args)
                     wasm_runtime_free(call_args);
                 wasm_runtime_set_exception(
@@ -5434,7 +5441,8 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
         }
 
         if (is_string_result) {
-            if (lower_string_encoding != WASM_COMP_RUNTIME_STRING_ENCODING_UTF8
+            if ((lower_string_encoding != WASM_COMP_RUNTIME_STRING_ENCODING_UTF8
+                 && lower_string_encoding != WASM_COMP_RUNTIME_STRING_ENCODING_UTF16)
                 || !decode_component_public_string_value(
                     component_inst, &stack_results[0], &result_type_info, "result", 0,
                     &result_bytes, &result_length)) {
@@ -5454,7 +5462,8 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
             byte_count = result_length;
         }
         else if (is_list_string_result) {
-            if (lower_string_encoding != WASM_COMP_RUNTIME_STRING_ENCODING_UTF8
+            if ((lower_string_encoding != WASM_COMP_RUNTIME_STRING_ENCODING_UTF8
+                 && lower_string_encoding != WASM_COMP_RUNTIME_STRING_ENCODING_UTF16)
                 || !decode_component_public_list_string_value(
                     component_inst, &stack_results[0], &result_type_info, "result",
                     0, &result_bytes, &byte_count, &result_length)) {
@@ -9543,7 +9552,9 @@ flatten_component_public_composite_bytes(
                     param_index);
 
             if (function->string_encoding
-                != WASM_COMP_RUNTIME_STRING_ENCODING_UTF8)
+                != WASM_COMP_RUNTIME_STRING_ENCODING_UTF8
+                && function->string_encoding
+                != WASM_COMP_RUNTIME_STRING_ENCODING_UTF16)
                 return set_component_call_error(
                     inst, "component canon lift function only supports UTF-8 "
                           "string encoding");
@@ -9568,11 +9579,29 @@ flatten_component_public_composite_bytes(
 
             if (payload_len > 0) {
                 if (!get_component_canon_memory_bytes(inst, function, guest_ptr,
-                                                      payload_len,
-                                                      "string parameter buffer",
-                                                      &guest_bytes))
+                                                       payload_len,
+                                                       "string parameter buffer",
+                                                       &guest_bytes))
                     return false;
-                memcpy(guest_bytes, payload, payload_len);
+                if (function->string_encoding
+                        == WASM_COMP_RUNTIME_STRING_ENCODING_UTF16
+                    && payload_len > 0) {
+                    uint32 utf16_len = payload_len * 2;
+                    uint8 *utf16_bytes = wasm_runtime_malloc(utf16_len);
+                    if (!utf16_bytes)
+                        return set_component_call_error(
+                            inst, "Failed to allocate utf16 buffer");
+                    for (uint32 k = 0; k < payload_len; k++) {
+                        utf16_bytes[k * 2] = payload[k];
+                        utf16_bytes[k * 2 + 1] = 0;
+                    }
+                    memcpy(guest_bytes, utf16_bytes, utf16_len);
+                    wasm_runtime_free(utf16_bytes);
+                    payload_len = utf16_len;
+                }
+                else {
+                    memcpy(guest_bytes, payload, payload_len);
+                }
             }
 
             core_args[*core_arg_index_io].kind = WASM_I32;
@@ -9746,7 +9775,9 @@ flatten_component_public_composite_bytes(
                 uint32 string_cursor = 0;
 
                 if (function->string_encoding
-                    != WASM_COMP_RUNTIME_STRING_ENCODING_UTF8)
+                    != WASM_COMP_RUNTIME_STRING_ENCODING_UTF8
+                    && function->string_encoding
+                    != WASM_COMP_RUNTIME_STRING_ENCODING_UTF16)
                     return set_component_call_error(
                         inst, "component canon lift function only supports UTF-8 "
                               "string encoding");
@@ -10615,6 +10646,7 @@ flatten_component_public_param_value(
                     guest_bytes[i * 2] = payload[i];
                     guest_bytes[i * 2 + 1] = 0;
                 }
+                element_count = utf16_len;
                 goto string_marshal_common;
             }
             else {
@@ -11680,7 +11712,8 @@ build_lowered_import_composite_param_payload(
                     "parameters must flatten to i32 pointer/length pairs");
                 return false;
             }
-            if (string_encoding != WASM_COMP_RUNTIME_STRING_ENCODING_UTF8) {
+            if (string_encoding != WASM_COMP_RUNTIME_STRING_ENCODING_UTF8
+                && string_encoding != WASM_COMP_RUNTIME_STRING_ENCODING_UTF16) {
                 wasm_runtime_set_exception(
                     caller_module_inst,
                     "component lowered core-call trampoline only supports UTF-8 "
@@ -11880,7 +11913,8 @@ build_lowered_import_composite_param_payload(
                 uint32 table_byte_count = 0;
                 uint8 *caller_bytes = NULL;
 
-                if (string_encoding != WASM_COMP_RUNTIME_STRING_ENCODING_UTF8) {
+                if (string_encoding != WASM_COMP_RUNTIME_STRING_ENCODING_UTF8
+                    && string_encoding != WASM_COMP_RUNTIME_STRING_ENCODING_UTF16) {
                     wasm_runtime_set_exception(
                         caller_module_inst,
                         "component lowered core-call trampoline only supports "
@@ -12217,6 +12251,11 @@ append_component_result_owned_resource_leaf(
 }
 
 static bool
+convert_utf16_bytes_to_utf8(const uint8 *utf16_bytes, uint32 utf16_byte_len,
+                            uint8 **utf8_out, uint32 *utf8_len_out,
+                            WASMComponentInstance *inst);
+
+static bool
 decode_component_canon_composite_result_value(
     WASMComponentInstance *inst, const WASMComponentRuntimeFunc *function,
     const WASMComponent *component, const WASMComponentValueType *value_type,
@@ -12248,6 +12287,23 @@ decode_component_canon_composite_result_value(
                         inst, function, payload_ptr, payload_len,
                         "composite string result payload", &payload_bytes))
                     return false;
+                if (function->string_encoding
+                        == WASM_COMP_RUNTIME_STRING_ENCODING_UTF16) {
+                    uint8 *utf8_bytes = NULL;
+                    uint32 utf8_len = 0;
+
+                    if (!convert_utf16_bytes_to_utf8(
+                            payload_bytes, payload_len, &utf8_bytes,
+                            &utf8_len, inst))
+                        return false;
+                    if (!append_component_result_string_leaf(
+                            inst, builder, utf8_bytes, utf8_len)) {
+                        wasm_runtime_free(utf8_bytes);
+                        return false;
+                    }
+                    wasm_runtime_free(utf8_bytes);
+                    return true;
+                }
                 if (!wasm_component_validate_utf8(payload_bytes, payload_len))
                     return set_component_call_error(
                         inst, "component canon lift function result does not "
@@ -15394,7 +15450,8 @@ host_import_cleanup_fail:
 
     if ((composite_result_has_string || composite_result_has_list_string
          || function->has_string_result || multi_result_retptr_has_string)
-        && effective_string_encoding != WASM_COMP_RUNTIME_STRING_ENCODING_UTF8)
+        && effective_string_encoding != WASM_COMP_RUNTIME_STRING_ENCODING_UTF8
+        && effective_string_encoding != WASM_COMP_RUNTIME_STRING_ENCODING_UTF16)
         return set_component_call_error(
             inst, "component canon lift function only supports UTF-8 string "
             "encoding");
