@@ -508,10 +508,49 @@ restore_component_public_composite_resources(
         }
         else if (resource_value->kind
                  == WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_BORROWED) {
-            return set_component_value_error(
-                error_buf, error_buf_size,
-                "component runtime values do not support composite borrowed "
-                "resource results");
+            /* Support borrowed resources inside composites by re-borrowing
+               from the original owner. */
+            WASMComponentRuntimeResourceState *owner_state = NULL;
+            uint32 owner_type_idx = WASM_COMPONENT_RESOURCE_INVALID_TYPE_IDX;
+            uint32 owner_handle = 0;
+            uint32 new_borrowed_handle = 0;
+            char local_buf[128] = { 0 };
+
+            if (!wasm_component_resource_get_borrowed_owner(
+                    resource_value, &owner_state, &owner_type_idx, &owner_handle,
+                    local_buf, (uint32)sizeof(local_buf)))
+                return set_component_value_error(
+                    error_buf, error_buf_size,
+                    "component runtime composite borrowed resource leaf "
+                    "could not resolve its owner");
+
+            if (!owner_state || owner_handle == 0)
+                return set_component_value_error(
+                    error_buf, error_buf_size,
+                    "component runtime composite borrowed resource leaf "
+                    "has no valid owner");
+
+            if (!wasm_component_resource_create_borrowed_handle(
+                    owner_state, owner_type_idx, owner_handle,
+                    &new_borrowed_handle, local_buf,
+                    (uint32)sizeof(local_buf)))
+                return set_component_value_error(
+                    error_buf, error_buf_size,
+                    "component runtime composite borrowed resource leaf "
+                    "could not create borrowed handle");
+
+            if (!wasm_component_resource_borrow_handle(
+                    owner_state, owner_type_idx, new_borrowed_handle,
+                    resource_value, local_buf, (uint32)sizeof(local_buf))) {
+                wasm_component_resource_release_borrowed_handle(
+                    owner_state, owner_type_idx, new_borrowed_handle,
+                    local_buf, (uint32)sizeof(local_buf));
+                return set_component_value_error(
+                    error_buf, error_buf_size,
+                    "component runtime composite borrowed resource leaf "
+                    "could not create borrowed value");
+            }
+            continue;
         }
         else if (resource_value->kind
                  == WASM_COMPONENT_PUBLIC_RESOURCE_VALUE_PENDING_IMPORTED_RESULT) {
