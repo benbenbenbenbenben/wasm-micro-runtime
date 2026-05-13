@@ -408,6 +408,7 @@ struct WASMComponentResultPayloadBuilder {
     uint8 *storage;
     uint32 size;
     uint32 capacity;
+    uint32 type_idx;
     WASMComponentPublicResourceValue inline_resource_values[4];
     WASMComponentPublicResourceValue *resource_values;
     uint32 resource_count;
@@ -4844,6 +4845,11 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
             WASMComponentResultPayloadBuilder builder;
 
             init_component_result_payload_builder(&builder);
+            if (component_type->params->params[i].value_type->type
+                    == WASM_COMP_VAL_TYPE_IDX)
+                builder.type_idx =
+                    component_type->params->params[i].value_type->type_specific
+                        .type_idx;
             call_args[i].type.kind = WASM_COMPONENT_VALUE_TYPE_DEFINED;
             if (!build_lowered_import_composite_param_payload(
                     component_inst, component,
@@ -4885,6 +4891,11 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
             uint32 payload_width = flat_count > 0 ? flat_count - 1 : 0;
 
             init_component_result_payload_builder(&builder);
+            if (component_type->params->params[i].value_type->type
+                    == WASM_COMP_VAL_TYPE_IDX)
+                builder.type_idx =
+                    component_type->params->params[i].value_type->type_specific
+                        .type_idx;
             call_args[i].type.kind = WASM_COMPONENT_VALUE_TYPE_DEFINED;
 
             /* Build payload via the composite builder */
@@ -5201,6 +5212,11 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
         }
 
         call_args[i].type.kind = WASM_COMPONENT_VALUE_TYPE_DEFINED;
+        if (component_type->params->params[i].value_type->type
+                == WASM_COMP_VAL_TYPE_IDX)
+            call_args[i].type.type.type_idx =
+                component_type->params->params[i].value_type->type_specific
+                    .type_idx;
         if (type_info.kind == WASM_COMP_CANON_LIFT_VALUE_LIST_STRING) {
             uint32 element_count = (uint32)raw_args[core_param_index + 1];
             uint32 arg_ptr = (uint32)raw_args[core_param_index];
@@ -5233,6 +5249,11 @@ component_lowered_import_trampoline(WASMExecEnv *exec_env, uint64 *raw_args)
                                                                  arg_ptr)
                                : NULL;
             init_component_result_payload_builder(&builder);
+            if (component_type->params->params[i].value_type->type
+                    == WASM_COMP_VAL_TYPE_IDX)
+                builder.type_idx =
+                    component_type->params->params[i].value_type->type_specific
+                        .type_idx;
             {
                 uint8 count_buf[5];
                 uint32 count_len =
@@ -12176,6 +12197,7 @@ finish_component_result_payload(
 {
     wasm_component_value_destroy(value);
     value->type.kind = WASM_COMPONENT_VALUE_TYPE_DEFINED;
+    value->type.type.type_idx = builder->type_idx;
     value->byte_size = builder->size;
 
     if (builder->resource_count > 0) {
@@ -13820,6 +13842,8 @@ init_component_public_memory_composite_result(
         return false;
 
     init_component_result_payload_builder(&builder);
+    if (value_type->type == WASM_COMP_VAL_TYPE_IDX)
+        builder.type_idx = value_type->type_specific.type_idx;
     if (!decode_component_canon_composite_result_value(
             inst, function, component, value_type, result_index, ret_area_bytes,
             ret_area_size, 0, &builder)
@@ -16844,6 +16868,11 @@ host_import_cleanup_fail:
                 WASMComponentResultPayloadBuilder builder;
 
                 init_component_result_payload_builder(&builder);
+                if (component_type->results->results[i].type
+                        == WASM_COMP_VAL_TYPE_IDX)
+                    builder.type_idx =
+                        component_type->results->results[i].type_specific
+                            .type_idx;
                 if (!decode_component_canon_composite_result_value(
                         inst, function, component,
                         &component_type->results->results[i], i, ret_area_bytes,
@@ -22946,4 +22975,244 @@ wasm_component_module_deinstantiate(WASMComponentInstance *inst)
 
     destroy_component_instance_graph(inst);
     wasm_runtime_free(inst);
+
+}
+
+bool
+wasm_component_value_init_defined(
+    wasm_module_inst_t inst, wasm_component_value_t *value,
+    uint32_t type_idx, uint32_t num_fields,
+    const wasm_component_value_t *fields)
+{
+    WASMComponentInstance *component_inst = (WASMComponentInstance *)inst;
+    const WASMComponent *component = &component_inst->module->component;
+    const WASMComponentTypes *type_entry =
+        wasm_component_lookup_type(component, type_idx);
+    WASMComponentDefValType *def_type;
+    WASMComponentResultPayloadBuilder builder;
+
+    if (!type_entry || type_entry->tag != WASM_COMP_DEF_TYPE
+        || !type_entry->type.def_val_type)
+        return false;
+
+    def_type = type_entry->type.def_val_type;
+    if (def_type->tag != WASM_COMP_DEF_VAL_RECORD
+        && def_type->tag != WASM_COMP_DEF_VAL_TUPLE)
+        return false;
+
+    if ((def_type->tag == WASM_COMP_DEF_VAL_RECORD
+         && (!def_type->def_val.record
+             || def_type->def_val.record->count != num_fields))
+        || (def_type->tag == WASM_COMP_DEF_VAL_TUPLE
+            && (!def_type->def_val.tuple
+                || def_type->def_val.tuple->count != num_fields)))
+        return false;
+
+    init_component_result_payload_builder(&builder);
+    builder.type_idx = type_idx;
+
+    for (uint32 i = 0; i < num_fields; i++) {
+        const WASMComponentValueType *field_type =
+            def_type->tag == WASM_COMP_DEF_VAL_RECORD
+                ? def_type->def_val.record->fields[i].value_type
+                : &def_type->def_val.tuple->element_types[i];
+
+        if (field_type->type == WASM_COMP_VAL_TYPE_PRIMVAL) {
+            WASMComponentCanonLiftValueInfo info;
+            wasm_val_t flattened = { 0 };
+            wasm_component_value_t encoded = { 0 };
+
+            memset(&info, 0, sizeof(info));
+            info.kind = WASM_COMP_CANON_LIFT_VALUE_SCALAR;
+            info.prim_type = field_type->type_specific.primval_type;
+            if (!component_scalar_prim_to_core(info.prim_type, &info.core_type,
+                                               &info.public_kind))
+                goto fail;
+
+            if (!decode_component_public_scalar_value(
+                    component_inst, &fields[i], &info, "field", i, &flattened)
+                || !encode_component_public_scalar_value(&info, &flattened,
+                                                          &encoded))
+                goto fail;
+
+            {
+                const uint8 *data = wasm_component_value_get_data(&encoded);
+                if (!append_component_result_payload_bytes(
+                        component_inst, &builder, data, encoded.byte_size)) {
+                    wasm_component_value_destroy(&encoded);
+                    goto fail;
+                }
+                wasm_component_value_destroy(&encoded);
+            }
+        }
+        else if (field_type->type == WASM_COMP_VAL_TYPE_IDX) {
+            /* Nested defined type: recurse */
+            wasm_component_value_t nested = { 0 };
+            uint32 nested_type_idx = field_type->type_specific.type_idx;
+
+            if (!wasm_component_value_init_defined(
+                    inst, &nested, nested_type_idx, 1, &fields[i])
+                || (fields[i].byte_size > 0
+                    && !append_component_result_payload_bytes(
+                        component_inst, &builder,
+                        wasm_component_value_get_data(&nested),
+                        nested.byte_size))) {
+                wasm_component_value_destroy(&nested);
+                goto fail;
+            }
+            wasm_component_value_destroy(&nested);
+        }
+        else {
+            goto fail;
+        }
+    }
+
+    if (!finish_component_result_payload(value, &builder)) {
+        destroy_component_result_payload_builder(&builder);
+        return false;
+    }
+    destroy_component_result_payload_builder(&builder);
+    return true;
+
+fail:
+    destroy_component_result_payload_builder(&builder);
+    return false;
+}
+
+bool
+wasm_component_value_get_field(
+    wasm_module_inst_t inst, const wasm_component_value_t *value,
+    uint32_t field_index, wasm_component_value_t *field_out)
+{
+    WASMComponentInstance *component_inst = (WASMComponentInstance *)inst;
+    const WASMComponent *component = &component_inst->module->component;
+    const uint8 *data;
+    uint32_t type_idx;
+
+    if (!value || value->type.kind != WASM_COMPONENT_VALUE_TYPE_DEFINED)
+        return false;
+
+    type_idx = value->type.type.type_idx;
+    {
+        const WASMComponentTypes *type_entry =
+            wasm_component_lookup_type(component, type_idx);
+        WASMComponentDefValType *def_type;
+        const WASMComponentValueType *field_type = NULL;
+        uint32 field_size = 0, field_align = 1, field_offset = 0;
+        uint32 cursor = 0;
+
+        if (!type_entry || type_entry->tag != WASM_COMP_DEF_TYPE
+            || !type_entry->type.def_val_type)
+            return false;
+
+        def_type = type_entry->type.def_val_type;
+        if (def_type->tag == WASM_COMP_DEF_VAL_RECORD) {
+            if (!def_type->def_val.record
+                || field_index >= def_type->def_val.record->count)
+                return false;
+            for (uint32 i = 0; i <= field_index; i++) {
+                uint32 fsize = 0, falign = 1, foffset = 0;
+                bool ign_string = false, ign_list_scalar = false,
+                     ign_list_string = false;
+                if (!compute_component_canon_abi_layout(
+                        component_inst, component_inst->resource_state, component,
+                        def_type->def_val.record->fields[i].value_type,
+                        field_index, &fsize, &falign,
+                        &ign_string, &ign_list_scalar, &ign_list_string)
+                    || !align_component_canon_abi_offset(cursor, falign, &foffset))
+                    return false;
+                if (i == field_index) {
+                    field_type =
+                        def_type->def_val.record->fields[i].value_type;
+                    field_offset = foffset;
+                    field_size = fsize;
+                }
+                cursor = foffset + fsize;
+            }
+        }
+        else if (def_type->tag == WASM_COMP_DEF_VAL_TUPLE) {
+            if (!def_type->def_val.tuple
+                || field_index >= def_type->def_val.tuple->count)
+                return false;
+            for (uint32 i = 0; i <= field_index; i++) {
+                uint32 fsize = 0, falign = 1, foffset = 0;
+                bool ign_string = false, ign_list_scalar = false,
+                     ign_list_string = false;
+                if (!compute_component_canon_abi_layout(
+                        component_inst, component_inst->resource_state, component,
+                        &def_type->def_val.tuple->element_types[i],
+                        field_index, &fsize, &falign,
+                        &ign_string, &ign_list_scalar, &ign_list_string)
+                    || !align_component_canon_abi_offset(cursor, falign, &foffset))
+                    return false;
+                if (i == field_index) {
+                    field_type = &def_type->def_val.tuple->element_types[i];
+                    field_offset = foffset;
+                    field_size = fsize;
+                }
+                cursor = foffset + fsize;
+            }
+        }
+        else
+            return false;
+
+        if (!field_type)
+            return false;
+
+        data = wasm_component_value_get_data(value);
+        if (!data || value->byte_size < field_offset + field_size)
+            return false;
+
+        {
+            /* Build a simple scalar value from the extracted bytes */
+            wasm_val_t scalar_val = { 0 };
+            uint32 consumed = 0;
+            WASMComponentCanonLiftValueInfo info;
+
+            memset(&info, 0, sizeof(info));
+            if (field_type->type == WASM_COMP_VAL_TYPE_PRIMVAL) {
+                info.kind = WASM_COMP_CANON_LIFT_VALUE_SCALAR;
+                info.prim_type = field_type->type_specific.primval_type;
+                if (!component_scalar_prim_to_core(info.prim_type,
+                                                   &info.core_type,
+                                                   &info.public_kind))
+                    return false;
+            }
+            else if (field_type->type == WASM_COMP_VAL_TYPE_IDX) {
+                info.kind = WASM_COMP_CANON_LIFT_VALUE_SCALAR;
+                info.declared_as_defined = true;
+                info.prim_type = WASM_COMP_PRIMVAL_U32;
+                info.core_type = VALUE_TYPE_I32;
+                info.public_kind = WASM_I32;
+            }
+            else
+                return false;
+
+            if (!decode_component_public_scalar_prefix(
+                    component_inst, data + field_offset,
+                    value->byte_size - field_offset,
+                    info.prim_type, info.public_kind, "field",
+                    field_index, &scalar_val, &consumed))
+                return false;
+
+            memset(field_out, 0, sizeof(*field_out));
+            if (field_type->type == WASM_COMP_VAL_TYPE_IDX) {
+                field_out->type.kind = WASM_COMPONENT_VALUE_TYPE_DEFINED;
+                field_out->type.type.type_idx =
+                    field_type->type_specific.type_idx;
+            }
+            else {
+                field_out->type.kind = WASM_COMPONENT_VALUE_TYPE_PRIMITIVE;
+                field_out->type.type.primitive_type =
+                    (wasm_component_primitive_value_kind_t)info.prim_type;
+            }
+
+            field_out->storage_kind = WASM_COMPONENT_VALUE_STORAGE_INLINE;
+            field_out->byte_size = consumed;
+            memcpy(field_out->storage.inline_storage, data + field_offset,
+                   consumed);
+            return true;
+        }
+    }
+    return false;
 }

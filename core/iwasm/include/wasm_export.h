@@ -168,6 +168,7 @@ typedef struct wasm_component_value_type_t {
     wasm_component_value_type_kind_t kind;
     union {
         wasm_component_primitive_value_kind_t primitive_type;
+        uint32_t type_idx;
     } type;
 } wasm_component_value_type_t;
 
@@ -1846,6 +1847,20 @@ wasm_runtime_get_component_export_value(const wasm_module_inst_t module_inst,
 
 WASM_RUNTIME_API_EXTERN const void *
 wasm_component_value_get_data(const wasm_component_value_t *value);
+
+WASM_RUNTIME_API_EXTERN uint32_t
+wasm_component_value_get_type_idx(const wasm_component_value_t *value);
+
+WASM_RUNTIME_API_EXTERN bool
+wasm_component_value_init_defined(
+    wasm_module_inst_t inst, wasm_component_value_t *value,
+    uint32_t type_idx, uint32_t num_fields,
+    const wasm_component_value_t *fields);
+
+WASM_RUNTIME_API_EXTERN bool
+wasm_component_value_get_field(
+    wasm_module_inst_t inst, const wasm_component_value_t *value,
+    uint32_t field_index, wasm_component_value_t *field_out);
 
 WASM_RUNTIME_API_EXTERN bool
 wasm_component_value_init_owned_imported_resource_result(

@@ -301,6 +301,14 @@ wasm_component_value_get_data(const wasm_component_value_t *value)
     return get_component_public_value_data(value);
 }
 
+WASM_RUNTIME_API_EXTERN uint32_t
+wasm_component_value_get_type_idx(const wasm_component_value_t *value)
+{
+    if (!value || value->type.kind != WASM_COMPONENT_VALUE_TYPE_DEFINED)
+        return UINT32_MAX;
+    return value->type.type.type_idx;
+}
+
 WASM_RUNTIME_API_EXTERN bool
 wasm_component_value_init_owned_imported_resource_result(
     wasm_component_value_t *value, void *data,

@@ -30243,6 +30243,21 @@ TEST_F(BinaryParserTest, TestPublicComponentCallInvokesLowerReliftedTupleHandle)
     ASSERT_EQ(memcmp(wasm_component_value_get_data(&result), expected_payload.data(),
                      expected_payload.size()),
               0);
+    /* Verify type_idx API: defined values should have a valid type_idx.
+       The multivalue_record_tuple component has tuple as type index 1. */
+    ASSERT_NE(wasm_component_value_get_type_idx(&result), UINT32_MAX);
+    /* Verify get_field API: extract first field (s32=42) */
+    {
+        wasm_component_value_t field = {};
+        ASSERT_TRUE(wasm_component_value_get_field(
+            module_inst, &result, 0, &field));
+        ASSERT_EQ(field.type.kind, WASM_COMPONENT_VALUE_TYPE_PRIMITIVE);
+        ASSERT_EQ(field.type.type.primitive_type,
+                  WASM_COMPONENT_PRIMITIVE_VALUE_S32);
+        { auto *d = (const int32 *)wasm_component_value_get_data(&field);
+          ASSERT_NE(d, nullptr); ASSERT_EQ(*d, 42); }
+        wasm_component_value_destroy(&field);
+    }
 
     wasm_component_value_destroy(&result);
     wasm_runtime_deinstantiate(module_inst);
