@@ -3641,7 +3641,9 @@ validate_lowered_import_composite_param_signature(
                         && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_TUPLE
                         && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_OPTION
                         && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_RESULT
-                        && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_VARIANT))
+                        && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_VARIANT
+                        && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_OWN
+                        && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_BORROW))
                     return set_component_runtime_error_fmt(
                         error_buf, error_buf_size,
                         "component canon lower direct core-call bindings only "
@@ -6524,7 +6526,9 @@ resolve_component_lift_list_scalar_usage(const WASMComponent *component,
                 || elem_tag == WASM_COMP_DEF_VAL_TUPLE
                 || elem_tag == WASM_COMP_DEF_VAL_OPTION
                 || elem_tag == WASM_COMP_DEF_VAL_RESULT
-                || elem_tag == WASM_COMP_DEF_VAL_VARIANT) {
+                || elem_tag == WASM_COMP_DEF_VAL_VARIANT
+                || elem_tag == WASM_COMP_DEF_VAL_OWN
+                || elem_tag == WASM_COMP_DEF_VAL_BORROW) {
                 *is_list_scalar = true;
                 return true;
             }
@@ -10230,7 +10234,9 @@ flatten_component_public_composite_bytes(
                         && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_TUPLE
                         && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_OPTION
                         && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_RESULT
-                        && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_VARIANT))
+                        && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_VARIANT
+                        && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_OWN
+                        && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_BORROW))
                     return set_component_composite_param_list_scalar_leaf_error(
                         inst, param_index);
                 element_size = component_type_flat_byte_size(
@@ -11847,7 +11853,9 @@ compute_component_canon_abi_layout(WASMComponentInstance *inst,
                         && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_TUPLE
                         && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_OPTION
                         && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_RESULT
-                        && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_VARIANT))
+                        && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_VARIANT
+                        && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_OWN
+                        && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_BORROW))
                     return set_component_call_error_fmt(
                         inst, "component canon lift function result %u only supports "
                               "variable-length list<scalar>/list<string> leaves "
@@ -13332,7 +13340,9 @@ decode_component_canon_composite_result_value(
                         && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_TUPLE
                         && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_OPTION
                         && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_RESULT
-                        && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_VARIANT))
+                        && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_VARIANT
+                        && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_OWN
+                        && elem_shape.def_type->tag != WASM_COMP_DEF_VAL_BORROW))
                     return set_component_call_error_fmt(
                         inst, "component canon lift function result %u only supports "
                               "variable-length list<scalar>/list<string> leaves "
