@@ -243,6 +243,7 @@ typedef struct wasm_component_import_binding_t {
         wasm_component_component_t component;
         wasm_module_t core_module;
         wasm_component_resource_type_import_binding_t resource_type;
+        wasm_component_resource_type_t resource_type_handle;
     } value;
 } wasm_component_import_binding_t;
 
@@ -1908,6 +1909,11 @@ wasm_component_instance_get_defined_field_type(
 
 WASM_RUNTIME_API_EXTERN bool
 wasm_component_value_init_owned_imported_resource_result(
+    wasm_component_value_t *value, void *data,
+    wasm_component_resource_value_finalizer_t finalizer, void *finalizer_ctx);
+
+WASM_RUNTIME_API_EXTERN bool
+wasm_component_value_init_owned_local_resource_result(
     wasm_component_value_t *value, void *data,
     wasm_component_resource_value_finalizer_t finalizer, void *finalizer_ctx);
 

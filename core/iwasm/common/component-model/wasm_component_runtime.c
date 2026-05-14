@@ -22783,6 +22783,16 @@ component_import_binding_to_ref(const wasm_component_import_binding_t *binding,
             out_ref->type = WASM_COMP_RUNTIME_REF_CORE_MODULE;
             out_ref->of.core_module = binding->value.core_module;
             return true;
+        case WASM_COMPONENT_EXTERN_KIND_RESOURCE_TYPE:
+            if (!binding->value.resource_type_handle)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "component import binding \"%s\" is missing a resource type "
+                    "handle",
+                    binding->name ? binding->name : "<unnamed>");
+            out_ref->type = WASM_COMP_RUNTIME_REF_RESOURCE_TYPE;
+            out_ref->of.resource_type = binding->value.resource_type_handle;
+            return true;
         default:
             return set_component_runtime_error_fmt(
                 error_buf, error_buf_size,
@@ -22825,6 +22835,41 @@ append_top_level_component_import(WASMComponentInstance *inst,
         case WASM_COMP_RUNTIME_REF_CORE_MODULE:
             inst->core_modules[inst->core_module_count++] = ref.of.core_module;
             return true;
+        case WASM_COMP_RUNTIME_REF_RESOURCE_TYPE:
+        {
+            const WASMComponentRuntimeResourceType *src_type =
+                ref.of.resource_type;
+            if (!src_type)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "resource type import resolved to null");
+            if (!inst->resource_state)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "resource type import requires a resource state");
+            if (!src_type->import_name)
+                return set_component_runtime_error_fmt(
+                    error_buf, error_buf_size,
+                    "resource type import has no name");
+            for (uint32 i = 0; i < inst->resource_state->type_count; i++) {
+                const WASMComponentRuntimeResourceType *target_type =
+                    wasm_component_resource_lookup_runtime_type_const(
+                        inst->resource_state, i);
+                if (target_type
+                    && target_type->kind
+                           == WASM_COMP_RUNTIME_RESOURCE_TYPE_IMPORTED
+                    && target_type->import_name
+                    && strcmp(target_type->import_name,
+                              src_type->import_name) == 0) {
+                    return true;
+                }
+            }
+            return set_component_runtime_error_fmt(
+                error_buf, error_buf_size,
+                "resource type import \"%s\" does not match any imported "
+                "resource type slot",
+                src_type->import_name);
+        }
         default:
             return set_component_runtime_error_fmt(
                 error_buf, error_buf_size,
@@ -22940,10 +22985,31 @@ resolve_top_level_component_imports(
                         return false;
                 }
                 else if (binding->kind == WASM_COMPONENT_EXTERN_KIND_RESOURCE_TYPE) {
-                    if (!bind_top_level_imported_resource_type(
-                            inst, component_import, binding, error_buf,
-                            error_buf_size))
-                        return false;
+                    if (binding->value.resource_type.drop_callback) {
+                        /* Host callback binding for imported resource type */
+                        if (!bind_top_level_imported_resource_type(
+                                inst, component_import, binding, error_buf,
+                                error_buf_size))
+                            return false;
+                    }
+                    else if (binding->value.resource_type_handle) {
+                        /* Resource type handle binding for imported type */
+                        if (!component_import_binding_to_ref(binding, &ref,
+                                                             error_buf,
+                                                             error_buf_size)
+                            || !validate_component_import_binding_type(
+                                &inst->module->component, component_import, ref,
+                                error_buf, error_buf_size)
+                            || !append_top_level_component_import(
+                                inst, ref, error_buf, error_buf_size))
+                            return false;
+                    }
+                    else
+                        return set_component_runtime_error_fmt(
+                            error_buf, error_buf_size,
+                            "component import \"%s\" resource type binding is "
+                            "missing both callbacks and a resource type handle",
+                            import_name);
                 }
                 else if (!component_import_binding_to_ref(binding, &ref, error_buf,
                                                           error_buf_size)
