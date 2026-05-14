@@ -9,6 +9,7 @@
 #include "wasm_component.h"
 #include "wasm_component_runtime.h"
 #include "wasm_export.h"
+#include "bh_platform.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -108,6 +109,7 @@ typedef struct WASMComponentAsyncEngine {
     bool dispatching_callback;
     bool backpressure_enabled;
     uint32 current_task_id;
+    korp_mutex lock;
 } WASMComponentAsyncEngine;
 
 bool

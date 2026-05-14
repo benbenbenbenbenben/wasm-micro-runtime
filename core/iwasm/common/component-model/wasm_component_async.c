@@ -101,6 +101,8 @@ wasm_component_async_engine_create(
     memset(engine->waitable_sets, 0,
            sizeof(WASMComponentAsyncWaitableSet) * engine->waitable_set_capacity);
 
+    os_mutex_init(&engine->lock);
+
     engine->next_task_id = 1;
     engine->next_stream_id = 1;
     engine->next_future_id = 1;
@@ -172,6 +174,8 @@ wasm_component_async_engine_destroy(
     if (engine->waitable_sets)
         wasm_runtime_free(engine->waitable_sets);
 
+    os_mutex_destroy(&engine->lock);
+
     if (engine->pending_queue)
         wasm_runtime_free(engine->pending_queue);
     wasm_runtime_free(engine);
@@ -237,6 +241,8 @@ wasm_component_async_create_task(
     if (!engine || !function)
         return WASM_COMPONENT_ASYNC_INVALID_TASK_ID;
 
+    os_mutex_lock(&engine->lock);
+
     task_id = engine->next_task_id++;
     if (task_id == 0)
         task_id = engine->next_task_id++;
@@ -247,8 +253,10 @@ wasm_component_async_create_task(
         uint32 new_capacity = engine->task_capacity * 2;
         WASMComponentAsyncTask *new_tasks = wasm_runtime_realloc(
             engine->tasks, sizeof(WASMComponentAsyncTask) * new_capacity);
-        if (!new_tasks)
+        if (!new_tasks) {
+            os_mutex_unlock(&engine->lock);
             return WASM_COMPONENT_ASYNC_INVALID_TASK_ID;
+        }
         engine->tasks = new_tasks;
         memset(&engine->tasks[engine->task_capacity], 0,
                sizeof(WASMComponentAsyncTask) * (new_capacity - engine->task_capacity));
@@ -290,6 +298,8 @@ wasm_component_async_create_task(
 
     engine->task_count++;
     enqueue_pending_task(engine, task_id);
+
+    os_mutex_unlock(&engine->lock);
     return task_id;
 }
 
@@ -307,23 +317,30 @@ wasm_component_async_poll_task(
     if (!engine)
         return false;
 
+    os_mutex_lock(&engine->lock);
     task_id = dequeue_pending_task(engine);
-    if (task_id == WASM_COMPONENT_ASYNC_INVALID_TASK_ID)
+    if (task_id == WASM_COMPONENT_ASYNC_INVALID_TASK_ID) {
+        os_mutex_unlock(&engine->lock);
         return true;
+    }
 
     task_idx = find_task_index(engine, task_id);
-    if (task_idx < 0)
+    if (task_idx < 0) {
+        os_mutex_unlock(&engine->lock);
         return true;
+    }
 
     task = &engine->tasks[task_idx];
     task->state = WASM_COMP_ASYNC_TASK_RUNNING;
     engine->current_task_id = task_id;
+    os_mutex_unlock(&engine->lock);
 
     call_ok = wasm_runtime_call_component_values(
         (wasm_module_inst_t)inst, (wasm_component_func_t)task->function,
         task->num_results, task->results,
         task->num_args, task->args);
 
+    os_mutex_lock(&engine->lock);
     engine->current_task_id = UINT32_MAX;
 
     task->state = call_ok ? WASM_COMP_ASYNC_TASK_COMPLETED
@@ -334,9 +351,12 @@ wasm_component_async_poll_task(
         && task->function->callback_func_idx != UINT32_MAX
         && task->function->callback_func_idx < inst->core_func_count) {
         engine->dispatching_callback = true;
+        os_mutex_unlock(&engine->lock);
         wasm_component_async_dispatch_callback(engine, inst, task);
+        os_mutex_lock(&engine->lock);
         engine->dispatching_callback = false;
     }
+    os_mutex_unlock(&engine->lock);
 
     if (completed_task_id_out)
         *completed_task_id_out = task_id;
@@ -382,21 +402,28 @@ wasm_component_async_cancel_task(
     if (!engine)
         return false;
 
+    os_mutex_lock(&engine->lock);
     task_idx = find_task_index(engine, task_id);
-    if (task_idx < 0)
+    if (task_idx < 0) {
+        os_mutex_unlock(&engine->lock);
         return false;
+    }
 
     if (engine->tasks[task_idx].state == WASM_COMP_ASYNC_TASK_COMPLETED
         || engine->tasks[task_idx].state == WASM_COMP_ASYNC_TASK_CANCELLED
-        || engine->tasks[task_idx].state == WASM_COMP_ASYNC_TASK_FAILED)
+        || engine->tasks[task_idx].state == WASM_COMP_ASYNC_TASK_FAILED) {
+        os_mutex_unlock(&engine->lock);
         return false;
+    }
 
     if (engine->tasks[task_idx].state == WASM_COMP_ASYNC_TASK_RUNNING) {
         engine->tasks[task_idx].cancellation_requested = true;
+        os_mutex_unlock(&engine->lock);
         return true;
     }
 
     engine->tasks[task_idx].state = WASM_COMP_ASYNC_TASK_CANCELLED;
+    os_mutex_unlock(&engine->lock);
     return true;
 }
 
@@ -413,13 +440,18 @@ wasm_component_async_get_result(
     if (!engine || !results)
         return false;
 
+    os_mutex_lock(&engine->lock);
     task_idx = find_task_index(engine, task_id);
-    if (task_idx < 0)
+    if (task_idx < 0) {
+        os_mutex_unlock(&engine->lock);
         return false;
+    }
 
     task = &engine->tasks[task_idx];
-    if (task->state != WASM_COMP_ASYNC_TASK_COMPLETED)
+    if (task->state != WASM_COMP_ASYNC_TASK_COMPLETED) {
+        os_mutex_unlock(&engine->lock);
         return false;
+    }
 
     if (num_results > task->num_results)
         num_results = task->num_results;
@@ -427,6 +459,7 @@ wasm_component_async_get_result(
     for (uint32 i = 0; i < num_results; i++)
         results[i] = task->results[i];
 
+    os_mutex_unlock(&engine->lock);
     return true;
 }
 
