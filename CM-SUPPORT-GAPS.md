@@ -440,10 +440,12 @@ Major Canonical ABI gaps remain:
   imported (HOST_IMPORT) component functions and confirmed working —
   the trampoline correctly routes through
   `wasm_component_call_values_internal` and invokes the host callback
-- no executable lower path yet for memory-backed Canonical ABI shapes
-  beyond the tested direct UTF-8-string parameter/result path, the tested
-  direct top-level `list<string>` parameter and result paths, the tested nested
-  child-core `list<string>` parameter/result paths, cross-component UTF-8
+- `(memory ...)` / `(memory64 ...)` canon opts for lowered imports: the
+  `resolve_lowered_import_canon_memory` function now resolves the actual
+  memory instance (`.of.memory`) from the component's core memory array
+  using the `mem_idx` from the canon opt payload, enabling proper memory64
+  detection in the lower trampoline; the `(realloc ...)` opt is not required
+  for the lower path since callers provide pre-allocated result area buffers
   string / `list<string>`-parameter / `list<string>`-result /
   `list<u8>`-parameter / `list<u8>`-result / `list<s32>`-parameter /
   `list<s32>`-result / mixed composite-param / mixed composite-result seams,
@@ -846,4 +848,4 @@ If this feature is described as:
 
 The right maturity label today is:
 
-> **A substantial but still partial component runtime: public host APIs, full scalar / string / list / tuple-record / enum / flags / option / result / variant canon-lift and canon-lower calls through the component-value API, host-provided component-function imports for the same subset, first-class composite value semantics with type-id tracking, field construction, field extraction, and type introspection, imported `resource.new` and resource-inside-composite support, runtime values, value imports/exports, start execution slices, operational local/imported resource lifecycle, cross-instance resource transfer, borrowed handle repurposing, eq-bound matching, borrowed-parameter tracking, nested core-runtime with all 13 section types, core type materialization, memory64 Canonical ABI, error-context types, a complete async execution engine with task lifecycle, stream/future read/write, waitable sets, error-context resources, callback dispatch, 40+ async canon builtins, GC core form parsing/validation (rectype, subtype, structtype, arraytype, functype), and table/memory/global core instance imports are all implemented; full support is still blocked on general `memory`/`realloc` host-canon-opts for lowered functions, remaining public host API gaps, and OS thread spawning.**
+> **A substantial but still partial component runtime: public host APIs, full scalar / string / list / tuple-record / enum / flags / option / result / variant canon-lift and canon-lower calls through the component-value API, host-provided component-function imports for the same subset, first-class composite value semantics with type-id tracking, field construction, field extraction, and type introspection, imported `resource.new` and resource-inside-composite support, runtime values, value imports/exports, start execution slices, operational local/imported resource lifecycle, cross-instance resource transfer, borrowed handle repurposing, eq-bound matching, borrowed-parameter tracking, nested core-runtime with all 13 section types, core type materialization, memory64 Canonical ABI, error-context types, a complete async execution engine with task lifecycle, stream/future read/write, waitable sets, error-context resources, callback dispatch, 40+ async canon builtins, GC core form parsing/validation (rectype, subtype, structtype, arraytype, functype), table/memory/global core instance imports, and `(memory ...)` / `(memory64 ...)` canon opts resolved for lowered imports are all implemented; full support is still blocked on remaining public host API gaps and OS thread spawning.**
