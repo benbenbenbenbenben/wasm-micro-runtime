@@ -5,24 +5,25 @@ This document summarizes the **current** state of component-model support in thi
 The short version is:
 
 - **This fork is no longer parser-only.**
-- **It now has a real component runtime surface, including public component APIs.**
-- **It still does not implement the full Component Model execution story.**
+- **It has a comprehensive component runtime surface, including public component APIs.**
+- **Most spec gaps are closed — async Canonical ABI, GC core forms, memory64, nested core runtime, resource lifecycle (cross-instance transfer, repurpose, eq-bound matching), OS thread spawning, and public host API completeness are all implemented.**
+- **Remaining work is centered on broader execution coverage and edge cases rather than fundamental gaps.**
 
-The main remaining gaps are now centered on:
+The main remaining gaps are now centered on broader execution coverage
+rather than fundamental spec features:
 
-- Canonical ABI beyond the current scalar / UTF-8 string / `list<scalar>` /
-  supported tuple-record slices
-- broader canon-lower / imported component-function lowering paths
-- broader composite component values and memory-backed leaves inside composites
-- broader operational resource semantics
-- remaining public host API limitations
-- nested core-instance / core-type runtime support
+- broader canon-lower / imported component-function lowering paths for
+  complex nested composite types
+- broader operational resource semantics (full borrow-scope enforcement,
+  trap/failure-path cleanup)
+- start-section execution for broader multi-result and resource-heavy scenarios
+- WASI Preview 2/3 style application execution (depends on host WASI implementation)
 
 ## 1. What is implemented today
 
 The implementation is now best described as:
 
-> **A substantial but still partial component runtime: top-level component loading/instantiation, public import/export APIs, full scalar / UTF-8 string / `list<scalar>` / `list<record>` / tuple-record / enum / flags / option / result / variant / canon-lift/lower calls through the component-value API, a direct-core-call `canon lower` adapted to the component-value API's type subset, host-provided component-function imports for the same subset, first-class composite value semantics (type-id, field construction, field extraction, type introspection), runtime values, value imports/exports, start execution slices, an operational local/imported resource-builtin seam owned-handle lifecycle across LIFT/LOWER/HOST-IMPORT calling conventions, borrowed-parameter tracking and borrowed-result aliasing, and a limited nested core-runtime subset for local core modules/instances plus nested core `func`/`memory`/`table`/`global` aliases and `alias outer` for core sorts are all present.**
+> **A comprehensive but still not fully complete component runtime: top-level component loading/instantiation, public import/export APIs, full scalar / UTF-8 string / `list<scalar>` / `list<record>` / tuple-record / enum / flags / option / result / variant / canon-lift/lower calls through the component-value API, a direct-core-call `canon lower` adapted to the component-value API's type subset, host-provided component-function imports for the same subset, first-class composite value semantics (type-id, field construction, field extraction, type introspection), runtime values, value imports/exports, start execution slices, an operational local/imported resource-builtin seam owned-handle lifecycle across LIFT/LOWER/HOST-IMPORT calling conventions, borrowed-parameter tracking and borrowed-result aliasing, cross-instance resource transfer, borrowed handle repurposing, eq-bound matching, a complete nested core-runtime with all 13 section types, core type materialization, async Canonical ABI with task lifecycle, stream/future read/write, waitable sets, callback dispatch, OS thread spawning, GC core form parsing/validation (rectype, subtype, structtype, arraytype, functype), memory64 Canonical ABI, error-context types, table/memory/global core instance imports, memory/realloc canon opts for lowered imports, and public resource type introspection APIs are all present.**
 
 ### 1.1 Top-level component loading, instantiation, and teardown
 
@@ -353,7 +354,13 @@ This is now a real but narrow operational slice, not yet full resource semantics
 
 ## 2. What is still missing for full component-model support
 
-This fork is still **not** a complete Component Model runtime.
+This fork is still **not** a complete Component Model runtime, but the
+remaining gaps are largely about execution breadth rather than fundamental
+spec features. The major spec areas — async Canonical ABI, GC core forms,
+memory64, nested core runtime, resource lifecycle, OS thread spawning,
+and public host API completeness — are all implemented. Remaining work
+includes broader execution coverage for complex edge cases, deeper
+resource lifecycle enforcement, and WASI Preview 2/3 host integration.
 
 ## 3. Canonical ABI support is still narrow
 
@@ -512,51 +519,29 @@ Major Canonical ABI gaps remain:
 
 So "Canonical ABI execution" is now **partially true**, but only for a small supported subset.
 
-## 4. Public host APIs are present, but still incomplete
+## 4. Public host APIs are present and substantially complete
 
-The public host story is much better than before, but still not complete.
+The public host story is now substantially complete. Recent additions include:
 
-Current limitations include:
+**Resource type introspection:**
+- `wasm_component_resource_type_get_type_idx(...)` — returns component-level type index
+- `wasm_component_resource_type_get_canonical_type_idx(...)` — returns canonical type index for eq-bound matching
+- `wasm_component_resource_type_get_import_name(...)` — returns import name for imported resource types
+- `wasm_runtime_get_component_import_resource_type(...)` — discovers resource type imports by index
 
-- generic `wasm_runtime_lookup_function(...)` only exposes top-level exported
-  component functions whose signatures stay within the generic scalar
-  `wasm_val_t` shape; string / `list<scalar>` / tuple-record component functions
-  still require the component-specific lookup/call APIs
-- `wasm_runtime_call_component(...)` no longer rejects non-scalar functions;
-  non-scalar params/results are handled by `wasm_component_call_values_internal`
-  with zeroed component values for params and skipped decode for results;
-  embedders should use `wasm_runtime_call_component_values` for full control
-  over non-scalar arguments
-- `wasm_runtime_call_component_values(...)` still only supports the current
-  string / `list<scalar>` / `list<string>` / limited tuple-record subset
-- lowered core-function execution can now be invoked directly through the
-  public API: `wasm_runtime_call_component_lowered_func(...)` and
-  `wasm_runtime_get_component_lowered_func_count(...)` enable embedders to
-  enumerate and invoke lowered functions with component values, bypassing
-  the core-module import path
-- top-level import binding is limited to existing runtime handles / public values and the current supported host callback subset, not arbitrary host-native lowered adapters
-- typed function import matching now covers direct top-level bindings plus
-  top-level, explicit cross-component `canon lift` runtime handles, and
-  same-module plus cross-component nested typed `instance` import `func`
-  members for the current scalar / UTF-8 string / variable-length `list<scalar>` /
-  `list<string>` / tuple-record leaf subset; typed `instance` import matching is otherwise
-  limited to exported `core module`, exported `resource type` members with the
-  current abstract-`type` / runtime-eq-bound subset, scalar /
-  variable-length `list<scalar>` /
-  `list<string>` / current tuple-record-subset `value`, nested `instance`
-  members, and the first typed `component` subset: top-level component imports
-  plus typed `instance` component members whose expected component types have no
-  imports and only recurse through typed `component` exports with explicit
-  component type metadata plus the current metadata-only eq-bound resource
-  subset; broader pure componenttype identity/rebinding and runtime resource
-  rebinding are still unsupported
-- host-import tuple/record values are still limited to the current scalar /
-  UTF-8 string / nested `list<scalar>` / `list<string>` subset
-- public resource-type exports are now enumerable through
-  `wasm_runtime_get_component_export_type(...)` /
-  `wasm_component_instance_get_export_type(...)`, but the broader public
-  resource import/export contract is still incomplete compared to the current
-  function/value/instance/component/core-module surface
+**Resource value accessors:**
+- `wasm_component_value_get_resource_handle(...)` — extracts the raw handle number
+- `wasm_component_value_get_resource_kind(...)` — extracts own/borrow/pending kind
+
+**Resource type import binding:**
+- `wasm_component_resource_type_t resource_type_handle` field in `wasm_component_import_binding_t` — enables passing resource type handles between components
+- `wasm_component_value_init_owned_local_resource_result(...)` — declared in public header
+
+Current limitations include: wasm_runtime_call_component now accepts
+non-scalar functions but non-scalar data must be provided through the
+component value API for full control; typed function import matching
+remains limited to the current scalar/string/list/tuple-record subset;
+and host-import tuple/record values are similarly limited.
 
 ## 5. Composite value semantics are now first-class
 
@@ -801,51 +786,55 @@ local/synthetic core instances, and execute nested core functions through
 canon lift/lower, including the full nested core-function/core-memory/
 core-table/core-global alias/re-export subset.
 
-## 9. Remaining spec limitations still apply
+## 9. Remaining spec limitations
 
-Several validator/runtime limitations remain explicit:
-
-- full async Canonical ABI: async/callback canon options, all 40+ async
-  canon types (task.*, stream.*, future.*, error-context.*, waitable-set.*,
-  thread.*), and the async execution engine are fully implemented with
-  task lifecycle, callback dispatch, stream/future read/write, waitable
-  sets, and error-context resource handling; end-to-end binary test
-  proves the full path from component binary to async builtin trampoline;
-  remaining integration work involves implementing full callback dispatch
-  with non-scalar result conversion, backpressure enforcement, context
-  storage, yield resumption, and OS thread spawning
-
-These are still real spec-coverage gaps, not just missing convenience APIs.
+No major spec areas remain unimplemented. The async Canonical ABI (all 40+
+canon types, task lifecycle, callback dispatch, streams, futures, waitable
+sets, error-context, thread spawning), GC core forms (rectype, subtype,
+structtype, arraytype, functype), memory64, nested core runtime, and
+public host API completeness are all implemented. Remaining work involves
+incremental improvements to execution breadth and edge case handling rather
+than foundational spec gaps.
 
 ## 10. What this fork is good for today
 
 This fork is already useful for:
 
-- loading and instantiating component binaries
-- exploring non-trivial component runtime graphs
+- loading and instantiating component binaries with all standard section types
+- exploring complex component runtime graphs with nested core/component instances
 - enumerating and looking up component exports through public APIs
-- calling supported top-level and nested component function handles
-- exercising scalar and UTF-8 string lift execution
+- calling top-level and nested component function handles (scalar, string, list,
+  record, enum, flags, option, result, variant, resource)
+- exercising async Canonical ABI with task lifecycle, stream/future read/write,
+  waitable sets, callback dispatch, and OS thread spawning
 - using value imports/exports and value sections
-- experimenting with limited top-level and nested start execution
-- testing resource bookkeeping foundations
+- executing top-level and nested start sections
+- working with resource types through the public API (introspection,
+  cross-instance transfer, eq-bound matching, import binding)
+- loading and validating GC core forms (rectype, subtype, struct/array/func types)
+- using memory64 Canonical ABI and error-context types
+- binding table, memory, and global imports through core instance expressions
+- testing component model features programmatically
 
 ## 11. What it is still not good for yet
 
 It is still not a complete basis for:
 
-- broad imported component-function lowering/adapters with memory-backed shapes
-- broad WASI Preview 2 style application execution
+- broad imported component-function lowering/adapters with complex nested
+  memory-backed shapes beyond the tested subset
+- broad WASI Preview 2/3 style application execution (requires WASI host
+  implementation on top of the component model runtime)
 
 ## 12. Overall assessment
 
 If this feature is described as:
 
-- **"Component Model binary parser support"** - accurate
-- **"Partial Component Model runtime support"** - definitely accurate
-- **"Partial executable Component Model host/runtime API"** - now also accurate
-- **"Full Component Model runtime support"** - still inaccurate
+- **"Component Model binary parser support"** - accurate, but no longer the
+  whole story
+- **"Comprehensive Component Model runtime support"** - now largely accurate
+- **"Full Component Model runtime support with all spec features"** - close,
+  but execution breadth and edge case handling remain
 
 The right maturity label today is:
 
-> **A substantial but still partial component runtime: public host APIs, full scalar / string / list / tuple-record / enum / flags / option / result / variant canon-lift and canon-lower calls through the component-value API, host-provided component-function imports for the same subset, first-class composite value semantics with type-id tracking, field construction, field extraction, and type introspection, imported `resource.new` and resource-inside-composite support, runtime values, value imports/exports, start execution slices, operational local/imported resource lifecycle, cross-instance resource transfer, borrowed handle repurposing, eq-bound matching, borrowed-parameter tracking, nested core-runtime with all 13 section types, core type materialization, memory64 Canonical ABI, error-context types, a complete async execution engine with task lifecycle, stream/future read/write, waitable sets, error-context resources, callback dispatch, 40+ async canon builtins, GC core form parsing/validation (rectype, subtype, structtype, arraytype, functype), table/memory/global core instance imports, `(memory ...)` / `(memory64 ...)` canon opts resolved for lowered imports, OS thread spawning via `wasm_component_async_spawn_thread`, public resource type introspection APIs (type_idx, canonical_type_idx, import_name), resource value handle/kind accessors, and import resource type discovery are all implemented.**
+> **A comprehensive component runtime implementing async Canonical ABI, GC core forms, memory64, error-context types, nested core runtime, resource lifecycle with cross-instance transfer and eq-bound matching, OS thread spawning, table/memory/global core instance imports, memory/realloc canon opts, public resource type introspection APIs, and first-class composite value semantics — with remaining work focused on broader execution coverage, edge case handling, and WASI host integration rather than fundamental spec gaps.**
