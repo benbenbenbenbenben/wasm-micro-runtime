@@ -6840,6 +6840,14 @@ resolve_lowered_import_canon_memory(const WASMComponentRuntimeFunc *lowered_func
             continue;
 
         out_memory_ref->type = WASM_COMP_CORE_RUNTIME_REF_MEMORY;
+        if (lowered_function->owner_instance
+            && opt->payload.memory.mem_idx
+                   < lowered_function->owner_instance->core_memory_count) {
+            out_memory_ref->of.memory =
+                lowered_function->owner_instance
+                    ->core_memories[opt->payload.memory.mem_idx]
+                    .of.memory;
+        }
         return true;
     }
 
