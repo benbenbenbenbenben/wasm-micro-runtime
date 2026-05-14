@@ -7,6 +7,7 @@
 #include "wasm_component_runtime.h"
 #include "wasm_component_value.h"
 #include "wasm_export.h"
+#include "wasm_exec_env.h"
 #include <string.h>
 
 bool
@@ -103,11 +104,29 @@ wasm_component_async_engine_create(
 
     os_mutex_init(&engine->lock);
 
+    engine->thread_capacity = 4;
+    engine->threads = wasm_runtime_malloc(
+        sizeof(WASMComponentAsyncThreadEntry) * engine->thread_capacity);
+    if (!engine->threads) {
+        os_mutex_destroy(&engine->lock);
+        wasm_runtime_free(engine->waitable_sets);
+        wasm_runtime_free(engine->error_contexts);
+        wasm_runtime_free(engine->futures);
+        wasm_runtime_free(engine->streams);
+        wasm_runtime_free(engine->pending_queue);
+        wasm_runtime_free(engine->tasks);
+        wasm_runtime_free(engine);
+        return false;
+    }
+    memset(engine->threads, 0,
+           sizeof(WASMComponentAsyncThreadEntry) * engine->thread_capacity);
+
     engine->next_task_id = 1;
     engine->next_stream_id = 1;
     engine->next_future_id = 1;
     engine->next_error_context_handle = 1;
     engine->next_waitable_set_id = 1;
+    engine->next_thread_id = 1;
     *engine_out = engine;
     return true;
 }
@@ -173,6 +192,9 @@ wasm_component_async_engine_destroy(
     }
     if (engine->waitable_sets)
         wasm_runtime_free(engine->waitable_sets);
+
+    if (engine->threads)
+        wasm_runtime_free(engine->threads);
 
     os_mutex_destroy(&engine->lock);
 
@@ -481,6 +503,45 @@ find_future_index(WASMComponentAsyncEngine *engine, uint32 future_id)
         if (engine->futures[i].future_id == future_id)
             return (int32)i;
     return -1;
+}
+
+static int32
+find_thread_index(WASMComponentAsyncEngine *engine, uint32 thread_id)
+{
+    if (thread_id == 0) return -1;
+    for (uint32 i = 0; i < engine->thread_count; i++)
+        if (engine->threads[i].thread_id == thread_id)
+            return (int32)i;
+    return -1;
+}
+
+static void *
+component_thread_routine(void *arg)
+{
+    WASMComponentAsyncThreadEntry *entry = (WASMComponentAsyncThreadEntry *)arg;
+    WASMComponentInstance *component_inst = entry->component_inst;
+    WASMComponentRuntimeFunc *function = entry->function;
+    wasm_component_value_t *results = NULL;
+    uint32 num_results = 0;
+
+    entry->running = true;
+
+    wasm_runtime_set_exec_env_tls(entry->exec_env);
+    wasm_exec_env_set_thread_info(entry->exec_env);
+
+    if (function) {
+        wasm_component_value_t stack_results[4];
+        results = stack_results;
+        num_results = 4;
+        (void)wasm_runtime_call_component_values(
+            (wasm_module_inst_t)component_inst,
+            (wasm_component_func_t)function,
+            num_results, results, 0, NULL);
+    }
+
+    entry->finished = true;
+    entry->running = false;
+    return NULL;
 }
 
 uint32
@@ -1090,4 +1151,135 @@ wasm_component_async_is_task_cancelled(
     int32 idx = find_task_index(engine, engine->current_task_id);
     if (idx < 0) return false;
     return engine->tasks[idx].cancellation_requested;
+}
+
+uint32
+wasm_component_async_spawn_thread(
+    WASMComponentAsyncEngine *engine,
+    WASMComponentInstance *component_inst,
+    WASMComponentRuntimeFunc *function)
+{
+    int32 idx;
+    WASMComponentAsyncThreadEntry *entry;
+    uint32 thread_id;
+
+    if (!engine || !function)
+        return WASM_COMPONENT_ASYNC_INVALID_THREAD_ID;
+
+    os_mutex_lock(&engine->lock);
+
+    idx = find_thread_index(engine, 0);
+    if (idx < 0) {
+        uint32 new_cap = engine->thread_capacity * 2;
+        WASMComponentAsyncThreadEntry *new_t = wasm_runtime_realloc(
+            engine->threads,
+            sizeof(WASMComponentAsyncThreadEntry) * new_cap);
+        if (!new_t) {
+            os_mutex_unlock(&engine->lock);
+            return WASM_COMPONENT_ASYNC_INVALID_THREAD_ID;
+        }
+        engine->threads = new_t;
+        memset(&engine->threads[engine->thread_capacity], 0,
+               sizeof(WASMComponentAsyncThreadEntry)
+                   * (new_cap - engine->thread_capacity));
+        engine->thread_capacity = new_cap;
+        idx = (int32)engine->thread_count;
+    }
+
+    thread_id = engine->next_thread_id++;
+    if (thread_id == 0)
+        thread_id = engine->next_thread_id++;
+
+    entry = &engine->threads[idx];
+    memset(entry, 0, sizeof(*entry));
+    entry->thread_id = thread_id;
+    entry->component_inst = component_inst;
+    entry->function = function;
+
+    /* Find a core module instance to get the exec_env context */
+    if (component_inst && component_inst->core_instance_count > 0) {
+        WASMComponentCoreRuntimeInstance *core_inst =
+            &component_inst->core_instances[component_inst->core_instance_count - 1];
+        if (core_inst && core_inst->module_inst) {
+            entry->exec_env = wasm_exec_env_create_internal(
+                core_inst->module_inst, 65536);
+        }
+    }
+
+    if (!entry->exec_env) {
+        os_mutex_unlock(&engine->lock);
+        return WASM_COMPONENT_ASYNC_INVALID_THREAD_ID;
+    }
+
+    engine->thread_count++;
+
+    if (os_thread_create(&entry->os_thread, component_thread_routine, entry,
+                         65536) != 0) {
+        engine->thread_count--;
+        wasm_exec_env_destroy(entry->exec_env);
+        entry->exec_env = NULL;
+        os_mutex_unlock(&engine->lock);
+        return WASM_COMPONENT_ASYNC_INVALID_THREAD_ID;
+    }
+
+    os_mutex_unlock(&engine->lock);
+    return thread_id;
+}
+
+bool
+wasm_component_async_join_thread(
+    WASMComponentAsyncEngine *engine,
+    uint32 thread_id)
+{
+    int32 idx;
+
+    if (!engine)
+        return false;
+
+    os_mutex_lock(&engine->lock);
+    idx = find_thread_index(engine, thread_id);
+    if (idx < 0) {
+        os_mutex_unlock(&engine->lock);
+        return false;
+    }
+    os_mutex_unlock(&engine->lock);
+
+    /* Wait for the thread to finish */
+    os_thread_join(&engine->threads[idx].os_thread, NULL);
+
+    os_mutex_lock(&engine->lock);
+    if (engine->threads[idx].exec_env) {
+        wasm_exec_env_destroy(engine->threads[idx].exec_env);
+        engine->threads[idx].exec_env = NULL;
+    }
+    memset(&engine->threads[idx], 0, sizeof(engine->threads[idx]));
+    os_mutex_unlock(&engine->lock);
+    return true;
+}
+
+bool
+wasm_component_async_detach_thread(
+    WASMComponentAsyncEngine *engine,
+    uint32 thread_id)
+{
+    int32 idx;
+
+    if (!engine)
+        return false;
+
+    os_mutex_lock(&engine->lock);
+    idx = find_thread_index(engine, thread_id);
+    if (idx < 0) {
+        os_mutex_unlock(&engine->lock);
+        return false;
+    }
+
+    os_thread_detach(engine->threads[idx].os_thread);
+    if (engine->threads[idx].exec_env) {
+        wasm_exec_env_destroy(engine->threads[idx].exec_env);
+        engine->threads[idx].exec_env = NULL;
+    }
+    memset(&engine->threads[idx], 0, sizeof(engine->threads[idx]));
+    os_mutex_unlock(&engine->lock);
+    return true;
 }

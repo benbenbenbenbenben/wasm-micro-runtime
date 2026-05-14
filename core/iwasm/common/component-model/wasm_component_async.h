@@ -10,6 +10,7 @@
 #include "wasm_component_runtime.h"
 #include "wasm_export.h"
 #include "bh_platform.h"
+#include "platform_api_extension.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -20,6 +21,7 @@ extern "C" {
 #define WASM_COMPONENT_ASYNC_INVALID_FUTURE_ID UINT32_MAX
 #define WASM_COMPONENT_ASYNC_INVALID_WAITABLE_SET_ID UINT32_MAX
 #define WASM_COMPONENT_ASYNC_INVALID_ERROR_CONTEXT_HANDLE UINT32_MAX
+#define WASM_COMPONENT_ASYNC_INVALID_THREAD_ID UINT32_MAX
 
 typedef enum WASMComponentAsyncTaskState {
     WASM_COMP_ASYNC_TASK_PENDING = 0,
@@ -81,6 +83,16 @@ typedef struct WASMComponentAsyncWaitableSet {
     WASMComponentAsyncWaitableSetItem *items;
 } WASMComponentAsyncWaitableSet;
 
+typedef struct WASMComponentAsyncThreadEntry {
+    uint32 thread_id;
+    korp_tid os_thread;
+    WASMExecEnv *exec_env;
+    WASMComponentInstance *component_inst;
+    WASMComponentRuntimeFunc *function;
+    volatile bool running;
+    volatile bool finished;
+} WASMComponentAsyncThreadEntry;
+
 typedef struct WASMComponentAsyncEngine {
     WASMComponentAsyncTask *tasks;
     uint32 task_capacity;
@@ -110,6 +122,10 @@ typedef struct WASMComponentAsyncEngine {
     bool backpressure_enabled;
     uint32 current_task_id;
     korp_mutex lock;
+    WASMComponentAsyncThreadEntry *threads;
+    uint32 thread_capacity;
+    uint32 thread_count;
+    uint32 next_thread_id;
 } WASMComponentAsyncEngine;
 
 bool
@@ -302,6 +318,24 @@ wasm_component_async_waitable_join(
     uint32 set_id,
     uint32 waitable_idx,
     uint32 waitable_id);
+
+/* Thread operations */
+
+uint32
+wasm_component_async_spawn_thread(
+    WASMComponentAsyncEngine *engine,
+    WASMComponentInstance *component_inst,
+    WASMComponentRuntimeFunc *function);
+
+bool
+wasm_component_async_join_thread(
+    WASMComponentAsyncEngine *engine,
+    uint32 thread_id);
+
+bool
+wasm_component_async_detach_thread(
+    WASMComponentAsyncEngine *engine,
+    uint32 thread_id);
 
 #ifdef __cplusplus
 }

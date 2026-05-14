@@ -4332,36 +4332,38 @@ component_async_builtin_trampoline(WASMModuleInstanceCommon *caller_module_inst,
         {
             /* thread.spawn-ref(func_idx) -> thread_handle */
             uint32 func_idx = (uint32)raw_args[0];
-            uint32 task_id = WASM_COMPONENT_ASYNC_INVALID_TASK_ID;
+            uint32 thread_id = WASM_COMPONENT_ASYNC_INVALID_THREAD_ID;
             if (func_idx < component_inst->core_func_count) {
                 WASMComponentCoreRuntimeRef *ref =
                     &component_inst->core_funcs[func_idx];
                 if (ref->type == WASM_COMP_CORE_RUNTIME_REF_LOWERED_FUNC
                     && ref->of.lowered_function) {
-                    task_id = wasm_component_async_create_task(
-                        engine, ref->of.lowered_function, NULL, 0, 0);
+                    thread_id = wasm_component_async_spawn_thread(
+                        engine, component_inst,
+                        ref->of.lowered_function);
                 }
             }
             if (func_type->result_count > 0)
-                raw_args[0] = task_id;
+                raw_args[0] = thread_id;
             break;
         }
         case WASM_COMP_CANON_THREAD_SPAWN_INDIRECT:
         {
             /* thread.spawn-indirect(func_table_idx) -> thread_handle */
             uint32 table_idx = (uint32)raw_args[0];
-            uint32 task_id = WASM_COMPONENT_ASYNC_INVALID_TASK_ID;
+            uint32 thread_id = WASM_COMPONENT_ASYNC_INVALID_THREAD_ID;
             if (table_idx < component_inst->core_func_count) {
                 WASMComponentCoreRuntimeRef *ref =
                     &component_inst->core_funcs[table_idx];
                 if (ref->type == WASM_COMP_CORE_RUNTIME_REF_LOWERED_FUNC
                     && ref->of.lowered_function) {
-                    task_id = wasm_component_async_create_task(
-                        engine, ref->of.lowered_function, NULL, 0, 0);
+                    thread_id = wasm_component_async_spawn_thread(
+                        engine, component_inst,
+                        ref->of.lowered_function);
                 }
             }
             if (func_type->result_count > 0)
-                raw_args[0] = task_id;
+                raw_args[0] = thread_id;
             break;
         }
         case WASM_COMP_CANON_THREAD_AVAILABLE_PAR:
