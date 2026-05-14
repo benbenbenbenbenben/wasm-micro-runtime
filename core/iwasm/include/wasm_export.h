@@ -1887,6 +1887,14 @@ wasm_component_value_get_data(const wasm_component_value_t *value);
 WASM_RUNTIME_API_EXTERN uint32_t
 wasm_component_value_get_type_idx(const wasm_component_value_t *value);
 
+WASM_RUNTIME_API_EXTERN uint32_t
+wasm_component_value_get_resource_handle(
+    const wasm_component_value_t *value);
+
+WASM_RUNTIME_API_EXTERN uint32_t
+wasm_component_value_get_resource_kind(
+    const wasm_component_value_t *value);
+
 WASM_RUNTIME_API_EXTERN bool
 wasm_component_value_init_defined(
     wasm_module_inst_t inst, wasm_component_value_t *value,
@@ -1926,9 +1934,25 @@ WASM_RUNTIME_API_EXTERN wasm_component_resource_type_kind_t
 wasm_component_resource_type_get_kind(
     wasm_component_resource_type_t resource_type);
 
+WASM_RUNTIME_API_EXTERN uint32_t
+wasm_component_resource_type_get_type_idx(
+    wasm_component_resource_type_t resource_type);
+
+WASM_RUNTIME_API_EXTERN uint32_t
+wasm_component_resource_type_get_canonical_type_idx(
+    wasm_component_resource_type_t resource_type);
+
+WASM_RUNTIME_API_EXTERN const char *
+wasm_component_resource_type_get_import_name(
+    wasm_component_resource_type_t resource_type);
+
 WASM_RUNTIME_API_EXTERN wasm_component_resource_type_t
 wasm_runtime_get_component_export_resource_type(
     wasm_module_inst_t module_inst, int32_t export_index);
+
+WASM_RUNTIME_API_EXTERN wasm_component_resource_type_t
+wasm_runtime_get_component_import_resource_type(
+    wasm_module_inst_t module_inst, int32_t import_index);
 
 WASM_RUNTIME_API_EXTERN void
 wasm_component_value_destroy(wasm_component_value_t *value);

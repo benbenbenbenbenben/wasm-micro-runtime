@@ -24556,6 +24556,27 @@ wasm_component_resource_type_get_kind(
     }
 }
 
+uint32
+wasm_component_resource_type_get_type_idx(
+    wasm_component_resource_type_t resource_type)
+{
+    return resource_type ? resource_type->type_idx : UINT32_MAX;
+}
+
+uint32
+wasm_component_resource_type_get_canonical_type_idx(
+    wasm_component_resource_type_t resource_type)
+{
+    return resource_type ? resource_type->canonical_type_idx : UINT32_MAX;
+}
+
+const char *
+wasm_component_resource_type_get_import_name(
+    wasm_component_resource_type_t resource_type)
+{
+    return resource_type ? resource_type->import_name : NULL;
+}
+
 wasm_component_resource_type_t
 wasm_runtime_get_component_export_resource_type(
     wasm_module_inst_t module_inst, int32_t export_index)
@@ -24586,6 +24607,47 @@ wasm_runtime_get_component_export_resource_type(
             if (exp->sort_idx->idx >= inst->resource_state->type_count)
                 return NULL;
             return &inst->resource_state->types[exp->sort_idx->idx];
+        }
+    }
+    return NULL;
+}
+
+wasm_component_resource_type_t
+wasm_runtime_get_component_import_resource_type(
+    wasm_module_inst_t module_inst, int32_t import_index)
+{
+    WASMComponentInstance *inst = (WASMComponentInstance *)module_inst;
+    uint32 section_idx, import_idx;
+    uint32 current_import = 0;
+
+    if (!inst)
+        return NULL;
+
+    for (section_idx = 0; section_idx < inst->module->component.section_count;
+         section_idx++) {
+        WASMComponentSection *section =
+            &inst->module->component.sections[section_idx];
+        if (section->id != WASM_COMP_SECTION_IMPORTS
+            || !section->parsed.import_section)
+            continue;
+        for (import_idx = 0;
+             import_idx < section->parsed.import_section->count;
+             import_idx++, current_import++) {
+            WASMComponentImport *imp =
+                &section->parsed.import_section->imports[import_idx];
+            if ((int32)current_import != import_index)
+                continue;
+            if (!imp->extern_desc
+                || imp->extern_desc->type != WASM_COMP_EXTERN_TYPE)
+                return NULL;
+            if (!inst->resource_state
+                || !imp->extern_desc->extern_desc.type.type_bound)
+                return NULL;
+            uint32 type_idx =
+                imp->extern_desc->extern_desc.type.type_bound->type_idx;
+            if (type_idx >= inst->resource_state->type_count)
+                return NULL;
+            return &inst->resource_state->types[type_idx];
         }
     }
     return NULL;

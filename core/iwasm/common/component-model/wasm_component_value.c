@@ -309,6 +309,38 @@ wasm_component_value_get_type_idx(const wasm_component_value_t *value)
     return value->type.type.type_idx;
 }
 
+uint32
+wasm_component_value_get_resource_handle(
+    const wasm_component_value_t *value)
+{
+    const WASMComponentPublicResourceValue *rv;
+
+    if (!value)
+        return UINT32_MAX;
+
+    if (value->storage_kind != WASM_COMPONENT_VALUE_STORAGE_RESOURCE)
+        return UINT32_MAX;
+
+    rv = (const WASMComponentPublicResourceValue *)value->storage.owned_data;
+    return rv ? rv->handle : UINT32_MAX;
+}
+
+uint32
+wasm_component_value_get_resource_kind(
+    const wasm_component_value_t *value)
+{
+    const WASMComponentPublicResourceValue *rv;
+
+    if (!value)
+        return UINT32_MAX;
+
+    if (value->storage_kind != WASM_COMPONENT_VALUE_STORAGE_RESOURCE)
+        return UINT32_MAX;
+
+    rv = (const WASMComponentPublicResourceValue *)value->storage.owned_data;
+    return rv ? (uint32)rv->kind : UINT32_MAX;
+}
+
 WASM_RUNTIME_API_EXTERN bool
 wasm_component_value_init_owned_imported_resource_result(
     wasm_component_value_t *value, void *data,
