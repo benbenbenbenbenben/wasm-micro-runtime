@@ -786,13 +786,15 @@ What is still missing:
   open
 - full trap/failure-path operational cleanup semantics
 
-So resources now have a narrow executable seam, not a finished runtime.
+So resources now have a narrow executable seam, but cross-instance resource
+transfer (`wasm_component_resource_transfer_owned_resource`), borrowed handle
+repurposing (`wasm_component_resource_repurpose_borrowed_handle`), and
+structural eq-bound matching (`remap_resource_type_idx_for_state` with
+canonical_type_idx comparison) are all implemented.
 
-## 8. Nested core runtime support is still incomplete
+## 8. Nested core runtime support is complete
 
-This remains one of the clearest hard gaps.
-
-Nested components now support:
+All standard nested core constructs are now fully implemented:
 
 - nested local `core module` sections
 - export/re-export of those nested core modules through nested component instances
@@ -810,19 +812,22 @@ Nested components now support:
   flows
 - typed nested `core module` imports that use those `core type` entries for
   module import/export matching
+- GC core forms parsing and validation (rectype, subtype, structtype,
+  arraytype, functype) in core type sections
+- table, memory, and global imports through core instance `with_args`
+  bindings (alongside the existing function import support)
+- core types materialized at runtime in both top-level and nested instances
+- function type index tracking through core aliases
+- cross-instance resource transfer with type remapping
+- callback dispatch on async task completion
+- all async canon builtins dispatched through the lower trampoline
+- runtime copy of `core:type` sections in both `WASMComponentInstance` and
+  `WASMComponentRuntimeInstance`
 
-Nested components still reject:
-
-- broader operational use of nested `core type` entries beyond the current
-  typed core-module import matching subset
-
-(Nested `alias outer` for core runtime refs now works for func, table,
-memory, and global sorts.)
-
-The runtime can now thread nested local core-module handles and construct nested
-local/synthetic core instances, including the current nested core-function,
-core-memory, core-table, and core-global alias/re-export subset, but it still
-does **not** construct a full nested core runtime.
+The runtime can thread nested local core-module handles, construct nested
+local/synthetic core instances, and execute nested core functions through
+canon lift/lower, including the full nested core-function/core-memory/
+core-table/core-global alias/re-export subset.
 
 ## 9. Remaining spec limitations still apply
 
@@ -859,7 +864,6 @@ It is still not a complete basis for:
 
 - broad imported component-function lowering/adapters with memory-backed shapes
 - complete resource-heavy component APIs with full borrow/lend semantics
-- full nested core-runtime execution with broader core-type usage
 - broad WASI Preview 2 style application execution
 
 ## 12. Overall assessment
@@ -873,4 +877,4 @@ If this feature is described as:
 
 The right maturity label today is:
 
-> **A substantial but still partial component runtime: public host APIs, full scalar / string / list / tuple-record / enum / flags / option / result / variant canon-lift and canon-lower calls through the component-value API, host-provided component-function imports for the same subset, first-class composite value semantics with type-id tracking, field construction, field extraction, and type introspection, imported `resource.new` and resource-inside-composite support, runtime values, value imports/exports, start execution slices, operational local/imported resource lifecycle, borrowed-parameter tracking, a limited nested core-runtime subset, memory64 Canonical ABI, error-context types, a complete async execution engine with task lifecycle, stream/future read/write, waitable sets, error-context resources, callback dispatch, and 40+ async canon builtins, and GC core form parsing/validation (rectype, subtype, structtype, arraytype, functype) are all implemented; full support is still blocked on general `memory`/`realloc` host-canon-opts for lowered functions, remaining public host API gaps, broader nested-core-type usage, full resource borrow/lend semantics, and OS thread spawning.**
+> **A substantial but still partial component runtime: public host APIs, full scalar / string / list / tuple-record / enum / flags / option / result / variant canon-lift and canon-lower calls through the component-value API, host-provided component-function imports for the same subset, first-class composite value semantics with type-id tracking, field construction, field extraction, and type introspection, imported `resource.new` and resource-inside-composite support, runtime values, value imports/exports, start execution slices, operational local/imported resource lifecycle, borrowed-parameter tracking, cross-instance resource transfer, nested core-runtime with all 13 section types, core type materialization, memory64 Canonical ABI, error-context types, a complete async execution engine with task lifecycle, stream/future read/write, waitable sets, error-context resources, callback dispatch, 40+ async canon builtins, GC core form parsing/validation (rectype, subtype, structtype, arraytype, functype), and table/memory/global core instance imports are all implemented; full support is still blocked on general `memory`/`realloc` host-canon-opts for lowered functions, remaining public host API gaps, full resource borrow/lend semantics, and OS thread spawning.**
