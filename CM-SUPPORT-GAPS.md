@@ -735,7 +735,10 @@ What exists:
 
 What is still missing:
 
-- full ownership/borrow/lend semantics
+- full ownership/borrow/lend semantics: cross-instance resource transfer,
+  borrowed handle repurposing, and eq-bound matching are implemented;
+  remaining gaps are in public host API completeness and broader lifecycle
+  enforcement rather than the core runtime mechanisms
 - live Canonical ABI resource lowering/lifting
 - resource imports/exports as a complete **public** host feature beyond the
    current top-level imported-resource-type binding, public resource-type export
@@ -743,54 +746,21 @@ What is still missing:
    `instance`/`component` imports plus nested component-type matching with the
    current abstract-`type` / metadata-eq-bound subset), and host-callback
    imported own-result subset
-- resource-type identity/rebinding now includes runtime eq-bound resource
-  type matching: `validate_component_runtime_resource_type_against_bound`
-  checks that the runtime resource type's type_idx/source_type_idx matches
-  the eq-bound expected type index; broader rebinding beyond the current
-  metadata-eq-bound / runtime-eq-bound subset is still unsupported
-- borrowed resource values and the rest of general own/borrow public value
-  transport beyond the current supported subset (host-callback borrowed
-  parameters, host-callback round-tripping of existing owned handles, public
-  call lowering of existing live owned handles into exported canon-lifted
-  `own<resource>` and `borrow<resource>` parameters, guest-side local
-  `resource.rep` / borrowed `resource.drop` on those temporary borrowed handles,
-  exported borrow results that alias current borrowed parameters, direct
-  top-level and canon-lowered callback borrow results that alias current
-  borrowed arguments for the current scalar local/imported-resource subset,
-  including public construction through
-  `wasm_component_value_init_borrowed_resource_result(...)`,
-  plus fresh imported own results)
-- runtime enforcement of richer resource lifecycle rules beyond the current
-  outstanding-borrow subset for local and imported owned handles
-- no full lend-count or borrow-scope enforcement yet: the current supported
-  local/imported resource subset now rejects owned drops/transfers while tracked
-  borrowed aliases are still live, but broader outstanding-borrow tracking and
-  lifetime enforcement still remain incomplete
-- public resource-aware callable component APIs beyond the new
-  owned-result drop helper, borrowed-result helper, top-level
-  imported-resource binding, and the current owned-resource /
-  borrowed-parameter / scalar borrowed-result call subset plus the current
-  direct host-import/lowered `own<resource> + s32` /
-  `borrow<resource> + s32` multi-result subset plus the tested imported
-  lowered `own<resource> + string` seam, the current direct top-level
-  retptr/canon-lift local/imported `own<resource> + s32` /
-  `borrow<resource> + s32` subset, the tested local/imported
-  `tuple<own<resource>> + s32` composite retptr witness, the tested local/imported
-  `own<resource> + string` retptr witness, and top-level start materialization
-  of the local/imported retptr `own<resource> + s32` /
-  `borrow<resource> + s32` subset plus the tested imported
-  `own<resource> + string` start seam; broader borrow/lend behavior, broader
-  mixed/composite resource retptr vectors beyond the tested
-  `tuple<own<resource>>` local/imported witness pair, composite/non-scalar borrow-result
-  flows, and stricter caller-side ownership/consumption semantics still remain
-  open
+- resource-type identity/rebinding: runtime eq-bound matching via
+  `remap_resource_type_idx_for_state` with canonical_type_idx comparison
+  is now implemented, closing the structural eq-bound gap; broader rebinding
+  beyond the current eq-bound subset remains unsupported
+- borrowed resource values and general own/borrow public value transport
+  beyond the current supported subset
+- full lend-count or borrow-scope enforcement: outstanding-borrow rejection
+  prevents drops while borrows are live; repurpose_borrowed_handle enables
+  dynaic borrow redirection; full lifecycle enforcement remains incomplete
+- public resource-aware callable component APIs beyond the current subset
 - full trap/failure-path operational cleanup semantics
 
-So resources now have a narrow executable seam, but cross-instance resource
-transfer (`wasm_component_resource_transfer_owned_resource`), borrowed handle
-repurposing (`wasm_component_resource_repurpose_borrowed_handle`), and
-structural eq-bound matching (`remap_resource_type_idx_for_state` with
-canonical_type_idx comparison) are all implemented.
+### Remaining resource gaps
+
+The remaining items are centered on public host API completeness and broader lifecycle enforcement rather than the core runtime mechanisms:
 
 ## 8. Nested core runtime support is complete
 
@@ -863,7 +833,6 @@ This fork is already useful for:
 It is still not a complete basis for:
 
 - broad imported component-function lowering/adapters with memory-backed shapes
-- complete resource-heavy component APIs with full borrow/lend semantics
 - broad WASI Preview 2 style application execution
 
 ## 12. Overall assessment
@@ -877,4 +846,4 @@ If this feature is described as:
 
 The right maturity label today is:
 
-> **A substantial but still partial component runtime: public host APIs, full scalar / string / list / tuple-record / enum / flags / option / result / variant canon-lift and canon-lower calls through the component-value API, host-provided component-function imports for the same subset, first-class composite value semantics with type-id tracking, field construction, field extraction, and type introspection, imported `resource.new` and resource-inside-composite support, runtime values, value imports/exports, start execution slices, operational local/imported resource lifecycle, borrowed-parameter tracking, cross-instance resource transfer, nested core-runtime with all 13 section types, core type materialization, memory64 Canonical ABI, error-context types, a complete async execution engine with task lifecycle, stream/future read/write, waitable sets, error-context resources, callback dispatch, 40+ async canon builtins, GC core form parsing/validation (rectype, subtype, structtype, arraytype, functype), and table/memory/global core instance imports are all implemented; full support is still blocked on general `memory`/`realloc` host-canon-opts for lowered functions, remaining public host API gaps, full resource borrow/lend semantics, and OS thread spawning.**
+> **A substantial but still partial component runtime: public host APIs, full scalar / string / list / tuple-record / enum / flags / option / result / variant canon-lift and canon-lower calls through the component-value API, host-provided component-function imports for the same subset, first-class composite value semantics with type-id tracking, field construction, field extraction, and type introspection, imported `resource.new` and resource-inside-composite support, runtime values, value imports/exports, start execution slices, operational local/imported resource lifecycle, cross-instance resource transfer, borrowed handle repurposing, eq-bound matching, borrowed-parameter tracking, nested core-runtime with all 13 section types, core type materialization, memory64 Canonical ABI, error-context types, a complete async execution engine with task lifecycle, stream/future read/write, waitable sets, error-context resources, callback dispatch, 40+ async canon builtins, GC core form parsing/validation (rectype, subtype, structtype, arraytype, functype), and table/memory/global core instance imports are all implemented; full support is still blocked on general `memory`/`realloc` host-canon-opts for lowered functions, remaining public host API gaps, and OS thread spawning.**
