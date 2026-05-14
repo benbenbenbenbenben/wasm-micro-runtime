@@ -10,6 +10,8 @@
 #include "wasm_exec_env.h"
 #include <string.h>
 
+static os_thread_local_attribute uint32 tls_current_task_id = 0;
+
 bool
 wasm_component_async_engine_create(
     WASMComponentAsyncEngine **engine_out,
@@ -354,7 +356,7 @@ wasm_component_async_poll_task(
 
     task = &engine->tasks[task_idx];
     task->state = WASM_COMP_ASYNC_TASK_RUNNING;
-    engine->current_task_id = task_id;
+    tls_current_task_id = task_id;
     os_mutex_unlock(&engine->lock);
 
     call_ok = wasm_runtime_call_component_values(
@@ -363,7 +365,7 @@ wasm_component_async_poll_task(
         task->num_args, task->args);
 
     os_mutex_lock(&engine->lock);
-    engine->current_task_id = UINT32_MAX;
+    tls_current_task_id = 0;
 
     task->state = call_ok ? WASM_COMP_ASYNC_TASK_COMPLETED
                           : WASM_COMP_ASYNC_TASK_FAILED;
@@ -1106,9 +1108,9 @@ wasm_component_async_get_context_value(
     WASMComponentAsyncEngine *engine,
     uint32 ctx_idx)
 {
-    if (!engine || engine->current_task_id == 0)
+    if (!engine || tls_current_task_id == 0)
         return 0;
-    int32 idx = find_task_index(engine, engine->current_task_id);
+    int32 idx = find_task_index(engine, tls_current_task_id);
     if (idx < 0) return 0;
     WASMComponentAsyncTask *task = &engine->tasks[idx];
     if (ctx_idx < task->context_count)
@@ -1122,9 +1124,9 @@ wasm_component_async_set_context_value(
     uint32 ctx_idx,
     uint32 value)
 {
-    if (!engine || engine->current_task_id == 0)
+    if (!engine || tls_current_task_id == 0)
         return;
-    int32 idx = find_task_index(engine, engine->current_task_id);
+    int32 idx = find_task_index(engine, tls_current_task_id);
     if (idx < 0) return;
     WASMComponentAsyncTask *task = &engine->tasks[idx];
     if (ctx_idx >= task->context_count) {
@@ -1146,9 +1148,9 @@ bool
 wasm_component_async_is_task_cancelled(
     WASMComponentAsyncEngine *engine)
 {
-    if (!engine || engine->current_task_id == 0)
+    if (!engine || tls_current_task_id == 0)
         return false;
-    int32 idx = find_task_index(engine, engine->current_task_id);
+    int32 idx = find_task_index(engine, tls_current_task_id);
     if (idx < 0) return false;
     return engine->tasks[idx].cancellation_requested;
 }

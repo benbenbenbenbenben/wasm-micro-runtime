@@ -120,7 +120,6 @@ typedef struct WASMComponentAsyncEngine {
     uint32 next_waitable_set_id;
     bool dispatching_callback;
     bool backpressure_enabled;
-    uint32 current_task_id;
     korp_mutex lock;
     WASMComponentAsyncThreadEntry *threads;
     uint32 thread_capacity;
